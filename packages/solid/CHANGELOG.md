@@ -1,5 +1,14 @@
 # solid-js
 
+## 2.0.0-beta.14
+
+### Patch Changes
+
+- Add store return tuple type aliases and harden store draft writes against prototype pollution keys.
+- Updated dependencies [79e246e]
+- Updated dependencies
+  - @solidjs/signals@2.0.0-beta.14
+
 ## 2.0.0-beta.13
 
 ### Patch Changes

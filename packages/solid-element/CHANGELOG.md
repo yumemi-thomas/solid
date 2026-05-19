@@ -1,5 +1,18 @@
 # solid-element
 
+## 2.0.0-beta.14
+
+### Patch Changes
+
+- d2c423d: Fix `solid-element` owner marker lookup so nested custom elements can inherit context from ancestor host markers as well as assigned slot markers.
+- adbdab3: Register custom element render roots for delegated events so handlers inside shadow DOM render roots fire correctly.
+- Updated dependencies [adbdab3]
+- Updated dependencies [153e80f]
+- Updated dependencies
+- Updated dependencies [adbdab3]
+  - @solidjs/web@2.0.0-beta.14
+  - solid-js@2.0.0-beta.14
+
 ## 2.0.0-beta.13
 
 ### Patch Changes

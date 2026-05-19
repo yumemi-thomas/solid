@@ -1,5 +1,14 @@
 # @solidjs/h
 
+## 2.0.0-beta.14
+
+### Patch Changes
+
+- Updated dependencies [adbdab3]
+- Updated dependencies [153e80f]
+- Updated dependencies [adbdab3]
+  - @solidjs/web@2.0.0-beta.14
+
 ## 2.0.0-beta.13
 
 ### Patch Changes

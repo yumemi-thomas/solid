@@ -13,7 +13,8 @@
     "rendering-example": "0.0.0",
     "@solidjs/signals": "0.13.13",
     "sierpinski-example": "0.0.0",
-    "todos-example": "0.0.0"
+    "todos-example": "0.0.0",
+    "migrating-element-example": "0.0.0"
   },
   "changesets": [
     "afraid-queens-divide",
@@ -26,6 +27,8 @@
     "bright-waves-dance",
     "brown-paws-speak",
     "bump-dom-expressions-next-10",
+    "bump-dom-expressions-next-12",
+    "bump-dom-expressions-next-13",
     "bump-dom-expressions-next-22",
     "bump-dom-expressions-next-3-and-sld",
     "bump-dom-expressions-next-4",
@@ -50,11 +53,14 @@
     "fix-derived-manual-writes",
     "fix-disposed-owner-leak-via-sibling-chain",
     "fix-dynamic-hydration-key-alignment",
+    "fix-element-owner-markers",
+    "fix-element-shadow-delegation",
     "fix-flow-hydration-key-alignment",
     "fix-hydration-and-signals-baseline",
     "fix-insert-sibling-rerender",
     "fix-keyed-show-strict-read",
     "fix-lazy-hydration-without-loading",
+    "fix-loading-boundary-stale-flatten",
     "fix-loading-hydration-settled-ref",
     "fix-loading-on-prop",
     "fix-loading-refresh-fallback",
@@ -104,6 +110,7 @@
     "option-a-mid-transition-observability",
     "owned-non-lazy-memo-autodispose",
     "perfect-spies-pretend",
+    "port-store-return-security",
     "purple-mayflies-give",
     "redesign-refresh-targets",
     "refactor-ssr-stream-blocking",
@@ -148,6 +155,7 @@
     "update-signals-0-13-8",
     "update-signals-bugfix-baseline",
     "violet-stingrays-end",
-    "warm-doors-flow"
+    "warm-doors-flow",
+    "web-portal-delegation-containers"
   ]
 }

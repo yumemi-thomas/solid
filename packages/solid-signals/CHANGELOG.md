@@ -1,5 +1,12 @@
 # @solidjs/signals
 
+## 2.0.0-beta.14
+
+### Patch Changes
+
+- 79e246e: Fix Loading boundary child flattening so settled async memo reads converge with `latest()`.
+- Add store return tuple type aliases and harden store draft writes against prototype pollution keys.
+
 ## 2.0.0-beta.13
 
 ### Patch Changes
