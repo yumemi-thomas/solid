@@ -41,13 +41,13 @@ describe("Testing Basics", () => {
     disposer();
   });
 
-  test("isPending guard mode lets top-level initial async hold render", async () => {
+  test("isPending lets top-level initial async hold render", async () => {
     const localDiv = document.createElement("div");
     let resolveData!: (value: string) => void;
 
     const disposer = render(() => {
       const data = createMemo(() => new Promise<string>(r => (resolveData = r)));
-      return <button disabled={isPending(data, true)}>{data()}</button>;
+      return <button disabled={isPending(data)}>{data()}</button>;
     }, localDiv);
 
     expect(localDiv.innerHTML).toBe("");
@@ -131,10 +131,7 @@ describe("Testing Loading", () => {
     localDispose();
   });
 
-  async function expectRejectedRevalidation(
-    pendingTarget: "count" | "memo",
-    localDiv: HTMLDivElement
-  ) {
+  async function expectRejectedRevalidation(localDiv: HTMLDivElement) {
     let increment!: () => void;
     const requests: Array<{ resolve: () => void }> = [];
 
@@ -150,7 +147,7 @@ describe("Testing Loading", () => {
       return (
         <div
           style={{
-            opacity: isPending(pendingTarget === "count" ? count : fetchedString) ? 0.5 : 1
+            opacity: isPending(count) ? 0.5 : 1
           }}
         >
           <span>{count()}</span>
@@ -191,12 +188,55 @@ describe("Testing Loading", () => {
 
   test("isPending on an upstream signal clears after async rejection (issue #2700)", async () => {
     const localDiv = document.createElement("div");
-    await expectRejectedRevalidation("count", localDiv);
+    await expectRejectedRevalidation(localDiv);
   });
 
   test("Errored shows the latest async error after repeated rejections (issue #2701)", async () => {
     const localDiv = document.createElement("div");
-    await expectRejectedRevalidation("memo", localDiv);
+    let increment!: () => void;
+    const requests: Array<{ resolve: () => void }> = [];
+
+    const localDispose = render(() => {
+      const [count, setCount] = createSignal(0);
+      increment = () => setCount(x => x + 1);
+      const fetchedString = createMemo(async () => {
+        const value = count();
+        await new Promise<void>(resolve => requests.push({ resolve }));
+        throw `Fetch error for ${value}`;
+      });
+
+      return (
+        <div>
+          <span>{count()}</span>
+          <Errored fallback={e => String(e())}>
+            <Loading fallback="loading">
+              <span>{fetchedString()}</span>
+            </Loading>
+          </Errored>
+        </div>
+      );
+    }, localDiv);
+
+    flush();
+    expect(localDiv.textContent).toBe("0loading");
+
+    requests[0].resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(localDiv.textContent).toBe("0Fetch error for 0");
+
+    increment();
+    flush();
+    expect(localDiv.textContent).toBe("0Fetch error for 0");
+
+    requests[1].resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(localDiv.textContent).toBe("1Fetch error for 1");
+
+    localDispose();
   });
 
   test("on prop treats component value as the boundary key", async () => {
@@ -356,6 +396,86 @@ describe("Testing Loading", () => {
     await Promise.resolve();
     flush();
     expect(localDiv.innerHTML).toBe("Page b: value-b");
+    localDispose();
+  });
+
+  test("isPending falls back only for newly mounted attribute branches", async () => {
+    let setPage!: (value: "a" | "b") => void;
+    let setVersion!: (value: number) => void;
+    const localDiv = document.createElement("div");
+    let current!: { promise: Promise<void>; resolve: () => void };
+
+    const nextDeferred = () => {
+      let resolve!: () => void;
+      current = {
+        promise: new Promise<void>(r => (resolve = r)),
+        resolve
+      };
+    };
+
+    nextDeferred();
+
+    const localDispose = render(() => {
+      const [page, _setPage] = createSignal<"a" | "b">("a");
+      const [version, _setVersion] = createSignal(0);
+      setPage = _setPage;
+      setVersion = _setVersion;
+      const source = createMemo(async () => {
+        const currentPage = page();
+        const currentVersion = version();
+        await current.promise;
+        return `value-${currentPage}-${currentVersion}`;
+      });
+
+      return (
+        <Show when={page()} keyed>
+          {currentPage => (
+            <Loading fallback={<button disabled>loading</button>}>
+              <button disabled={isPending(source)}>
+                Page {currentPage}: {source()}
+              </button>
+            </Loading>
+          )}
+        </Show>
+      );
+    }, localDiv);
+
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("loading");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(true);
+
+    current.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("Page a: value-a-0");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(false);
+
+    nextDeferred();
+    setVersion(1);
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("Page a: value-a-0");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(true);
+
+    current.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("Page a: value-a-1");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(false);
+
+    nextDeferred();
+    setPage("b");
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("loading");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(true);
+
+    current.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(localDiv.firstElementChild!.textContent).toBe("Page b: value-b-1");
+    expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(false);
     localDispose();
   });
 

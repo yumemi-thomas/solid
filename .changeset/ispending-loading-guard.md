@@ -4,4 +4,4 @@
 "@solidjs/web": patch
 ---
 
-Add an opt-in `isPending(fn, true)` render guard mode that lets pending reads follow the Loading path.
+Make `isPending(fn)` perform the read it checks, so pending indicators subscribe naturally and ownerful async reads participate in Loading/SSR readiness.

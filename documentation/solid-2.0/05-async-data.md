@@ -67,9 +67,9 @@ This is useful for route-level or key-level transitions where you don't want to 
 
 ### `isPending(fn)` (stale-while-revalidating queries)
 
-`isPending` answers: “Does this expression currently have pending async work while also having a usable stale value?”
+`isPending` answers: “Does this read currently touch pending async work?”
 
-This means `isPending` is **false on the Loading path** (there is no stale value for that branch yet, and the pending subtree isn’t producing UI). It becomes useful once a branch has rendered content and you want to show “refreshing…” indicators during revalidation without replacing the whole subtree with a spinner again.
+`isPending` performs the read you pass it and returns whether any value read by that function is currently pending. Because it is a read, its placement matters: reading async data can participate in Loading/SSR readiness, while reading upstream state only observes that state's own pending transition.
 
 ```js
 const users = createMemo(() => fetchUsers());
@@ -87,13 +87,11 @@ return (
 );
 ```
 
-The intent is to replace `.loading`-style flags that belong to a specific primitive (`createResource`) with something that works for any expression.
-
-Render guards sometimes need to read the same async expression they are guarding. Pass `true` as the second argument to let a pending read follow the Loading path instead of being treated as `false`:
+The intent is to replace `.loading`-style flags that belong to a specific primitive (`createResource`) with something that works for any expression. Since the expression is read normally, the same primitive can guard interactive controls that depend on async data:
 
 ```jsx
 <Loading fallback={<button disabled>Loading...</button>}>
-  <button disabled={isPending(user, true)}>Save</button>
+  <button disabled={isPending(user)}>Save</button>
 </Loading>
 ```
 
@@ -101,10 +99,10 @@ This only works when the expression passed to `isPending` actually reaches the a
 
 ```jsx
 // While a lower subtree is loading this is still false: `id` itself is not pending.
-isPending(id, true);
+isPending(id);
 ```
 
-This is the preferred protection for interactive controls that would otherwise read async data before it is ready: make the control's rendered disabled state read the same async source with `isPending(fn, true)`, and provide a disabled Loading fallback for the Loading path.
+This is the preferred protection for interactive controls that would otherwise read async data before it is ready: make the control's rendered disabled state read the same async source with `isPending(fn)`, and provide a disabled Loading fallback for the Loading path.
 
 ### `latest(fn)` (peek at in-flight values)
 
@@ -176,7 +174,7 @@ const user = createMemo(() => fetchUser(id()));
 <Show when={isPending(() => user())}>Refreshing...</Show>
 ```
 
-Remember: `isPending` is **false** on the Loading path (there's no stale value for that branch yet). It only becomes true during revalidation.
+Remember: `isPending(fn)` actively reads `fn`. If that read is not ready yet, it follows the same `Loading` path as reading the value directly. Put pending indicators under the boundary that should own initial fallback UI; after the value has resolved once, `isPending` is useful for inline revalidation indicators.
 
 #### `resource.refetch` → `refresh()`
 

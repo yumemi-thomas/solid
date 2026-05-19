@@ -330,7 +330,7 @@ See [RFC 05 — createResource migration](05-async-data.md#createresource--async
 ### Initial loading vs revalidation: `Loading` vs `isPending`
 
 - **`Loading`**: initial “not ready yet” UI boundary.
-- **`isPending`**: “stale while revalidating” indicator; **false during the initial `Loading` fallback**.
+- **`isPending(fn)`**: active pending read for the exact expression in `fn`; it follows the same not-ready path as reading the value directly, so place it under the `Loading` boundary that should own initial fallback UI.
 
 ```jsx
 const listPending = () => isPending(() => users() || posts());

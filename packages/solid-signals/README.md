@@ -107,9 +107,8 @@ const data = createMemo(async () => {
   return response.json();
 });
 
-// Check async state during revalidation
-isPending(data); // true while stale data is visible and newer data is pending
-isPending(data, true); // follows the Loading path for render guards
+// Check async state for this read
+isPending(data); // true while this read touches pending async work
 latest(data); // last resolved value
 ```
 

@@ -84,7 +84,7 @@ export let foundPending = false;
 export let latestReadActive = false;
 export let context: Owner | null = null;
 export let currentOptimisticLane: OptimisticLane | null = null;
-let pendingCheckLoadingPath = false;
+let pendingCheckSources: Set<Signal<any> | Computed<any>> | null = null;
 
 export let snapshotCaptureActive = false;
 export let snapshotSources: Set<any> | null = null;
@@ -664,20 +664,28 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     return value as T;
   }
 
-  // Handle isPending() mode: read from _pendingSignal, set foundPending if true
+  // Handle isPending() mode: collect pending state while preserving normal read semantics.
   if (pendingCheckActive) {
     const firewall = (el as FirewallSignal<any>)._firewall;
     const prevCheck = pendingCheckActive;
     pendingCheckActive = false;
+    let c = context;
+    if ((c as Root)?._root) c = (c as Root)._parentComputed;
     const owner = firewall || (el as Computed<any>);
-    if (
-      pendingCheckLoadingPath &&
-      owner._statusFlags & STATUS_PENDING &&
-      owner._statusFlags & STATUS_UNINITIALIZED
-    ) {
-      let c = context;
-      if ((c as Root)?._root) c = (c as Root)._parentComputed;
-      if (c && tracking) link(el, c as Computed<any>);
+    const pendingComputed = el as Partial<Computed<unknown>>;
+    if (typeof pendingComputed._fn === "function") {
+      const comp = el as Computed<unknown>;
+      if (comp._flags & REACTIVE_LAZY) {
+        comp._flags &= ~REACTIVE_LAZY;
+        recompute(comp as Computed<any>, true);
+      } else if (comp._flags & REACTIVE_DISPOSED) {
+        recompute(comp as Computed<any>, true);
+      } else {
+        updateIfNecessary(comp);
+      }
+    }
+    if (c && owner._statusFlags & STATUS_PENDING && owner._statusFlags & STATUS_UNINITIALIZED) {
+      if (tracking && el !== c) link(el, c as Computed<any>);
       pendingCheckActive = prevCheck;
       throw owner._error;
     }
@@ -688,17 +696,14 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
       ) {
         foundPending = true;
       }
-      let c = context;
-      if ((c as Root)?._root) c = (c as Root)._parentComputed;
+      collectPendingSources(el);
+      collectPendingSources(firewall);
       if (c && tracking) link(el, c as Computed<any>);
-      read(getPendingSignal(el));
-      read(getPendingSignal(firewall));
     } else {
-      if (read(getPendingSignal(el))) foundPending = true;
-      if (firewall && read(getPendingSignal(firewall))) foundPending = true;
+      collectPendingSources(el);
+      if (firewall) collectPendingSources(firewall);
     }
     pendingCheckActive = prevCheck;
-    return el._value as T;
   }
 
   let c = context;
@@ -1061,6 +1066,12 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
   return el._pendingSignal;
 }
 
+function collectPendingSources(el: Signal<any> | Computed<any>): void {
+  pendingCheckSources?.add(el);
+  const owner = (el as FirewallSignal<any>)._firewall || el;
+  if (owner !== el) pendingCheckSources?.add(owner);
+}
+
 /**
  * Compute whether a node is in "pending" state.
  * Pending means: has stale data while new data is loading.
@@ -1069,6 +1080,12 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
 function computePendingState(el: Signal<any> | Computed<any>): boolean {
   const comp = el as Computed<any>;
   const firewall = (el as FirewallSignal<any>)._firewall;
+  if (el._parentSource) {
+    const parent = el._parentSource as Computed<any>;
+    if (parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED))
+      return true;
+    return el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED);
+  }
   if (firewall && el._pendingValue !== NOT_PENDING) {
     return !firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING);
   }
@@ -1187,10 +1204,8 @@ export function latest<T>(fn: () => T): T {
  *
  * Useful for showing inline transition indicators alongside the previous
  * value (rather than swapping to a `<Loading>` fallback).
- *
- * Pass `true` as the second argument for render guards that directly read an
- * async source. If the source is on the Loading path for that read, the
- * pending read follows that path instead of being treated as `false`.
+ * Because `fn` is read normally, `isPending` participates in Loading/SSR
+ * readiness the same way the read itself would.
  *
  * @example
  * ```tsx
@@ -1198,32 +1213,47 @@ export function latest<T>(fn: () => T): T {
  *
  * <button disabled={pending()}>{pending() ? "Saving…" : "Save"}</button>
  *
- * <Loading fallback={<button disabled>Loading...</button>}>
- *   <button disabled={isPending(() => user(), true)}>Save</button>
- * </Loading>
+ * <button disabled={isPending(() => user())}>Save</button>
  * ```
  */
-export function isPending(fn: () => any, loading?: boolean): boolean {
+export function isPending(fn: () => any): boolean {
   const prevPendingCheck = pendingCheckActive;
-  const prevPendingCheckLoadingPath = pendingCheckLoadingPath;
   const prevFoundPending = foundPending;
-  const checkLoading = loading === true;
+  const prevPendingCheckSources = pendingCheckSources;
   pendingCheckActive = true;
-  pendingCheckLoadingPath = checkLoading;
   foundPending = false;
+  pendingCheckSources = new Set();
+  const collectPending = () => {
+    pendingCheckActive = false;
+    const prevStrictRead = __DEV__ ? strictRead : false;
+    if (__DEV__) strictRead = false;
+    try {
+      pendingCheckSources!.forEach(source => {
+        if (read(getPendingSignal(source))) foundPending = true;
+      });
+    } finally {
+      if (__DEV__) strictRead = prevStrictRead;
+      pendingCheckActive = true;
+    }
+  };
   try {
     fn();
+    collectPending();
     return foundPending;
   } catch (e) {
-    if (checkLoading && e instanceof NotReadyError) throw e;
+    collectPending();
+    if (e instanceof NotReadyError) {
+      if (foundPending && !(e.source?._statusFlags & STATUS_UNINITIALIZED)) return true;
+      if (context) throw e;
+    }
     // When a thunk throws during pending check (e.g., accessing undefined values
     // from uninitialized async memos), return foundPending. The error indicates
     // we're reading from something not yet ready.
     return foundPending;
   } finally {
     pendingCheckActive = prevPendingCheck;
-    pendingCheckLoadingPath = prevPendingCheckLoadingPath;
     foundPending = prevFoundPending;
+    pendingCheckSources = prevPendingCheckSources;
   }
 }
 

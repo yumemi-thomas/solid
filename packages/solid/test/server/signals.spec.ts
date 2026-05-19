@@ -456,18 +456,18 @@ describe("Server utilities", () => {
     expect(isPending(() => 42)).toBe(false);
   });
 
-  test("isPending loading mode propagates NotReadyError", () => {
+  test("isPending propagates NotReadyError from ownerful initial async reads", () => {
     const source = Promise.resolve();
     expect(() =>
       isPending(() => {
         throw new NotReadyError(source);
-      }, true)
+      })
     ).toThrow(NotReadyError);
-    expect(
+    expect(() =>
       isPending(() => {
         throw new NotReadyError(source);
       })
-    ).toBe(false);
+    ).toThrow(NotReadyError);
   });
 
   test("latest passes through", () => {

@@ -632,6 +632,50 @@ describe("Projection isPending behavior", () => {
     expect(finalResult?.value).toBe(20);
   });
 
+  it("isPending reports projection pending with stale value", async () => {
+    const [$x, setX] = createSignal(1);
+    let proj;
+    const results: { pending: boolean; value: number }[] = [];
+
+    createRoot(() => {
+      proj = createProjection(
+        async draft => {
+          const v = $x();
+          await Promise.resolve();
+          draft.value = v * 10;
+        },
+        { value: 0 }
+      );
+
+      createRenderEffect(
+        () => [isPending(() => proj.value), proj.value] as const,
+        ([pending, value]) => {
+          results.push({ pending, value });
+        }
+      );
+    });
+
+    flush();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(proj.value).toBe(10);
+
+    results.length = 0;
+    setX(2);
+    flush();
+
+    const pendingResult = results.find(r => r.pending && r.value === 10);
+    expect(pendingResult).toBeDefined();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(proj.value).toBe(20);
+    const finalResult = results[results.length - 1];
+    expect(finalResult?.pending).toBe(false);
+    expect(finalResult?.value).toBe(20);
+  });
+
   it("isPending with refresh() and subscribed effect", async () => {
     let runCount = 0;
     let proj;

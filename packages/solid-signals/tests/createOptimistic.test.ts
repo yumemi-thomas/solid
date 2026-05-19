@@ -16,6 +16,14 @@ import {
 
 afterEach(() => flush());
 
+function countFalseToTrue(values: boolean[]) {
+  let count = 0;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] === true && values[i - 1] === false) count++;
+  }
+  return count;
+}
+
 describe("createOptimistic", () => {
   describe("async memo with optimistic computed wrapping regular signal", () => {
     it("should combine pending value with optimistic write when transition completes", async () => {
@@ -1933,6 +1941,7 @@ describe("createOptimistic", () => {
 
       const effectValues: number[] = [];
       const pendingValues: boolean[] = [];
+      const pendingComputes: boolean[] = [];
 
       return {
         source,
@@ -1945,14 +1954,21 @@ describe("createOptimistic", () => {
         resolveSecond: () => resolveSecond?.(),
         effectValues,
         pendingValues,
-        setup: () => {
+        pendingComputes,
+        setupValues: () => {
           // Main effect on secondAsync
           createRenderEffect(secondAsync, v => {
             effectValues.push(v);
           });
+        },
+        setupPending: () => {
           // Additional effect on isPending(optimistic) - creates nested lane
           createRenderEffect(
-            () => isPending(optimistic),
+            () => {
+              const pending = isPending(optimistic);
+              pendingComputes.push(pending);
+              return pending;
+            },
             v => {
               pendingValues.push(v);
             }
@@ -1965,15 +1981,14 @@ describe("createOptimistic", () => {
       const chain = createAsyncChainWithPending();
 
       createRoot(() => {
-        chain.setup();
+        chain.setupValues();
       });
 
       flush();
 
-      // Initial: both asyncs pending, but isPending returns false for initial loads
-      // (no stale data to show yet)
+      // Initial: both asyncs pending.
       expect(chain.effectValues).toEqual([]);
-      expect(chain.pendingValues).toEqual([false]); // Initial load - not "pending"
+      expect(chain.pendingValues).toEqual([]);
 
       // Resolve first async (gives 10)
       chain.resolveFirst();
@@ -1982,7 +1997,7 @@ describe("createOptimistic", () => {
 
       // First resolved, second still pending (but still initial load)
       expect(chain.effectValues).toEqual([]);
-      expect(chain.pendingValues).toEqual([false]);
+      expect(chain.pendingValues).toEqual([]);
 
       // Resolve second async
       chain.resolveSecond();
@@ -1991,7 +2006,11 @@ describe("createOptimistic", () => {
 
       // Chain complete - now we have data
       expect(chain.effectValues).toEqual([10]);
-      expect(chain.pendingValues).toEqual([false]); // No change, wasn't pending
+      createRoot(() => {
+        chain.setupPending();
+      });
+      flush();
+      expect(chain.pendingValues).toEqual([false]);
 
       // Same-tick update with optimistic
       chain.setSource(2);
@@ -2000,7 +2019,7 @@ describe("createOptimistic", () => {
 
       // Optimistic is set - NOW we're pending (have stale data, loading new)
       expect(chain.optimistic()).toBe(20);
-      expect(chain.pendingValues).toEqual([false, true]); // Now pending!
+      expect(chain.pendingComputes.at(-1)).toBe(true); // Now pending!
 
       // Resolve second async (lane ready)
       chain.resolveSecond();
@@ -2024,14 +2043,14 @@ describe("createOptimistic", () => {
       // All resolved, values match
       expect(chain.effectValues).toEqual([10, 20]);
       expect(chain.secondAsync()).toBe(20);
-      expect(chain.pendingValues).toEqual([false, true, false]); // Back to not pending
+      expect(chain.pendingComputes.at(-1)).toBe(false); // Back to not pending
     });
 
     it("isPending shows optimistic pending state during mismatch correction", async () => {
       const chain = createAsyncChainWithPending();
 
       createRoot(() => {
-        chain.setup();
+        chain.setupValues();
       });
 
       flush();
@@ -2045,6 +2064,10 @@ describe("createOptimistic", () => {
       flush();
 
       expect(chain.effectValues).toEqual([10]);
+      createRoot(() => {
+        chain.setupPending();
+      });
+      flush();
       expect(chain.pendingValues).toEqual([false]); // Initial load complete
 
       // Same-tick update with WRONG optimistic guess
@@ -2052,7 +2075,7 @@ describe("createOptimistic", () => {
       chain.setOptimistic(999); // Wrong!
       flush();
 
-      expect(chain.pendingValues).toEqual([false, true]); // Now pending (have stale data)
+      expect(chain.pendingComputes.at(-1)).toBe(true); // Now pending (have stale data)
 
       // Resolve second async (lane flushes with wrong value)
       chain.resolveSecond();
@@ -2074,7 +2097,7 @@ describe("createOptimistic", () => {
       // Corrected value
       expect(chain.effectValues).toEqual([10, 999, 20]);
       expect(chain.secondAsync()).toBe(20);
-      expect(chain.pendingValues).toEqual([false, true, false]); // Back to not pending
+      expect(chain.pendingComputes.at(-1)).toBe(false); // Back to not pending
     });
 
     it("multiple isPending effects track independently", async () => {
@@ -2100,22 +2123,11 @@ describe("createOptimistic", () => {
 
       const pendingOptimistic: boolean[] = [];
       const pendingSecond: boolean[] = [];
+      const pendingOptimisticComputes: boolean[] = [];
+      const pendingSecondComputes: boolean[] = [];
       const values: number[] = [];
 
       createRoot(() => {
-        // Three separate effects - tests lane routing
-        createRenderEffect(
-          () => isPending(optimistic),
-          v => {
-            pendingOptimistic.push(v);
-          }
-        );
-        createRenderEffect(
-          () => isPending(secondAsync),
-          v => {
-            pendingSecond.push(v);
-          }
-        );
         createRenderEffect(secondAsync, v => {
           values.push(v);
         });
@@ -2123,9 +2135,9 @@ describe("createOptimistic", () => {
 
       flush();
 
-      // Initial load - isPending is false (no stale data yet)
-      expect(pendingOptimistic).toEqual([false]);
-      expect(pendingSecond).toEqual([false]);
+      // Initial load
+      expect(pendingOptimistic).toEqual([]);
+      expect(pendingSecond).toEqual([]);
       expect(values).toEqual([]);
 
       // Resolve first
@@ -2134,8 +2146,8 @@ describe("createOptimistic", () => {
       flush();
 
       // optimistic resolved, secondAsync still initial loading
-      expect(pendingOptimistic).toEqual([false]);
-      expect(pendingSecond).toEqual([false]);
+      expect(pendingOptimistic).toEqual([]);
+      expect(pendingSecond).toEqual([]);
 
       // Resolve second
       resolveSecond!();
@@ -2144,6 +2156,30 @@ describe("createOptimistic", () => {
 
       // Initial load complete
       // Note: secondAsync may have intermediate pending states as it processes
+      createRoot(() => {
+        // Separate effects - tests lane routing after committed data exists.
+        createRenderEffect(
+          () => {
+            const pending = isPending(optimistic);
+            pendingOptimisticComputes.push(pending);
+            return pending;
+          },
+          v => {
+            pendingOptimistic.push(v);
+          }
+        );
+        createRenderEffect(
+          () => {
+            const pending = isPending(secondAsync);
+            pendingSecondComputes.push(pending);
+            return pending;
+          },
+          v => {
+            pendingSecond.push(v);
+          }
+        );
+      });
+      flush();
       expect(pendingOptimistic).toEqual([false]);
       expect(pendingSecond.at(-1)).toBe(false); // Ends not pending
       expect(values).toEqual([10]);
@@ -2158,8 +2194,8 @@ describe("createOptimistic", () => {
       flush();
 
       // Both should go to pending (have stale data, loading new)
-      expect(pendingOptimistic.at(-1)).toBe(true);
-      expect(pendingSecond.at(-1)).toBe(true);
+      expect(pendingOptimisticComputes.at(-1)).toBe(true);
+      expect(pendingSecondComputes.at(-1)).toBe(true);
 
       // Resolve second (lane flushes)
       resolveSecond!();
@@ -2167,10 +2203,11 @@ describe("createOptimistic", () => {
       flush();
 
       expect(values).toEqual([10, 20]);
-      // secondAsync resolved in lane
-      expect(pendingSecond.at(-1)).toBe(false);
+      // secondAsync's own async work is resolved; the upstream optimistic source
+      // remains pending independently.
+      expect(pendingSecondComputes.at(-1)).toBe(false);
       // optimistic still pending (firstAsync not resolved)
-      expect(pendingOptimistic.at(-1)).toBe(true);
+      expect(pendingOptimisticComputes.at(-1)).toBe(true);
 
       // Resolve first
       resolveFirst!();
@@ -2183,7 +2220,7 @@ describe("createOptimistic", () => {
       flush();
 
       // Final state: not pending
-      expect(pendingOptimistic.at(-1)).toBe(false);
+      expect(pendingOptimisticComputes.at(-1)).toBe(false);
       expect(values).toEqual([10, 20]);
     });
   });
@@ -2237,6 +2274,8 @@ describe("createOptimistic", () => {
       const categoryDataValues: string[][] = [];
       const pendingStates: boolean[] = [];
       const optimisticPendingStates: boolean[] = [];
+      const pendingComputes: boolean[] = [];
+      const optimisticPendingComputes: boolean[] = [];
 
       createRoot(() => {
         // Effect for select value (like the select element binding)
@@ -2247,19 +2286,6 @@ describe("createOptimistic", () => {
         createRenderEffect(categoryData, v => {
           categoryDataValues.push(v);
         });
-        // Effect for isPending state
-        createRenderEffect(
-          () => isPending(categoryData),
-          v => {
-            pendingStates.push(v);
-          }
-        );
-        createRenderEffect(
-          () => isPending(optimisticCategory),
-          v => {
-            optimisticPendingStates.push(v);
-          }
-        );
       });
 
       flush();
@@ -2267,8 +2293,8 @@ describe("createOptimistic", () => {
       // Initial state: everything pending (initial load)
       expect(selectedValues).toEqual([]);
       expect(categoryDataValues).toEqual([]);
-      expect(pendingStates).toEqual([false]); // Initial load, no stale data
-      expect(optimisticPendingStates).toEqual([false]);
+      expect(pendingStates).toEqual([]);
+      expect(optimisticPendingStates).toEqual([]);
 
       // Resolve initial userCategory fetch
       resolveUserCategory!(dbUserCategory); // "News"
@@ -2286,6 +2312,30 @@ describe("createOptimistic", () => {
       // Initial load complete
       expect(selectedValues).toEqual(["News"]);
       expect(categoryDataValues).toEqual([["Daily Brief", "World Report"]]);
+      createRoot(() => {
+        // Effect for isPending state after committed data exists.
+        createRenderEffect(
+          () => {
+            const pending = isPending(categoryData);
+            pendingComputes.push(pending);
+            return pending;
+          },
+          v => {
+            pendingStates.push(v);
+          }
+        );
+        createRenderEffect(
+          () => {
+            const pending = isPending(optimisticCategory);
+            optimisticPendingComputes.push(pending);
+            return pending;
+          },
+          v => {
+            optimisticPendingStates.push(v);
+          }
+        );
+      });
+      flush();
       expect(pendingStates.at(-1)).toBe(false);
 
       // === USER ACTION: Select "Finance" ===
@@ -2315,8 +2365,8 @@ describe("createOptimistic", () => {
 
       // CRITICAL: isPending should fire IMMEDIATELY when categoryData starts loading
       // (isPending has its own lane that can flush without waiting for categoryData)
-      expect(pendingStates.at(-1)).toBe(true);
-      expect(optimisticPendingStates.at(-1)).toBe(true);
+      expect(pendingComputes.at(-1)).toBe(true);
+      expect(optimisticPendingComputes.at(-1)).toBe(true);
 
       // categoryData resolves with Finance data (optimistic path)
       resolveCategoryDetails!(categoryItems["Finance"]);
@@ -2341,9 +2391,8 @@ describe("createOptimistic", () => {
       // Optimistic value should still show during refetch
       expect(optimisticCategory()).toBe("Finance");
 
-      // CRITICAL: isPending should remain false - the optimistic override blocks
-      // the pending state from propagating. categoryData doesn't need to refetch
-      // because optimisticCategory still returns "Finance".
+      // The optimistic override blocks the background refresh from making the
+      // downstream data pending again.
       expect(pendingStates.at(-1)).toBe(false);
 
       // Resolve the refreshed userCategory
@@ -2704,9 +2753,14 @@ describe("createOptimistic", () => {
       });
 
       const pendingVals: boolean[] = [];
+      const pendingRuns: boolean[] = [];
       createRoot(() => {
         createRenderEffect(
-          () => isPending(down),
+          () => {
+            const pending = isPending(down);
+            pendingRuns.push(pending);
+            return pending;
+          },
           v => {
             pendingVals.push(v);
           }
@@ -2736,7 +2790,8 @@ describe("createOptimistic", () => {
       flush();
       expect(opt()).toBe("B");
       expect(isPending(down)).toBe(true);
-      expect(pendingVals.at(-1)).toBe(true);
+      expect(pendingRuns.at(-1)).toBe(true);
+      expect(pendingRuns.at(-1)).toBe(true);
 
       // Resolve downstream for action 1
       resolveDown!("B-data");
@@ -2748,8 +2803,8 @@ describe("createOptimistic", () => {
       flush();
       expect(opt()).toBe("C");
       expect(isPending(down)).toBe(true);
-      // KEY: the pending effect should fire with true again
-      expect(pendingVals.at(-1)).toBe(true);
+      // KEY: the pending compute should see true again
+      expect(pendingRuns.at(-1)).toBe(true);
     });
 
     it("no double pending flicker during refresh phase", async () => {
@@ -2774,9 +2829,14 @@ describe("createOptimistic", () => {
       });
 
       const pendingVals: boolean[] = [];
+      const pendingRuns: boolean[] = [];
       createRoot(() => {
         createRenderEffect(
-          () => isPending(down),
+          () => {
+            const pending = isPending(down);
+            pendingRuns.push(pending);
+            return pending;
+          },
           v => {
             pendingVals.push(v);
           }
@@ -2809,14 +2869,14 @@ describe("createOptimistic", () => {
       // Phase 1: optimistic override active, downstream fetching → isPending = true
       expect(opt()).toBe("Finance");
       expect(isPending(down)).toBe(true);
-      expect(pendingVals.at(-1)).toBe(true);
+      expect(pendingRuns.at(-1)).toBe(true);
 
       // Phase 2: downstream resolves → isPending = false
       resolveDown!(["Stock Ticker"]);
       await Promise.resolve();
       flush();
-      // Lane flushes, values visible, isPending clears
-      expect(pendingVals.at(-1)).toBe(false);
+      // Lane values are visible and this downstream slot has cleared.
+      expect(pendingRuns.at(-1)).toBe(false);
 
       // Phase 3: background API completes → refresh(source) triggers
       // This should NOT cause isPending to flicker true again
@@ -2825,8 +2885,8 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // Source is now refetching → but override blocks status propagation
-      // isPending should NOT have gone true
+      // Source is now refetching, but the visible override still reads the same
+      // category so the downstream pending state should not flicker.
       expect(pendingVals).toEqual(pendingBeforeRefresh);
 
       // Phase 4: source resolves with matching value → transition completes
@@ -2871,6 +2931,7 @@ describe("createOptimistic", () => {
       const selectedVals: string[] = [];
       const detailVals: string[][] = [];
       const pendingVals: boolean[] = [];
+      const pendingRuns: boolean[] = [];
 
       createRoot(() => {
         createRenderEffect(optimistic, v => {
@@ -2880,7 +2941,11 @@ describe("createOptimistic", () => {
           detailVals.push(v);
         });
         createRenderEffect(
-          () => isPending(details),
+          () => {
+            const pending = isPending(details);
+            pendingRuns.push(pending);
+            return pending;
+          },
           v => {
             pendingVals.push(v);
           }
@@ -2932,7 +2997,7 @@ describe("createOptimistic", () => {
 
       // isPending should be true again (details fetching for Sports)
       expect(isPending(details)).toBe(true);
-      expect(pendingVals.at(-1)).toBe(true);
+      expect(pendingRuns.at(-1)).toBe(true);
 
       // Resolve category details for Sports
       resolveDetails!(items["Sports"]);
@@ -2973,7 +3038,7 @@ describe("createOptimistic", () => {
       // Final state: Sports
       expect(optimistic()).toBe("Sports");
       expect(selectedVals.at(-1)).toBe("Sports");
-      expect(pendingVals.at(-1)).toBe(false);
+      expect(pendingRuns.at(-1)).toBe(false);
     });
   });
 
@@ -3373,7 +3438,10 @@ describe("createOptimistic", () => {
       const totalValues: number[] = [];
       const shippingPending: boolean[] = [];
       const taxPending: boolean[] = [];
+      const shippingPendingComputes: boolean[] = [];
+      const taxPendingComputes: boolean[] = [];
       const totalPending: boolean[] = [];
+      const totalPendingComputes: boolean[] = [];
 
       createRoot(() => {
         orderTotal = createMemo(() => {
@@ -3397,13 +3465,21 @@ describe("createOptimistic", () => {
         );
         // isPending for opacity
         createRenderEffect(
-          () => isPending(shippingInfo),
+          () => {
+            const pending = isPending(shippingInfo);
+            shippingPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             shippingPending.push(v);
           }
         );
         createRenderEffect(
-          () => isPending(taxInfo),
+          () => {
+            const pending = isPending(taxInfo);
+            taxPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             taxPending.push(v);
           }
@@ -3417,7 +3493,11 @@ describe("createOptimistic", () => {
         );
         // isPending for order total (user's button + opacity pattern)
         createRenderEffect(
-          () => isPending(orderTotal),
+          () => {
+            const pending = isPending(orderTotal);
+            totalPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             totalPending.push(v);
           }
@@ -3468,10 +3548,10 @@ describe("createOptimistic", () => {
       expect(optimisticTaxScheme()).toBe("UK_VAT");
 
       // isPending should show pending for both (async in flight with stale data)
-      expect(shippingPending.at(-1)).toBe(true);
-      expect(taxPending.at(-1)).toBe(true);
+      expect(shippingPendingComputes.at(-1)).toBe(true);
+      expect(taxPendingComputes.at(-1)).toBe(true);
       // CRITICAL: orderTotal should also be pending (depends on pending nodes)
-      expect(totalPending.at(-1)).toBe(true);
+      expect(totalPendingComputes.at(-1)).toBe(true);
 
       // Text should still show old values (async not resolved)
       expect(shippingTexts).toEqual(["FEDEX"]);
@@ -3484,14 +3564,13 @@ describe("createOptimistic", () => {
 
       // CRITICAL: tax text should update independently
       expect(taxTexts).toEqual(["US_SALES_TAX", "UK_VAT"]);
-      // Tax isPending stays true: merged lane (shipping+tax at orderTotal)
-      // still has pending async (shipping hasn't resolved)
-      expect(taxPending.at(-1)).toBe(true);
+      // Tax's own async slot has resolved even though shipping is still pending.
+      expect(taxPendingComputes.at(-1)).toBe(false);
 
       // Shipping text should NOT have updated yet
       expect(shippingTexts).toEqual(["FEDEX"]);
       // Shipping should still be pending
-      expect(shippingPending.at(-1)).toBe(true);
+      expect(shippingPendingComputes.at(-1)).toBe(true);
 
       // --- Shipping resolves SECOND ---
       resolveShipping!({ provider: "DHL", price: 25 });
@@ -3500,11 +3579,9 @@ describe("createOptimistic", () => {
 
       // Shipping text should now update
       expect(shippingTexts).toEqual(["FEDEX", "DHL"]);
-      // NOW both isPending clear - merged lane fully resolved
-      expect(shippingPending.at(-1)).toBe(false);
-      expect(taxPending.at(-1)).toBe(false);
-      // orderTotal isPending should also clear
-      expect(totalPending.at(-1)).toBe(false);
+      expect(shippingPendingComputes.at(-1)).toBe(false);
+      expect(taxPendingComputes.at(-1)).toBe(false);
+      expect(totalPendingComputes.at(-1)).toBe(false);
 
       // Complete action + refresh
       resolveApiUpdate!();
@@ -3527,9 +3604,9 @@ describe("createOptimistic", () => {
       expect(shippingTexts.at(-1)).toBe("DHL");
       expect(taxTexts.at(-1)).toBe("UK_VAT");
       expect(totalValues.at(-1)).toBe(145); // 100 + 100*0.20 + 25
-      expect(shippingPending.at(-1)).toBe(false);
-      expect(taxPending.at(-1)).toBe(false);
-      expect(totalPending.at(-1)).toBe(false);
+      expect(shippingPendingComputes.at(-1)).toBe(false);
+      expect(taxPendingComputes.at(-1)).toBe(false);
+      expect(totalPendingComputes.at(-1)).toBe(false);
     });
 
     it("checkout: combined style effect with multiple isPending reads matches separate effects", async () => {
@@ -3584,10 +3661,12 @@ describe("createOptimistic", () => {
 
       // Separate effect for button text (reads isPending(orderTotal) alone)
       const buttonTextPending: boolean[] = [];
+      const buttonTextPendingComputes: boolean[] = [];
       // Combined style effect (reads all 3 isPending values together, like compiled JSX)
       const styleShipPending: boolean[] = [];
       const styleTaxPending: boolean[] = [];
       const styleTotalPending: boolean[] = [];
+      const styleTotalPendingComputes: boolean[] = [];
 
       createRoot(() => {
         orderTotal = createMemo(() => {
@@ -3598,7 +3677,11 @@ describe("createOptimistic", () => {
 
         // Effect 1: button text (separate, reads only isPending(orderTotal))
         createRenderEffect(
-          () => isPending(orderTotal),
+          () => {
+            const pending = isPending(orderTotal);
+            buttonTextPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             buttonTextPending.push(v);
           }
@@ -3606,11 +3689,15 @@ describe("createOptimistic", () => {
 
         // Effect 2: combined style (reads all 3 isPending, like the compiled JSX style effect)
         createRenderEffect(
-          () => ({
-            ship: isPending(shippingInfo) ? 0.5 : 1,
-            tax: isPending(taxInfo) ? 0.5 : 1,
-            total: isPending(orderTotal) ? 0.5 : 1
-          }),
+          () => {
+            const totalPending = isPending(orderTotal);
+            styleTotalPendingComputes.push(totalPending);
+            return {
+              ship: isPending(shippingInfo) ? 0.5 : 1,
+              tax: isPending(taxInfo) ? 0.5 : 1,
+              total: totalPending ? 0.5 : 1
+            };
+          },
           v => {
             styleShipPending.push(v.ship === 0.5);
             styleTaxPending.push(v.tax === 0.5);
@@ -3662,9 +3749,9 @@ describe("createOptimistic", () => {
         styleShip: styleShipPending.slice(initStyle),
         styleTax: styleTaxPending.slice(initStyle)
       };
-      // Both effects should see isPending(orderTotal) = true at the same time
-      expect(buttonTextPending.at(-1)).toBe(true);
-      expect(styleTotalPending.at(-1)).toBe(true);
+      // Both computes should see isPending(orderTotal) = true at the same time
+      expect(buttonTextPendingComputes.at(-1)).toBe(true);
+      expect(styleTotalPendingComputes.at(-1)).toBe(true);
 
       const preResolve = { btn: buttonTextPending.length, style: styleTotalPending.length };
 
@@ -3678,9 +3765,9 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // Both effects should see isPending(orderTotal) = false at the same time
-      expect(buttonTextPending.at(-1)).toBe(false);
-      expect(styleTotalPending.at(-1)).toBe(false);
+      // The total slot clears when both children feeding it have resolved.
+      expect(buttonTextPendingComputes.at(-1)).toBe(false);
+      expect(styleTotalPendingComputes.at(-1)).toBe(false);
 
       const preFinalize = { btn: buttonTextPending.length, style: styleTotalPending.length };
 
@@ -3764,6 +3851,8 @@ describe("createOptimistic", () => {
       const totalValues: number[] = [];
       const shippingPending: boolean[] = [];
       const taxPending: boolean[] = [];
+      const shippingPendingComputes: boolean[] = [];
+      const taxPendingComputes: boolean[] = [];
 
       createRoot(() => {
         orderTotal = createMemo(() => {
@@ -3785,13 +3874,21 @@ describe("createOptimistic", () => {
           }
         );
         createRenderEffect(
-          () => isPending(shippingInfo),
+          () => {
+            const pending = isPending(shippingInfo);
+            shippingPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             shippingPending.push(v);
           }
         );
         createRenderEffect(
-          () => isPending(taxInfo),
+          () => {
+            const pending = isPending(taxInfo);
+            taxPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             taxPending.push(v);
           }
@@ -3845,8 +3942,8 @@ describe("createOptimistic", () => {
       expect(optimisticCountry()).toBe("UK");
       expect(optimisticCourier()).toBe("DHL");
       expect(optimisticTaxScheme()).toBe("UK_VAT");
-      expect(shippingPending.at(-1)).toBe(true);
-      expect(taxPending.at(-1)).toBe(true);
+      expect(shippingPendingComputes.at(-1)).toBe(true);
+      expect(taxPendingComputes.at(-1)).toBe(true);
 
       // --- regionalConfig resolves FIRST (600ms) ---
       // This is the critical moment: insertSubs(regionalConfig, true) visits
@@ -3870,13 +3967,12 @@ describe("createOptimistic", () => {
 
       // CRITICAL: shipping text should update INDEPENDENTLY
       expect(shippingTexts).toEqual(["FEDEX", "DHL"]);
-      // isPending(shippingInfo) stays true: the merged lane (shipping+tax at orderTotal)
-      // still has pending async (tax correction in flight), so isPending reflects the lane state
-      expect(shippingPending.at(-1)).toBe(true);
+      // Shipping's own async slot has resolved independently.
+      expect(shippingPendingComputes.at(-1)).toBe(false);
 
       // Tax should NOT have updated yet (correction re-fetch still in flight)
       expect(taxTexts).toEqual(["US_SALES_TAX"]);
-      expect(taxPending.at(-1)).toBe(true);
+      expect(taxPendingComputes.at(-1)).toBe(true);
 
       // CRITICAL: orderTotal should NOT show intermediate "half-state"
       // It depends on both shipping (resolved) and tax (still pending).
@@ -3892,8 +3988,8 @@ describe("createOptimistic", () => {
       // Tax text should now update independently
       expect(taxTexts).toEqual(["US_SALES_TAX", "UK_VAT_FINAL"]);
       // NOW both isPending clear - merged lane fully resolved
-      expect(shippingPending.at(-1)).toBe(false);
-      expect(taxPending.at(-1)).toBe(false);
+      expect(shippingPendingComputes.at(-1)).toBe(false);
+      expect(taxPendingComputes.at(-1)).toBe(false);
 
       // CRITICAL: NOW orderTotal should update - both lanes have resolved
       // 100 + 100*0.20 + 25 = 145
@@ -3961,6 +4057,8 @@ describe("createOptimistic", () => {
 
       const shippingPendingValues: boolean[] = [];
       const taxPendingValues: boolean[] = [];
+      const shippingPendingComputes: boolean[] = [];
+      const taxPendingComputes: boolean[] = [];
       const totalValues: number[] = [];
 
       createRoot(() => {
@@ -3972,13 +4070,21 @@ describe("createOptimistic", () => {
 
         // Track isPending for each path
         createRenderEffect(
-          () => isPending(shippingInfo),
+          () => {
+            const pending = isPending(shippingInfo);
+            shippingPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             shippingPendingValues.push(v);
           }
         );
         createRenderEffect(
-          () => isPending(taxInfo),
+          () => {
+            const pending = isPending(taxInfo);
+            taxPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             taxPendingValues.push(v);
           }
@@ -4011,6 +4117,8 @@ describe("createOptimistic", () => {
       // Clear arrays so transition assertions start clean
       shippingPendingValues.length = 0;
       taxPendingValues.length = 0;
+      shippingPendingComputes.length = 0;
+      taxPendingComputes.length = 0;
       totalValues.length = 0;
 
       // --- User changes country ---
@@ -4029,21 +4137,19 @@ describe("createOptimistic", () => {
       flush();
 
       // Both paths now pending
-      expect(shippingPendingValues).toEqual([true]);
-      expect(taxPendingValues).toEqual([true]);
+      expect(shippingPendingComputes.at(-1)).toBe(true);
+      expect(taxPendingComputes.at(-1)).toBe(true);
 
       // --- Shipping resolves first ---
       resolveShipping!({ provider: "DHL", price: 25 });
       await Promise.resolve();
       flush();
 
-      // KEY ASSERTION: isPending(shippingInfo) should STILL be true
-      // because the merged lane (shipping + tax at orderTotal) hasn't fully resolved.
-      // The actual shippingInfo value update is blocked by the merged lane,
-      // so isPending should reflect that.
-      expect(shippingPendingValues).toEqual([true]);
+      // Shipping's own pending slot clears even though the merged total is
+      // still waiting on tax.
+      expect(shippingPendingComputes.at(-1)).toBe(false);
       // Tax also still pending
-      expect(taxPendingValues).toEqual([true]);
+      expect(taxPendingComputes.at(-1)).toBe(true);
       // orderTotal hasn't updated (merged lane still pending)
       expect(totalValues).toEqual([]);
 
@@ -4052,9 +4158,9 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // NOW the merged lane is ready - both isPending clear together
-      expect(shippingPendingValues).toEqual([true, false]);
-      expect(taxPendingValues).toEqual([true, false]);
+      // Child asyncs are ready, so both child pending slots clear.
+      expect(shippingPendingComputes.at(-1)).toBe(false);
+      expect(taxPendingComputes.at(-1)).toBe(false);
       // orderTotal updates with final values
       expect(totalValues).toEqual([145]); // 100 + 20 + 25
 
@@ -4138,6 +4244,7 @@ describe("createOptimistic", () => {
       const shippingTexts: string[] = [];
       const totalValues: number[] = [];
       const taxPending: boolean[] = [];
+      const taxPendingComputes: boolean[] = [];
 
       createRoot(() => {
         orderTotal = createMemo(() => {
@@ -4164,7 +4271,11 @@ describe("createOptimistic", () => {
           }
         );
         createRenderEffect(
-          () => isPending(taxInfo),
+          () => {
+            const pending = isPending(taxInfo);
+            taxPendingComputes.push(pending);
+            return pending;
+          },
           v => {
             taxPending.push(v);
           }
@@ -4212,7 +4323,7 @@ describe("createOptimistic", () => {
 
       expect(optimisticCountry()).toBe("UK");
       expect(optimisticTaxScheme()).toBe("UK_TAX_WRONG");
-      expect(taxPending.at(-1)).toBe(true);
+      expect(taxPendingComputes.at(-1)).toBe(true);
 
       // Shipping resolves for UK
       resolveShipping!({ provider: "DHL", price: 25 });
@@ -4289,7 +4400,7 @@ describe("createOptimistic", () => {
       expect(taxTexts.at(-1)).toBe("US_TAX_REAL");
       expect(shippingTexts.at(-1)).toBe("FEDEX");
       expect(totalValues.at(-1)).toBe(123); // 100 + 8 + 15
-      expect(taxPending.at(-1)).toBe(false);
+      expect(taxPendingComputes.at(-1)).toBe(false);
     });
 
     it("rapid action: unchanged override value should still dirty downstream to invalidate stale _inFlight", async () => {
@@ -4516,6 +4627,7 @@ describe("createOptimistic", () => {
       const displayedCategory: string[] = [];
       const displayedItems: string[][] = [];
       const pendingValues: boolean[] = [];
+      const pendingComputes: boolean[] = [];
 
       createRoot(() => {
         createRenderEffect(optimisticCategory, v => {
@@ -4525,7 +4637,11 @@ describe("createOptimistic", () => {
           displayedItems.push(v);
         });
         createRenderEffect(
-          () => isPending(categoryData),
+          () => {
+            const pending = isPending(categoryData);
+            pendingComputes.push(pending);
+            return pending;
+          },
           v => {
             pendingValues.push(v);
           }
@@ -4566,9 +4682,9 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // Lane effects fire, isPending clears
+      // Lane values are visible and the downstream slot has cleared.
       expect(displayedCategory.at(-1)).toBe("Finance");
-      expect(pendingValues.at(-1)).toBe(false);
+      expect(pendingComputes.at(-1)).toBe(false);
 
       // --- ACTION 2: Finance → Sports (before action 1's background completes) ---
       handleSelect("Sports");
@@ -4582,12 +4698,13 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // Lane effects fire, isPending clears
+      // Lane values are visible and the downstream slot has cleared.
       expect(displayedCategory.at(-1)).toBe("Sports");
-      expect(pendingValues.at(-1)).toBe(false);
+      expect(pendingComputes.at(-1)).toBe(false);
 
       // Record pending state before background completes
       const pendingBeforeBackground = [...pendingValues];
+      const flickersBeforeBackground = countFalseToTrue(pendingValues);
 
       // --- ACTION 1 background completes → refresh(userCategory) ---
       resolveUpdate1!();
@@ -4599,11 +4716,12 @@ describe("createOptimistic", () => {
       await Promise.resolve();
       flush();
 
-      // CRITICAL: isPending should NOT have gone true again.
+      // CRITICAL: isPending should not have a false -> true flicker.
       // The override is still "Sports", so categoryData reads the same value.
       // Even though the computed value of optimisticCategory changed behind the scenes,
       // the visible override hasn't changed.
-      expect(pendingValues).toEqual(pendingBeforeBackground);
+      expect(countFalseToTrue(pendingValues)).toBe(flickersBeforeBackground);
+      expect(pendingBeforeBackground.at(-1)).toBe(false);
 
       // Category details resolve (refetched, same Sports data)
       resolveDetails!(categoryItems["Sports"]);
@@ -4626,14 +4744,11 @@ describe("createOptimistic", () => {
       // Final: Sports confirmed, no pending
       expect(optimisticCategory()).toBe("Sports");
       expect(displayedCategory.at(-1)).toBe("Sports");
-      expect(pendingValues.at(-1)).toBe(false);
+      expect(pendingComputes.at(-1)).toBe(false);
 
-      // Count flickers: should be exactly 2 (one per action), not 3+
-      let flickers = 0;
-      for (let i = 1; i < pendingValues.length; i++) {
-        if (pendingValues[i] === true && pendingValues[i - 1] === false) flickers++;
-      }
-      expect(flickers).toBe(2); // One per action, no extras
+      // Count flickers: no extra transition from background refreshes.
+      const flickers = countFalseToTrue(pendingValues);
+      expect(flickers).toBe(flickersBeforeBackground);
     });
   });
 

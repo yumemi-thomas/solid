@@ -1584,6 +1584,45 @@ describe("createOptimisticStore", () => {
       expect(latest(() => state!.data)).toBe(999);
     });
 
+    it("isPending preserves async optimistic store overrides", async () => {
+      const [$id, setId] = createSignal(1);
+      let state: { data: number };
+      let setState: (fn: (s: { data: number }) => void) => void;
+      const values: { data: number; pending: boolean }[] = [];
+
+      createRoot(() => {
+        [state, setState] = createOptimisticStore(
+          async (s: { data: number }) => {
+            const id = $id();
+            await Promise.resolve();
+            s.data = id * 10;
+          },
+          { data: 0 }
+        );
+
+        createRenderEffect(
+          () => ({ data: state.data, pending: isPending(() => state.data) }),
+          value => {
+            values.push(value);
+          }
+        );
+      });
+
+      flush();
+      await new Promise(r => setTimeout(r, 0));
+      expect(state!.data).toBe(10);
+      expect(values.at(-1)).toEqual({ data: 10, pending: false });
+
+      setId(2);
+      setState!(s => {
+        s.data = 999;
+      });
+      flush();
+
+      expect(state!.data).toBe(999);
+      expect(values).toContainEqual({ data: 999, pending: true });
+    });
+
     it("isPending stays true for generator-backed optimistic stores while override is visible", async () => {
       let state: { data: number };
       let setState: (fn: (s: { data: number }) => void) => void;

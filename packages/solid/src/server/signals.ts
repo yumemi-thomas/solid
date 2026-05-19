@@ -1562,12 +1562,12 @@ export function resolve<T>(fn: () => T): Promise<T> {
   throw new Error("resolve is not implemented on the server");
 }
 
-export function isPending(fn: () => any, loading?: boolean): boolean {
+export function isPending(fn: () => any): boolean {
   try {
     fn();
     return false;
   } catch (err) {
-    if (!(err instanceof NotReadyError) || loading) throw err;
+    if (err instanceof NotReadyError) throw err;
     return false;
   }
 }

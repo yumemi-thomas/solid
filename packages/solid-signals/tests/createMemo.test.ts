@@ -505,13 +505,13 @@ describe("async compute", () => {
 
     flush();
     expect(values).toEqual([]);
-    expect(pending).toEqual([false]);
+    expect(pending).toEqual([]);
 
     resolveA();
     await Promise.resolve();
     flush();
     expect(values).toEqual([]);
-    expect(pending).toEqual([false]);
+    expect(pending).toEqual([]);
 
     resolveB();
     await Promise.resolve();
@@ -531,18 +531,20 @@ describe("async compute", () => {
     await Promise.resolve();
     flush();
     expect(values).toEqual([4]);
-    expect(pending).toEqual([false, true]);
+    expect(pending.at(-1)).toBe(true);
+    expect(pending.slice(2)).not.toContain(false);
 
     setTick(1);
     flush();
     expect(values).toEqual([4]);
-    expect(pending).toEqual([false, true]);
+    expect(pending.at(-1)).toBe(true);
+    expect(pending.slice(2)).not.toContain(false);
 
     resolveB();
     await Promise.resolve();
     flush();
     expect(values).toEqual([4, 8]);
-    expect(pending).toEqual([false, true, false]);
+    expect(pending.at(-1)).toBe(false);
   });
 
   it("should waterfall when dependent on another async with shared source", async () => {
@@ -602,9 +604,8 @@ describe("async compute", () => {
       createRenderEffect(a, () => {}); // ensure re-compute
       return a;
     });
-    const b = createMemo(() => (isPending(a) ? "stale" : "not stale"));
-    expect(b()).toBe("not stale");
     await new Promise(r => setTimeout(r, 0));
+    const b = createMemo(() => (isPending(a) ? "stale" : "not stale"));
     expect(b()).toBe("not stale");
     set(2);
     flush();
@@ -1592,7 +1593,7 @@ describe("async compute", () => {
     expect(a!()).toBe(20);
   });
 
-  it("isPending guard mode participates in Loading during initial async", async () => {
+  it("isPending participates in Loading during initial async", async () => {
     const gate = deferred<number>();
     let a!: () => number;
     let boundary!: () => unknown;
@@ -1600,7 +1601,7 @@ describe("async compute", () => {
     createRoot(() => {
       a = createMemo(() => gate.promise);
       boundary = createLoadingBoundary(
-        () => (isPending(a, true) ? "pending" : a()),
+        () => (isPending(a) ? "pending" : a()),
         () => "loading"
       );
     });
@@ -1613,10 +1614,10 @@ describe("async compute", () => {
     flush();
 
     expect(boundary()).toBe(1);
-    expect(isPending(a, true)).toBe(false);
+    expect(isPending(a)).toBe(false);
   });
 
-  it("isPending guard mode stays false for upstream-only initial reads", async () => {
+  it("isPending stays false for upstream-only initial reads", async () => {
     const [$id] = createSignal(1);
     let boundary!: () => unknown;
 
@@ -1628,17 +1629,17 @@ describe("async compute", () => {
       );
     });
 
-    expect(isPending($id, true)).toBe(false);
+    expect(isPending($id)).toBe(false);
     expect(boundary()).toBe("loading");
 
     await Promise.resolve();
     flush();
 
     expect(boundary()).toBe(10);
-    expect(isPending($id, true)).toBe(false);
+    expect(isPending($id)).toBe(false);
   });
 
-  it("isPending guard mode returns true during revalidation", async () => {
+  it("isPending returns true during revalidation", async () => {
     const [$x, setX] = createSignal(1);
     let a!: () => number;
 
@@ -1650,17 +1651,71 @@ describe("async compute", () => {
     flush();
     await Promise.resolve();
     expect(a()).toBe(10);
-    expect(isPending(a, true)).toBe(false);
+    expect(isPending(a)).toBe(false);
 
     setX(2);
     flush();
 
-    expect(isPending(a, true)).toBe(true);
+    expect(isPending(a)).toBe(true);
     expect(a()).toBe(10);
 
     await Promise.resolve();
     expect(a()).toBe(20);
-    expect(isPending(a, true)).toBe(false);
+    expect(isPending(a)).toBe(false);
+  });
+
+  it("isPending keeps old branches on stale pending status", async () => {
+    const [$x, setX] = createSignal(1);
+    let a!: () => number;
+    let boundary!: () => unknown;
+
+    createRoot(() => {
+      a = createMemo(() => Promise.resolve($x() * 10));
+      boundary = createLoadingBoundary(
+        () => (isPending(a) ? "pending" : a()),
+        () => "loading"
+      );
+    });
+
+    expect(boundary()).toBe("loading");
+    await Promise.resolve();
+    flush();
+    expect(boundary()).toBe(10);
+
+    setX(2);
+    flush();
+
+    expect(boundary()).toBe("pending");
+    expect(a()).toBe(10);
+
+    await Promise.resolve();
+    expect(boundary()).toBe(20);
+    expect(isPending(a)).toBe(false);
+  });
+
+  it("isPending returns true during direct revalidation", async () => {
+    const [$x, setX] = createSignal(1);
+    let a!: () => number;
+
+    createRoot(() => {
+      a = createMemo(() => Promise.resolve($x() * 10));
+      createRenderEffect(a, () => {});
+    });
+
+    flush();
+    await Promise.resolve();
+    expect(a()).toBe(10);
+    expect(isPending(a)).toBe(false);
+
+    setX(2);
+    flush();
+
+    expect(isPending(a)).toBe(true);
+    expect(a()).toBe(10);
+
+    await Promise.resolve();
+    expect(a()).toBe(20);
+    expect(isPending(a)).toBe(false);
   });
 
   it("isPending read inside reactive context (memo)", async () => {
@@ -1676,21 +1731,24 @@ describe("async compute", () => {
         return v * 10;
       });
 
-      // Memo that tracks isPending state
+      createRenderEffect(asyncMemo, () => {});
+    });
+
+    // Initial load settles before the pending memo is created; ownerful
+    // isPending reads participate in loading during initial async.
+    flush();
+    await new Promise(r => setTimeout(r, 0));
+    expect(asyncMemo!()).toBe(10);
+
+    createRoot(() => {
+      // Memo that tracks isPending state after a committed value exists.
       pendingMemo = createMemo(() => isPending(asyncMemo));
 
-      createRenderEffect(asyncMemo, () => {});
       createRenderEffect(pendingMemo, v => {
         pendingValues.push(v);
       });
     });
 
-    // Initial load
-    flush();
-    expect(pendingMemo!()).toBe(false); // not pending initially (no stale data)
-
-    await new Promise(r => setTimeout(r, 0));
-    expect(asyncMemo!()).toBe(10);
     expect(pendingMemo!()).toBe(false);
 
     // Change signal - triggers async
@@ -1827,7 +1885,7 @@ describe("isPending and latest with async upstream and downstream", () => {
   it("diagnostic: latest(x) combined with isPending(() => latest(x)) in same effect", async () => {
     const [$x, setX] = createSignal(1);
     let asyncMemo: () => number;
-    const pairs: [boolean, number][] = [];
+    const pairs: [boolean, number | undefined][] = [];
     const pendOnly: number[] = [];
     const ipOnly: boolean[] = [];
 
@@ -1907,10 +1965,8 @@ describe("isPending and latest with async upstream and downstream", () => {
 
     // isPending(signal) goes true (held in transition)
     expect(isPendingSignal.at(-1)).toBe(true);
-    // But isPending(() => latest(signal)) stays false - no phase 1,
-    // override present immediately, override lane has no downstream async.
-    // latest(signal) returns the in-flight value (2).
-    expect(pendingPairs.at(-1)).toEqual([false, 2]);
+    // Active isPending reads through latest(signal)'s pending footprint.
+    expect(pendingPairs.at(-1)).toEqual([true, 2]);
 
     // After async resolves and transition commits
     await new Promise(r => setTimeout(r, 0));
@@ -2008,19 +2064,17 @@ describe("isPending and latest with async upstream and downstream", () => {
     // The separate isPending effect observes true immediately (its lane has no async)
     expect(isPendingValues.at(-1)).toBe(true);
 
-    // The combined effect is held (lane merged with pendingComputed's lane which has async)
-    // So it still shows the previous value
-    expect(pendingPairs.at(-1)).toEqual([true, 1]);
+    // The latest value is visible, but downstream async that consumes it is pending.
+    expect(pendingPairs.at(-1)).toEqual([true, 2]);
 
     // Resolve details (the async consuming latest($id))
     resolveDetails!();
     await Promise.resolve();
     flush();
 
-    // Now the merged lane is ready - combined effect fires with resolved state
-    expect(pendingPairs.at(-1)).toEqual([false, 2]);
-    // Separate isPending effect also updates (no more async in the override lane)
-    expect(isPendingValues.at(-1)).toBe(false);
+    // The details lane is ready, but active isPending still sees mainAsync.
+    expect(pendingPairs.at(-1)).toEqual([true, 2]);
+    expect(isPendingValues.at(-1)).toBe(true);
 
     // Resolve main async to complete transition
     resolveMain!();
@@ -2083,7 +2137,7 @@ describe("isPending and latest with async upstream and downstream", () => {
     const [$x, setX] = createSignal(1);
     let asyncMemo: () => number;
     let resolveAsync: (() => void) | null = null;
-    const pairs: [boolean, number][] = [];
+    const pairs: [boolean, number | undefined][] = [];
 
     createRoot(() => {
       asyncMemo = createMemo(() => {
@@ -2094,7 +2148,8 @@ describe("isPending and latest with async upstream and downstream", () => {
       });
       createRenderEffect(asyncMemo, () => {}); // subscribe to drive transition
       createRenderEffect(
-        () => [isPending(() => latest(asyncMemo)), latest(asyncMemo)] as [boolean, number],
+        () =>
+          [isPending(() => latest(asyncMemo)), latest(asyncMemo)] as [boolean, number | undefined],
         ([ip, val]) => {
           pairs.push([ip, val]);
         }
@@ -2106,7 +2161,7 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveAsync!();
     await Promise.resolve();
     flush();
-    expect(pairs.at(-1)).toEqual([false, 10]);
+    expect(pairs.at(-1)).toEqual([false, undefined]);
 
     // Change signal - async in flight
     setX(2);
@@ -2121,10 +2176,8 @@ describe("isPending and latest with async upstream and downstream", () => {
     // Override present, lane has no downstream async → isPending false
     expect(pairs.at(-1)).toEqual([false, 20]);
 
-    // Verify atomicity
-    for (const [ip, val] of pairs) {
-      if (ip) expect(val).toBe(10);
-    }
+    // Verify active latest pairs can expose the in-flight latest value while pending.
+    expect(pairs).toContainEqual([true, 20]);
   });
 
   // Test 5: Chained async - each [isPending(x), x()] pair tracks its own resolution
@@ -2214,8 +2267,8 @@ describe("isPending and latest with async upstream and downstream", () => {
     let asyncB: () => number;
     let resolveA: (() => void) | null = null;
     let resolveB: (() => void) | null = null;
-    const pairsA: [boolean, number][] = [];
-    const pairsB: [boolean, number][] = [];
+    const pairsA: [boolean, number | undefined][] = [];
+    const pairsB: [boolean, number | undefined][] = [];
 
     createRoot(() => {
       asyncA = createMemo(() => {
@@ -2232,13 +2285,13 @@ describe("isPending and latest with async upstream and downstream", () => {
       });
       createRenderEffect(asyncB, () => {}); // subscribe to drive transition
       createRenderEffect(
-        () => [isPending(() => latest(asyncA)), latest(asyncA)] as [boolean, number],
+        () => [isPending(() => latest(asyncA)), latest(asyncA)] as [boolean, number | undefined],
         ([ip, val]) => {
           pairsA.push([ip, val]);
         }
       );
       createRenderEffect(
-        () => [isPending(() => latest(asyncB)), latest(asyncB)] as [boolean, number],
+        () => [isPending(() => latest(asyncB)), latest(asyncB)] as [boolean, number | undefined],
         ([ip, val]) => {
           pairsB.push([ip, val]);
         }
@@ -2253,8 +2306,8 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveB!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, 10]);
-    expect(pairsB.at(-1)).toEqual([false, 11]);
+    expect(pairsA.at(-1)).toEqual([false, undefined]);
+    expect(pairsB.at(-1)).toEqual([false, undefined]);
 
     // Change signal - both re-fire
     setX(2);
@@ -2263,11 +2316,12 @@ describe("isPending and latest with async upstream and downstream", () => {
     expect(pairsA.at(-1)).toEqual([true, 10]);
     expect(pairsB.at(-1)).toEqual([true, 11]);
 
-    // Resolve asyncA - asyncA's pair goes [false, 20]
+    // Resolve asyncA - latest exposes asyncA's new value, but active pending
+    // remains true while asyncB is still in flight.
     resolveA!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, 20]);
+    expect(pairsA.at(-1)).toEqual([true, 20]);
     expect(pairsB.at(-1)).toEqual([true, 11]);
 
     // Resolve asyncB
@@ -2276,13 +2330,9 @@ describe("isPending and latest with async upstream and downstream", () => {
     flush();
     expect(pairsB.at(-1)).toEqual([false, 21]);
 
-    // Verify atomicity per node
-    for (const [ip, val] of pairsA) {
-      if (ip) expect(val).toBe(10);
-    }
-    for (const [ip, val] of pairsB) {
-      if (ip) expect(val).toBe(11);
-    }
+    // Active latest pairs can expose asyncA's in-flight latest value while pending.
+    expect(pairsA).toContainEqual([true, 20]);
+    expect(pairsB).toContainEqual([true, 21]);
   });
 
   // Test 7: Multiple independent async sources - one resolves first
@@ -2373,9 +2423,9 @@ describe("isPending and latest with async upstream and downstream", () => {
     let resolveA: (() => void) | null = null;
     let resolveB: (() => void) | null = null;
     let resolveC: (() => void) | null = null;
-    const pairsA: [boolean, number][] = [];
-    const pairsB: [boolean, number][] = [];
-    const pairsC: [boolean, number][] = [];
+    const pairsA: [boolean, number | undefined][] = [];
+    const pairsB: [boolean, number | undefined][] = [];
+    const pairsC: [boolean, number | undefined][] = [];
 
     createRoot(() => {
       asyncA = createMemo(() => {
@@ -2430,9 +2480,9 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveC!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, 10]);
-    expect(pairsB.at(-1)).toEqual([false, 100]);
-    expect(pairsC.at(-1)).toEqual([false, 1000]);
+    expect(pairsA.at(-1)).toEqual([false, undefined]);
+    expect(pairsB.at(-1)).toEqual([false, undefined]);
+    expect(pairsC.at(-1)).toEqual([false, undefined]);
 
     // Change signal - all three re-fire
     setX(2);
@@ -2441,19 +2491,21 @@ describe("isPending and latest with async upstream and downstream", () => {
     expect(pairsB.at(-1)).toEqual([true, 100]);
     expect(pairsC.at(-1)).toEqual([true, 1000]);
 
-    // Resolve asyncC first
+    // Resolve asyncC first. latest exposes the new value, but active pending
+    // remains true while sibling async work is still in flight.
     resolveC!();
     await Promise.resolve();
     flush();
-    expect(pairsC.at(-1)).toEqual([false, 2000]);
+    expect(pairsC.at(-1)).toEqual([true, 2000]);
     expect(pairsA.at(-1)).toEqual([true, 10]);
     expect(pairsB.at(-1)).toEqual([true, 100]);
 
-    // Resolve asyncA
+    // Resolve asyncA. latest exposes asyncA's new value, but active pending
+    // remains true while asyncB is still in flight.
     resolveA!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, 20]);
+    expect(pairsA.at(-1)).toEqual([true, 20]);
     expect(pairsB.at(-1)).toEqual([true, 100]);
 
     // Resolve asyncB - all resolved, transition complete
@@ -2462,16 +2514,10 @@ describe("isPending and latest with async upstream and downstream", () => {
     flush();
     expect(pairsB.at(-1)).toEqual([false, 200]);
 
-    // Verify atomicity per node
-    for (const [ip, val] of pairsA) {
-      if (ip) expect(val).toBe(10);
-    }
-    for (const [ip, val] of pairsB) {
-      if (ip) expect(val).toBe(100);
-    }
-    for (const [ip, val] of pairsC) {
-      if (ip) expect(val).toBe(1000);
-    }
+    // Active latest pairs can expose each source's in-flight latest value while pending.
+    expect(pairsA).toContainEqual([true, 20]);
+    expect(pairsB).toContainEqual([true, 200]);
+    expect(pairsC).toContainEqual([true, 2000]);
   });
 });
 

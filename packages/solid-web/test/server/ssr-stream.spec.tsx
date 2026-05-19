@@ -104,7 +104,7 @@ describe("SSR Streaming — No Loading Boundary", () => {
   test("top-level isPending guard follows Loading path without boundary", async () => {
     function App() {
       const data = createMemo(async () => asyncValue("Ready", 20));
-      return <button disabled={isPending(data, true)}>{data()}</button>;
+      return <button disabled={isPending(data)}>{data()}</button>;
     }
 
     const { shell } = await collectChunks(() => <App />);
@@ -187,7 +187,7 @@ describe("SSR Streaming — Basic Rendering", () => {
       const data = createMemo(async () => asyncValue("Ready", 20));
       return (
         <Loading fallback={<button disabled>Loading...</button>}>
-          <button disabled={isPending(data, true)}>{data()}</button>
+          <button disabled={isPending(data)}>{data()}</button>
         </Loading>
       );
     }

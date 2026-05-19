@@ -216,11 +216,8 @@ const rest = omit(props, "class", "style"); // replaces splitProps
 const user = createMemo(() => fetchUser(id()));
 // Reading user() suspends until ready; wrap in <Loading>.
 
-// "Refreshing…" indicator (false on the Loading path)
+// Pending indicator for this read; participates in Loading like the read itself.
 isPending(() => user());
-
-// Render guard: pending read follows the Loading path
-isPending(() => user(), true);
 
 // Peek at the in-flight value during a transition
 latest(id);
@@ -635,7 +632,7 @@ If your training data is 1.x, these are the corrections. **Read this before gene
 - **Stores: setters take a draft callback** — mutate the draft in place by default. Returning a new value is shallow (array index-replace, object top-level diff); reach for it for filter/remove. Keyed reconcile is a _projection-fn_ feature, not a setter feature.
 - **`undefined` is a real value in `merge`** — it overrides rather than "skip this key".
 - **Async lives in computations** — return a Promise/AsyncIterable from `createMemo`/`createStore(fn)`/`createProjection`. Pending reads participate in `<Loading>`.
-- **`Loading` covers unresolved branches** — once content has rendered, revalidation keeps it visible. Use `isPending(() => x())` for "refreshing…" indicators, or `isPending(() => x(), true)` when a render guard should follow the Loading path. Use `<Loading on={key}>` to re-show fallback on key changes.
+- **`Loading` covers unresolved branches** — once content has rendered, revalidation keeps it visible. Use `isPending(() => x())` for pending indicators or render guards; it reads `x` and participates in Loading like that read. Use `<Loading on={key}>` to re-show fallback on key changes.
 - **No `Suspense.Provider` or single error path** — async errors flow to `<Errored>` (or effect `error`); no inline `resource.error` branching.
 - **`createRoot` is owned by parent by default** — disposed when parent disposes. To detach: `runWithOwner(null, fn)`.
 - **Refs are functions** — `ref={el => ...}`. No `useRef`-style ref objects. Compose with arrays: `ref={[a, b]}`.

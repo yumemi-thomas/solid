@@ -8,7 +8,9 @@ import {
   createSignal,
   flatten,
   flush,
+  isPending,
   NotReadyError,
+  refresh,
   untrack
 } from "../src/index.js";
 
@@ -670,6 +672,156 @@ describe("createLoadingBoundary", () => {
       await Promise.resolve();
       flush();
       expect(result).toEqual(["Page ", "b", ": ", "value-b"]);
+    });
+
+    it("shows inline pending when a keyed subtree revalidates an external async source with isPending", async () => {
+      let result: any;
+      const [$page, setPage] = createSignal("a");
+      let current = deferred<void>();
+
+      createRoot(() => {
+        const source = createMemo(async () => {
+          const page = $page();
+          await current.promise;
+          return `value-${page}`;
+        });
+        const shown = createMemo(
+          () => {
+            const page = $page();
+            return createLoadingBoundary(
+              () => ["Page ", page, ": ", isPending(source) ? "pending" : source()],
+              () => "loading"
+            );
+          },
+          { transparent: true }
+        );
+
+        mountLike(shown, value => {
+          result = value;
+        });
+      });
+
+      flush();
+      expect(result).toBe("loading");
+
+      current.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(result).toEqual(["Page ", "a", ": ", "value-a"]);
+
+      current = deferred<void>();
+      setPage("b");
+      flush();
+      expect(result).toEqual(["Page ", "b", ": ", "pending"]);
+
+      current.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(result).toEqual(["Page ", "b", ": ", "value-b"]);
+    });
+
+    it("shows inline pending when a keyed subtree only reads isPending for an updating async source", async () => {
+      let result: any;
+      const [$page, setPage] = createSignal("a");
+      let current = deferred<void>();
+
+      createRoot(() => {
+        const source = createMemo(async () => {
+          const page = $page();
+          await current.promise;
+          return `value-${page}`;
+        });
+        const shown = createMemo(
+          () => {
+            const page = $page();
+            return createLoadingBoundary(
+              () => ["Page ", page, ": ", isPending(source) ? "pending" : "ready"],
+              () => "loading"
+            );
+          },
+          { transparent: true }
+        );
+
+        mountLike(shown, value => {
+          result = value;
+        });
+      });
+
+      flush();
+      expect(result).toBe("loading");
+
+      current.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(result).toEqual(["Page ", "a", ": ", "ready"]);
+
+      current = deferred<void>();
+      setPage("b");
+      flush();
+      expect(result).toEqual(["Page ", "b", ": ", "pending"]);
+
+      current.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(result).toEqual(["Page ", "b", ": ", "ready"]);
+    });
+
+    it("publishes pending from persistent UI while a revealed branch loads the same source", async () => {
+      let indicator: unknown;
+      let branch: unknown;
+      let source!: () => Promise<string> | string | undefined;
+      const [$show, setShow] = createSignal(false);
+      let current = deferred<void>();
+
+      createRoot(() => {
+        source = createMemo(() => {
+          if ($show()) {
+            return current.promise.then(() => "Hello!");
+          }
+        });
+
+        const pending = createMemo(() => (isPending(source) ? "pending" : ""));
+        mountLike(pending, value => {
+          indicator = value;
+        });
+
+        const shown = createMemo(
+          () =>
+            $show()
+              ? createLoadingBoundary(
+                  () => source(),
+                  () => "loading"
+                )
+              : undefined,
+          { transparent: true }
+        );
+
+        mountLike(shown, value => {
+          branch = value;
+        });
+      });
+
+      flush();
+
+      current = deferred<void>();
+      setShow(true);
+      refresh(source);
+      flush();
+
+      expect(indicator).toBe("pending");
+      expect(branch).toBe("loading");
+
+      current.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+
+      expect(indicator).toBeUndefined();
+      expect(branch).toBe("Hello!");
     });
 
     it("shows fallback when a keyed subtree mounts a nested insert over an external pending async source", async () => {
