@@ -9,7 +9,9 @@ import {
   flatten,
   flush,
   isPending,
+  latest,
   NotReadyError,
+  type SourceAccessor,
   refresh,
   untrack
 } from "../src/index.js";
@@ -674,6 +676,75 @@ describe("createLoadingBoundary", () => {
       expect(result).toEqual(["Page ", "b", ": ", "value-b"]);
     });
 
+    it("settled normal and latest reads converge for async sibling memos", async () => {
+      vi.useFakeTimers();
+      try {
+        let result: any;
+        let directRead!: () => number;
+        let latestRead!: () => number;
+        let boundary!: () => any;
+        const [$og, setOg] = createSignal(553);
+
+        createRoot(() => {
+          const derived1 = createMemo(async () => {
+            const o = $og() + 1;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return o;
+          });
+          const derived2 = createMemo(async () => {
+            const o = derived1() + 1;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return o;
+          });
+          directRead = derived2;
+          latestRead = () => latest(derived2);
+          boundary = createLoadingBoundary(
+            () => [
+              "a. ",
+              createMemo(() => derived2(), { sync: true }),
+              " b. ",
+              createMemo(() => latest(derived2), { sync: true })
+            ],
+            () => "Loading..."
+          );
+
+          mountLike(boundary, value => {
+            result = value;
+          });
+        });
+
+        flush();
+        expect(result).toBe("Loading...");
+
+        await vi.advanceTimersByTimeAsync(1000);
+        flush();
+        expect(result).toBe("Loading...");
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.resolve();
+        flush();
+        expect(directRead()).toBe(555);
+        expect(latestRead()).toBe(555);
+        expect(boundary()).toEqual(["a. ", 555, " b. ", 555]);
+        expect(result).toEqual(["a. ", 555, " b. ", 555]);
+
+        setOg(x => x + 1);
+        flush();
+        expect(result).toEqual(["a. ", 555, " b. ", 555]);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        flush();
+        expect(result).toEqual(["a. ", 555, " b. ", 555]);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.resolve();
+        flush();
+        expect(result).toEqual(["a. ", 556, " b. ", 556]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("shows inline pending when a keyed subtree revalidates an external async source with isPending", async () => {
       let result: any;
       const [$page, setPage] = createSignal("a");
@@ -773,7 +844,7 @@ describe("createLoadingBoundary", () => {
     it("publishes pending from persistent UI while a revealed branch loads the same source", async () => {
       let indicator: unknown;
       let branch: unknown;
-      let source!: () => Promise<string> | string | undefined;
+      let source!: SourceAccessor<Promise<string> | string | undefined>;
       const [$show, setShow] = createSignal(false);
       let current = deferred<void>();
 

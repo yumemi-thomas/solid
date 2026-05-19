@@ -16,7 +16,6 @@ import {
   runWithOwner,
   setSignal,
   signal,
-  staleValues,
   STATUS_ERROR,
   STATUS_PENDING,
   untrack,
@@ -59,7 +58,7 @@ function createBoundChildren<T>(
   cleanup(() => parentQueue.removeChild(owner._queue!));
   return runWithOwner(owner, () => {
     const c = computed(fn);
-    return boundaryComputed(() => staleValues(() => flatten(read(c))), mask);
+    return boundaryComputed(() => flatten(read(c)), mask);
   });
 }
 

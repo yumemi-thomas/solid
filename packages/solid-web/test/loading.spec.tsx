@@ -15,6 +15,7 @@ import {
   Switch,
   Match,
   isPending,
+  latest,
   flush
 } from "solid-js";
 import { render } from "../src/index.js";
@@ -476,6 +477,62 @@ describe("Testing Loading", () => {
     flush();
     expect(localDiv.firstElementChild!.textContent).toBe("Page b: value-b-1");
     expect((localDiv.firstElementChild as HTMLButtonElement).disabled).toBe(false);
+    localDispose();
+  });
+
+  test("latest preserves sibling async text in Loading fragments", async () => {
+    const localDiv = document.createElement("div");
+    let setOg!: (value: number | ((prev: number) => number)) => number;
+    let readDirect!: () => number;
+
+    const localDispose = render(() => {
+      const [og, _setOg] = createSignal(553);
+      setOg = _setOg;
+      const derived1 = createMemo(async () => {
+        const o = og() + 1;
+        await new Promise(res => setTimeout(res, 1000));
+        return o;
+      });
+      const derived2 = createMemo(async () => {
+        const o = derived1() + 1;
+        await new Promise(res => setTimeout(res, 1000));
+        return o;
+      });
+      readDirect = derived2;
+
+      return (
+        <Loading fallback="Loading...">
+          a. {derived2()} b. {latest(derived2)}
+        </Loading>
+      );
+    }, localDiv);
+
+    flush();
+    expect(localDiv.textContent).toBe("Loading...");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    flush();
+    expect(localDiv.textContent).toBe("Loading...");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve();
+    flush();
+    expect(readDirect()).toBe(555);
+    expect(localDiv.textContent).toBe("a. 555 b. 555");
+
+    setOg(x => x + 1);
+    flush();
+    expect(localDiv.textContent).toBe("a. 555 b. 555");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    flush();
+    expect(localDiv.textContent).toBe("a. 555 b. 555");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve();
+    flush();
+    expect(localDiv.textContent).toBe("a. 556 b. 556");
+
     localDispose();
   });
 
