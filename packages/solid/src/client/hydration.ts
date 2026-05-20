@@ -8,6 +8,7 @@ import {
   isDisposed,
   getNextChildId,
   peekNextChildId,
+  createRevealOrder as coreRevealOrder,
   createMemo as coreMemo,
   createSignal as coreSignal,
   createOptimistic as coreOptimistic,
@@ -32,6 +33,7 @@ import {
   type SourceAccessor,
   type Store,
   type StoreSetter,
+  type RevealOrder,
   createOwner,
   getContext,
   setContext,
@@ -898,41 +900,39 @@ export const createSignal: {
 } = ((...args: any[]) => (_createSignal || coreSignal)(...args)) as any;
 
 /**
- * Lower-level primitive that backs the `<Errored>` flow control.
+ * Internal primitive that backs the `<Errored>` flow control.
  * Catches errors thrown inside `fn` and renders `fallback(error,
  * reset)` instead. `error` is an accessor for the latest captured error;
  * `reset()` recomputes the failing sources so the boundary can attempt to recover.
  *
- * App code should use `<Errored fallback={...}>` directly — reach for
- * this only when authoring a custom boundary component.
+ * App code should use `<Errored fallback={...}>` directly. This primitive is
+ * kept exported for renderer, test, and compatibility use, but it is not part
+ * of the recommended application authoring surface.
  *
  * **Hydration:** if the server serialized an error for this boundary,
  * the client re-throws it on the first hydration pass so `fallback`
  * renders the same content the server emitted.
  *
- * @example
- * ```tsx
- * // Custom boundary built on the primitive — adds telemetry around the
- * // canonical `<Errored>` shape.
- * function TracedErrored(props: {
- *   fallback: (e: () => unknown) => JSX.Element;
- *   children: JSX.Element;
- * }): JSX.Element {
- *   return createErrorBoundary(
- *     () => props.children,
- *     (err, reset) => {
- *       reportError(err());
- *       return props.fallback(err);
- *     }
- *   ) as unknown as JSX.Element;
- * }
- * ```
+ * @internal
  */
 export const createErrorBoundary = ((...args: any[]) =>
   (_createErrorBoundary || coreErrorBoundary)(...args)) as <U>(
   fn: () => any,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
 ) => () => unknown;
+
+/**
+ * Internal primitive that backs `<Reveal>` coordination of sibling loading
+ * boundaries. App code should use `<Reveal>` directly.
+ *
+ * @internal
+ */
+export function createRevealOrder<T>(
+  fn: () => T,
+  options?: { order?: () => RevealOrder; collapsed?: () => boolean }
+): T {
+  return coreRevealOrder(fn, options);
+}
 
 /**
  * Creates an optimistic signal — a `Signal<T>` whose writes are
@@ -1308,22 +1308,14 @@ function scheduleResumeAfterAssets(
 }
 
 /**
- * Lower-level primitive that backs the `<Loading>` component. Returns a
+ * Internal primitive that backs the `<Loading>` component. Returns a
  * computation that yields `fallback()` while async reads inside `fn` are
- * pending, and `fn()` once they have settled. Most callers should use
- * `<Loading>` directly; this is exposed for renderers and library authors.
+ * pending, and `fn()` once they have settled. App code should use `<Loading>`
+ * directly. This primitive is kept exported for renderer, test, and
+ * compatibility use, but it is not part of the recommended application
+ * authoring surface.
  *
- * @example
- * ```tsx
- * // Custom boundary component built on the primitive. App code uses
- * // `<Loading fallback={…}>` directly.
- * function MyLoading(props: { fallback: JSX.Element; children: JSX.Element }): JSX.Element {
- *   return createLoadingBoundary(
- *     () => props.children,
- *     () => props.fallback
- *   ) as unknown as JSX.Element;
- * }
- * ```
+ * @internal
  */
 export function createLoadingBoundary(
   fn: () => any,

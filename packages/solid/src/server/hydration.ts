@@ -65,14 +65,6 @@ export function ssrHandleError(err: any) {
   throw err;
 }
 
-/**
- * Tracks all resources inside a component and renders a fallback until they are all resolved
- *
- * On the server, this is SSR-aware: it handles async mode (streaming) by registering
- * fragments and resolving asynchronously, and sync mode by serializing fallback markers.
- *
- * @description https://docs.solidjs.com/reference/components/suspense
- */
 export function createLoadingBoundary(
   fn: () => any,
   fallback: () => any,
