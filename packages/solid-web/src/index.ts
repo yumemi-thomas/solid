@@ -209,12 +209,13 @@ export function Portal<T extends boolean = false, S extends boolean = false>(pro
   const treeMarker = document.createTextNode(""),
     startMarker = document.createTextNode(""),
     endMarker = document.createTextNode(""),
-    mount = () => createElementProxy(props.mount || document.body, treeMarker),
+    mount = () => props.mount || document.body,
     content = createMemo(() => [startMarker, props.children] as unknown as JSX.Element);
 
   createRenderEffect<[Element, JSX.Element]>(
     () => [mount(), content()],
-    ([m, c]) => {
+    ([, c]) => {
+      const m = createElementProxy(untrack(mount), treeMarker);
       m.appendChild(endMarker);
       insert(m, c, endMarker);
       return () => {
@@ -225,10 +226,12 @@ export function Portal<T extends boolean = false, S extends boolean = false>(pro
           c = n;
         }
       };
-    }
+    },
+    { schedule: true }
   );
 
-  createEffect(mount, m => {
+  createEffect(mount, () => {
+    const m = untrack(mount);
     const ownerRoot = getDelegatedRoot(treeMarker);
     if (!ownerRoot || (ownerRoot as Node).contains(m)) return;
     registerDelegatedContainer(m, ownerRoot);

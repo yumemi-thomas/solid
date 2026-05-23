@@ -120,6 +120,79 @@ describe("Testing Portal delegated event containers", () => {
   });
 });
 
+describe("Testing Portal mount ref timing", () => {
+  test("mounts into an earlier sibling ref", () => {
+    const root = document.createElement("div");
+    let mount!: HTMLDivElement;
+    let portalButton!: HTMLButtonElement;
+
+    document.body.appendChild(root);
+    const dispose = render(
+      () => (
+        <>
+          <div ref={mount} />
+          <Portal mount={mount}>
+            <button ref={portalButton}>Portal button</button>
+          </Portal>
+        </>
+      ),
+      root
+    );
+
+    expect(root.innerHTML).toBe("<div><button>Portal button</button></div>");
+    expect(portalButton.parentNode).toBe(mount);
+    expect(portalButton.textContent).toBe("Portal button");
+    dispose();
+    root.remove();
+  });
+
+  test("preserves child ref timing for default body portals", () => {
+    const root = document.createElement("div");
+    let portalButton!: HTMLButtonElement;
+
+    document.body.appendChild(root);
+    const dispose = render(
+      () => (
+        <Portal>
+          <button ref={portalButton}>Ready</button>
+        </Portal>
+      ),
+      root
+    );
+
+    expect(portalButton).toBeInstanceOf(HTMLButtonElement);
+    expect(portalButton.parentNode).toBe(document.body);
+    dispose();
+    root.remove();
+  });
+
+  test("delegated events bubble through logical tree with an earlier sibling mount ref", () => {
+    const root = document.createElement("div");
+    const calls: string[] = [];
+    let mount!: HTMLDivElement;
+    let portalButton!: HTMLButtonElement;
+
+    document.body.appendChild(root);
+    const dispose = render(
+      () => (
+        <section onClick={() => calls.push("logical")}>
+          <div ref={mount} />
+          <Portal mount={mount}>
+            <button ref={portalButton} onClick={() => calls.push("portal")} />
+          </Portal>
+        </section>
+      ),
+      root
+    );
+
+    portalButton.click();
+
+    expect(calls).toEqual(["portal", "logical"]);
+    dispose();
+    root.remove();
+  });
+});
+
 describe("Testing a Portal to the head", () => {
   let div = document.createElement("div"),
     disposer: () => void,
