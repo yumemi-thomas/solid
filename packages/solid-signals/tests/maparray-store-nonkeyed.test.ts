@@ -8,7 +8,10 @@ describe("mapArray backed by derived store arrays", () => {
 
     const dispose = createRoot(dispose => {
       const [issue, set] = createSignal(0);
-      const [comments] = createStore(() => [`issue ${issue()} comment 0`, `issue ${issue()} comment 1`], []);
+      const [comments] = createStore(
+        () => [`issue ${issue()} comment 0`, `issue ${issue()} comment 1`],
+        []
+      );
       setIssue = set;
       mapped = mapArray(
         () => comments,
