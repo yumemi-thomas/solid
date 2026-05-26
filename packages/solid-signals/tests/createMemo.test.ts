@@ -726,6 +726,65 @@ describe("async compute", () => {
     });
   });
 
+  it("coalesces multiple refreshes of the same target in one flush", () => {
+    let runs = 0;
+    createRoot(() => {
+      const target = createMemo(() => ++runs);
+      target();
+      flush();
+      expect(runs).toBe(1);
+
+      refresh(target);
+      refresh(target);
+      refresh(target);
+      flush();
+      expect(runs).toBe(2);
+    });
+  });
+
+  it("coalesces refreshes triggered by overlapping mutation completions", async () => {
+    function deferred() {
+      let resolve!: () => void;
+      const promise = new Promise<void>(res => (resolve = res));
+      return { promise, resolve };
+    }
+
+    let fetchCount = 0;
+    const resolvers: Array<() => void> = [];
+    const getComments = () => {
+      fetchCount++;
+      return new Promise<number[]>(resolve => resolvers.push(() => resolve([fetchCount])));
+    };
+
+    let comments!: SourceAccessor<number[]>;
+
+    createRoot(() => {
+      comments = createMemo(() => getComments());
+      createEffect(comments, () => {});
+    });
+
+    flush();
+    resolvers.shift()!();
+    await Promise.resolve();
+    flush();
+    expect(fetchCount).toBe(1);
+
+    const first = deferred();
+    const second = deferred();
+    const mutateAndRefresh = async (mutation: Promise<void>) => {
+      await mutation;
+      refresh(comments);
+    };
+    const firstMutation = mutateAndRefresh(first.promise);
+    const secondMutation = mutateAndRefresh(second.promise);
+
+    first.resolve();
+    second.resolve();
+    await Promise.all([firstMutation, secondMutation]);
+    flush();
+    expect(fetchCount).toBe(2);
+  });
+
   it("refresh() does not throw upstream pending reads from a plain memo (#2694)", () => {
     let target!: SourceAccessor<number>;
 
@@ -864,7 +923,7 @@ describe("async compute", () => {
     expect(derived()).toBe(0);
   });
 
-  it("refresh() forces a recompute even after a manual memo write in the same tick (#2692)", () => {
+  it("manual memo writes win over refresh within the same tick (#2692)", () => {
     const [setOriginal, setDerived, derived] = createRoot(() => {
       const [original, setO] = createSignal(0);
       const [d, setD] = createSignal(original);
@@ -874,7 +933,12 @@ describe("async compute", () => {
     setDerived(2);
     refresh(derived);
     flush();
-    expect(derived()).toBe(1);
+    expect(derived()).toBe(2);
+
+    refresh(derived);
+    setDerived(3);
+    flush();
+    expect(derived()).toBe(3);
   });
 
   it("should propagate manual setSignal write to subscribers when upstream also changed (#2692)", () => {
@@ -895,28 +959,24 @@ describe("async compute", () => {
     expect(observed).toBe(2);
   });
 
-  it("should allow opting into chained refresh via isRefreshing()", () => {
-    let depRuns = 0;
+  it("sets isRefreshing while a scheduled refresh recomputes", () => {
+    const refreshingStates: boolean[] = [];
     let targetRuns = 0;
     createRoot(() => {
-      const [s] = createSignal(0);
-      const dep = createMemo(() => {
-        depRuns++;
-        return s();
-      });
       const target = createMemo(() => {
         targetRuns++;
-        if (isRefreshing()) refresh(dep);
-        return dep();
+        refreshingStates.push(isRefreshing());
+        return targetRuns;
       });
       target();
       flush();
-      expect(depRuns).toBe(1);
       expect(targetRuns).toBe(1);
+      expect(refreshingStates).toEqual([false]);
+
       refresh(target);
       flush();
-      expect(depRuns).toBe(2);
       expect(targetRuns).toBe(2);
+      expect(refreshingStates).toEqual([false, true]);
     });
   });
 

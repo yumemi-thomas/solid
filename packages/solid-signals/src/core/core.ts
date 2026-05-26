@@ -23,6 +23,7 @@ import {
   REACTIVE_NONE,
   REACTIVE_OPTIMISTIC_DIRTY,
   REACTIVE_RECOMPUTING_DEPS,
+  REACTIVE_REFRESH,
   REACTIVE_SNAPSHOT_STALE,
   REACTIVE_ZOMBIE,
   STATUS_ERROR,
@@ -147,6 +148,8 @@ export function clearSnapshots(): void {
 
 export function recompute(el: Computed<any>, create: boolean = false): void {
   const isEffect = (el as any)._type;
+  const isRefresh = !!(el._flags & REACTIVE_REFRESH);
+  let prevRefreshing = false;
   if (!create) {
     if (el._transition && (!isEffect || activeTransition) && activeTransition !== el._transition)
       globalQueue.initTransition(el._transition);
@@ -174,6 +177,10 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   const oldcontext = context;
   context = el;
   el._depsTail = null;
+  if (isRefresh) {
+    prevRefreshing = refreshing;
+    refreshing = true;
+  }
   el._flags = REACTIVE_RECOMPUTING_DEPS;
   el._time = clock;
   let value = el._pendingValue === NOT_PENDING ? el._value : el._pendingValue;
@@ -258,6 +265,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     tracking = prevTracking;
     if (__DEV__) strictRead = prevStrictRead;
     if (isStaleEffect) stale = prevStale;
+    if (isRefresh) refreshing = prevRefreshing;
     el._flags = REACTIVE_NONE | (create ? el._flags & REACTIVE_SNAPSHOT_STALE : 0);
     context = oldcontext;
   }
@@ -993,7 +1001,8 @@ export function suppressComputedRecompute(el: Computed<unknown>): void {
   deleteFromHeap(el, el._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
   if (!(el._flags & REACTIVE_MANUAL_WRITE) && el._pendingValue === NOT_PENDING)
     queuePendingNode(el);
-  el._flags = (el._flags & ~(REACTIVE_DIRTY | REACTIVE_CHECK)) | REACTIVE_MANUAL_WRITE;
+  el._flags =
+    (el._flags & ~(REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_REFRESH)) | REACTIVE_MANUAL_WRITE;
 }
 
 /**
@@ -1282,37 +1291,34 @@ export function isPending(fn: () => any): boolean {
  * ```
  */
 export function refresh<T>(target: Refreshable<T>): void {
-  let prevRefreshing = refreshing;
-  refreshing = true;
-  try {
-    const node = (target as any)?.[$REFRESH] as Computed<any> | undefined;
-    if (__DEV__ && !node) {
-      const message =
-        "[INVALID_REFRESH_TARGET] refresh() expects a Solid source accessor or refreshable store. " +
-        "Pass the original source target, not a wrapper function or derived property read.";
-      emitDiagnostic({
-        code: "INVALID_REFRESH_TARGET",
-        kind: "write",
-        severity: "error",
-        message
-      });
-      throw new Error(message);
-    }
-    if (node && typeof node._fn === "function" && !(node._flags & REACTIVE_DISPOSED)) {
-      recompute(node);
-    }
-  } finally {
-    refreshing = prevRefreshing;
-    if (!prevRefreshing) {
-      schedule();
-    }
+  const node = (target as any)?.[$REFRESH] as Computed<any> | undefined;
+  if (__DEV__ && !node) {
+    const message =
+      "[INVALID_REFRESH_TARGET] refresh() expects a Solid source accessor or refreshable store. " +
+      "Pass the original source target, not a wrapper function or derived property read.";
+    emitDiagnostic({
+      code: "INVALID_REFRESH_TARGET",
+      kind: "write",
+      severity: "error",
+      message
+    });
+    throw new Error(message);
+  }
+  if (
+    node &&
+    typeof node._fn === "function" &&
+    !(node._flags & (REACTIVE_DISPOSED | REACTIVE_MANUAL_WRITE))
+  ) {
+    node._flags = (node._flags & ~REACTIVE_CHECK) | REACTIVE_DIRTY | REACTIVE_REFRESH;
+    insertIntoHeap(node, node._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
+    schedule();
   }
 }
 
 /**
- * Returns `true` while a `refresh()` call is in progress. Useful for showing
- * a "refreshing" indicator distinct from the initial-load `<Loading>`
- * fallback.
+ * Returns `true` while a refresh-triggered computation is re-running. Useful
+ * for showing a "refreshing" indicator distinct from the initial-load
+ * `<Loading>` fallback.
  *
  * @example
  * ```tsx
