@@ -938,9 +938,13 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
   if (!valueChanged) {
     // Re-propagate for optimistic computeds with active override — downstream
     // nodes may have stale _inFlight based on old upstream data.
-    if (isOptimistic && hasOverride && (el as Computed<T>)._fn) {
-      insertSubs(el, true);
-      schedule();
+    if (isOptimistic && hasOverride) {
+      const transition = resolveTransition(el as any);
+      if (transition && activeTransition !== transition) globalQueue.initTransition(transition);
+      if ((el as Computed<T>)._fn) {
+        insertSubs(el, true);
+        schedule();
+      }
     }
     return v;
   }

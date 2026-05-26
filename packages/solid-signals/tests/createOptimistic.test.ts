@@ -276,6 +276,43 @@ describe("createOptimistic", () => {
       expect(effectRuns).toHaveBeenCalledTimes(1);
     });
 
+    it("holds same-value optimistic writes until all overlapping actions settle", async () => {
+      function deferred() {
+        let resolve!: () => void;
+        const promise = new Promise<void>(res => (resolve = res));
+        return { promise, resolve };
+      }
+
+      const [$busy, setBusy] = createOptimistic(false);
+      const first = deferred();
+      const second = deferred();
+
+      const runFirst = action(function* () {
+        setBusy(true);
+        yield first.promise;
+      });
+      const runSecond = action(function* () {
+        setBusy(true);
+        yield second.promise;
+      });
+
+      const firstPromise = runFirst();
+      flush();
+      expect($busy()).toBe(true);
+
+      const secondPromise = runSecond();
+      flush();
+      expect($busy()).toBe(true);
+
+      first.resolve();
+      await firstPromise;
+      expect($busy()).toBe(true);
+
+      second.resolve();
+      await secondPromise;
+      expect($busy()).toBe(false);
+    });
+
     it("refreshing an optimistic async accessor clears the override when it settles", async () => {
       let result: any;
       let sendMessage!: () => Promise<void>;
