@@ -1,5 +1,34 @@
 import { describe, expect, test } from "vitest";
-import { createRoot, createStore, mapArray, flush } from "../src/index.js";
+import { createRoot, createSignal, createStore, mapArray, flush } from "../src/index.js";
+
+describe("mapArray backed by derived store arrays", () => {
+  test("updates when same-length primitive array items are replaced", () => {
+    let setIssue!: (issue: number) => void;
+    let mapped!: () => string[];
+
+    const dispose = createRoot(dispose => {
+      const [issue, set] = createSignal(0);
+      const [comments] = createStore(
+        () => [`issue ${issue()} comment 0`, `issue ${issue()} comment 1`],
+        []
+      );
+      setIssue = set;
+      mapped = mapArray(
+        () => comments,
+        comment => comment
+      );
+      return dispose;
+    });
+
+    expect(mapped()).toEqual(["issue 0 comment 0", "issue 0 comment 1"]);
+
+    setIssue(1);
+    flush();
+
+    expect(mapped()).toEqual(["issue 1 comment 0", "issue 1 comment 1"]);
+    dispose();
+  });
+});
 
 describe("mapArray keyed:false backed by a store (#2687)", () => {
   // Regression: mapArray's internal owner is a Root, so untracked store-proxy

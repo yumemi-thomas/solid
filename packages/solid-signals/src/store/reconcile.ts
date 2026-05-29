@@ -137,9 +137,11 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
     } else if (next.length) {
       for (let i = 0, len = next.length; i < len; i++) {
         const item = previous[i];
-        isWrappable(item)
-          ? applyState(next[i], wrap(item, target), keyFn)
-          : target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+        if (isWrappable(item)) applyState(next[i], wrap(item, target), keyFn);
+        else {
+          if (item !== next[i]) changed = true;
+          target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+        }
       }
     }
 
@@ -279,9 +281,11 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
     } else if (next.length) {
       for (let i = 0, len = next.length; i < len; i++) {
         const item = getOverrideValue(previous, override, i as any, optOverride);
-        isWrappable(item)
-          ? applyState(next[i], wrap(item, target), keyFn)
-          : target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+        if (isWrappable(item)) applyState(next[i], wrap(item, target), keyFn);
+        else {
+          if (item !== next[i]) changed = true;
+          target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+        }
       }
     }
 
