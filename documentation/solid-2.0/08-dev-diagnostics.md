@@ -14,21 +14,26 @@ Diagnostics can also be programmatically observed via `DEV.diagnostics.subscribe
 
 These halt execution immediately. They indicate bugs that will cause incorrect behavior.
 
-#### `SIGNAL_WRITE_IN_OWNED_SCOPE`
+#### `REACTIVE_WRITE_IN_OWNED_SCOPE`
 
-**Message:** "Writing to a Signal inside an owned scope (component, computation) is not allowed. Move the write outside or set the `ownedWrite` option if this is intentional."
+**Messages:**
 
-Writing to a signal inside a reactive scope (effect compute, memo, component body) throws. This prevents feedback loops and ensures the reactive graph is predictable.
+- "Writing to reactive state inside an owned scope (component, computation) is not allowed. Move the write outside or set the `ownedWrite` option if this is intentional."
+- "Calling refresh() inside an owned scope (component, computation) is not allowed. Move the invalidation outside pure computation."
+
+Writing to reactive state or invalidating a reactive source inside a reactive scope (effect compute, memo, component body) throws. This prevents feedback loops and ensures the reactive graph is predictable.
 
 ```js
 // Throws in dev
 createMemo(() => setCount(count() + 1));
+createMemo(() => refresh(user));
 
 // Fix: derive instead of writing back
 const doubled = createMemo(() => count() * 2);
 
-// Fix: write from an event handler
+// Fix: write/invalidate from an event handler
 button.onclick = () => setCount(c => c + 1);
+button.onclick = () => refresh(user);
 
 // Escape hatch: mark as ownedWrite (internal signals only)
 const [ref, setRef] = createSignal(null, { ownedWrite: true });
@@ -38,7 +43,7 @@ const [ref, setRef] = createSignal(null, { ownedWrite: true });
 
 **Message:** "Reading a pending async value directly in [context]. Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function)."
 
-Reading an async value that hasn't resolved yet outside a tracked scope (e.g. in a component body or effect callback) throws. The system can't suspend or retry an untracked read.
+Reading an async value that hasn't resolved yet outside a tracked scope (e.g. in a component body or effect callback) throws. The system can't route an untracked read through `Loading` or retry it.
 
 ```jsx
 // Throws if user() is async and pending
@@ -190,7 +195,7 @@ This also fires for store property access in the same contexts.
 
 **Message:** "Reading a pending async value inside createTrackedEffect or onSettled will throw. Use createEffect instead which supports async-aware reactivity."
 
-Warns that an async value read inside `createTrackedEffect` or `onSettled` will throw if it's ever pending, because these scopes can't suspend. Use `createEffect` (which supports async-aware reactivity) instead.
+Warns that an async value read inside `createTrackedEffect` or `onSettled` will throw if it's ever pending, because these scopes can't route not-ready reads through `Loading`. Use `createEffect` (which supports async-aware reactivity) instead.
 
 #### `NO_OWNER_EFFECT`
 
@@ -274,7 +279,7 @@ Each `DiagnosticEvent` has:
 
 | Code | Severity | Category | Trigger |
 |------|----------|----------|---------|
-| `SIGNAL_WRITE_IN_OWNED_SCOPE` | error | write | Signal write inside component/computation |
+| `REACTIVE_WRITE_IN_OWNED_SCOPE` | error | write | Reactive write/invalidation inside component/computation |
 | `PENDING_ASYNC_UNTRACKED_READ` | error | async | Reading pending async outside tracking scope |
 | `ASYNC_OUTSIDE_LOADING_BOUNDARY` | warn | async | Async computation outside Loading boundary (non-halting; root mount is deferred) |
 | `CLEANUP_IN_FORBIDDEN_SCOPE` | error | lifecycle | `onCleanup` inside trackedEffect/onSettled |

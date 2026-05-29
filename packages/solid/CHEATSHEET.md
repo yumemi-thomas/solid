@@ -214,17 +214,18 @@ const rest = omit(props, "class", "style"); // replaces splitProps
 ```ts
 // Async is just "any computation that returns a Promise / AsyncIterable"
 const user = createMemo(() => fetchUser(id()));
-// Reading user() suspends until ready; wrap in <Loading>.
+// Reading user() is not ready at first; wrap in <Loading>.
 
-// Pending indicator for this read; participates in Loading like the read itself.
-isPending(() => user());
+// Pending indicator for this async read; place under the Loading boundary that owns it.
+<Loading fallback={<Spinner />}>{isPending(() => user()) ? "Refreshing..." : user()}</Loading>;
+// isPending can live outside Loading when it only reads upstream state that cannot be not ready.
 
 // Peek at the in-flight value during a transition
 latest(id);
 
 // Force recompute of a derived read after a server write
+// Action: call from handlers/effects/actions, not pure reads.
 refresh(user);
-refresh(() => query.user(id()));
 ```
 
 ---
@@ -239,7 +240,7 @@ const addTodo = action(function* (todo) {
     s.push(todo);
   }); // optimistic write
   yield api.add(todo); // async work
-  refresh(todos); // re-derive
+  refresh(todos); // reconcile with source of truth
 });
 
 // Optimistic signal
@@ -290,6 +291,7 @@ Optimistic writes revert when the transition completes.
 </Loading>
 
 // Error boundary (replaces <ErrorBoundary>)
+// reset is an action for retrying the errored branch.
 <Errored fallback={(err, reset) => <button onClick={reset}>retry {String(err())}</button>}>
   <Page />
 </Errored>
@@ -558,9 +560,6 @@ runWithOwner(owner, () => {
 
 // Wait for a reactive expression to settle (imperative code / tests).
 const v = await resolve(() => user());
-
-// Are we inside a refresh() cycle? Almost never needed in app code.
-isRefreshing();
 
 // Throw to signal "not ready" through the reactive graph (library authors).
 throw new NotReadyError();

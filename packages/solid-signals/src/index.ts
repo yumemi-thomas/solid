@@ -20,7 +20,6 @@ export {
   untrack,
   isPending,
   latest,
-  isRefreshing,
   refresh,
   SUPPORTS_PROXY,
   setSnapshotCapture,

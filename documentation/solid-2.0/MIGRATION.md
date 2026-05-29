@@ -330,17 +330,15 @@ See [RFC 05 — createResource migration](05-async-data.md#createresource--async
 ### Initial loading vs revalidation: `Loading` vs `isPending`
 
 - **`Loading`**: initial “not ready yet” UI boundary.
-- **`isPending(fn)`**: active pending read for the exact expression in `fn`; it follows the same not-ready path as reading the value directly, so place it under the `Loading` boundary that should own initial fallback UI.
+- **`isPending(fn)`**: active pending read for the exact expression in `fn`; when that expression can be not ready, place it under the `Loading` boundary that should own initial fallback UI. It can live outside the boundary when it only reads upstream state that cannot be not ready.
 
 ```jsx
 const listPending = () => isPending(() => users() || posts());
 
-<>
+<Loading fallback={<Spinner />}>
   <Show when={listPending()}>{/* subtle "refreshing…" indicator */}</Show>
-  <Loading fallback={<Spinner />}>
-    <List users={users()} posts={posts()} />
-  </Loading>
-</>;
+  <List users={users()} posts={posts()} />
+</Loading>;
 ```
 
 ### Peeking in-flight values: `latest(fn)`
@@ -354,9 +352,6 @@ const latestId = () => latest(id);
 ```js
 // After a server write, explicitly recompute a derived read:
 refresh(storeOrProjection);
-
-// Or re-run a read tree:
-refresh(() => query.user(id()));
 ```
 
 ### Mutations: `action(...)` + optimistic helpers
@@ -365,7 +360,7 @@ In 1.x, mutations often ended up as “call an async function, flip some flags, 
 
 - wrap mutations in `action(...)`
 - use `createOptimistic` / `createOptimisticStore` for optimistic UI
-- call `refresh(...)` at the end to recompute derived reads
+- call `refresh(...)` at the end to reconcile derived reads with the source of truth
 
 ```js
 const [todos] = createStore(() => api.getTodos(), { list: [] });
@@ -676,7 +671,6 @@ These APIs are new additions (not renames of 1.x APIs):
 - **`createOptimistic` / `createOptimisticStore`** — signal/store primitives whose writes revert when a transition completes.
 - **`createProjection(fn, seed)`** — derived store with reactive reconciliation.
 - **`isPending(fn)`** — expression-level "stale while revalidating" check.
-- **`isRefreshing()`** — returns `true` when code is executing inside a `refresh()` cycle.
 - **`latest(fn)`** — peek at in-flight values during transitions.
 - **`refresh(target)`** — explicit recomputation/invalidation of derived reads.
 - **`resolve(fn)`** — returns a Promise that resolves when a reactive expression settles.

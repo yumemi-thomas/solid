@@ -26,7 +26,6 @@ export {
   getOwner,
   isDisposed,
   isEqual,
-  isRefreshing,
   isPending,
   isWrappable,
   mapArray,

@@ -4,7 +4,7 @@
 
 ## Summary
 
-Solid 2.0 makes async a first-class capability of computations: `createMemo`, derived stores, and other computations can return **Promises** or **AsyncIterables**, and consumers interact with them through normal accessors. Pending async values suspend by throwing an internal “not ready” signal through the reactive graph, and `Loading` is the boundary that turns that suspension into UI. This removes the need for a separate `createResource` primitive. For “stale while revalidating” UI and coordination, 2.0 provides `isPending(fn)` and `latest(fn)`.
+Solid 2.0 makes async a first-class capability of computations: `createMemo`, derived stores, and other computations can return **Promises** or **AsyncIterables**, and consumers interact with them through normal accessors. Pending async values signal “not ready” through the reactive graph, and `Loading` is the boundary that turns that state into UI. This removes the need for a separate `createResource` primitive. For “stale while revalidating” UI and coordination, 2.0 provides `isPending(fn)` and `latest(fn)`.
 
 ## Motivation
 
@@ -16,13 +16,13 @@ Solid 2.0 makes async a first-class capability of computations: `createMemo`, de
 
 ### Async in computations (no `createResource`)
 
-Any computation may return a Promise (or AsyncIterable) to represent pending work. Consumers read the accessor as usual; if it isn’t ready, the graph suspends until it resolves.
+Any computation may return a Promise (or AsyncIterable) to represent pending work. Consumers read the accessor as usual; if it isn’t ready, the read follows the `Loading` path until it resolves.
 
 ```js
 const user = createMemo(() => fetchUser(params.id));
 
 function Profile() {
-  // user() suspends if not ready — wrap in <Loading>
+  // user() is not ready at first — wrap in <Loading>
   return <div>{user().name}</div>;
 }
 
@@ -78,16 +78,16 @@ const posts = createMemo(() => fetchPosts());
 const listPending = () => isPending(() => users() || posts());
 
 return (
-  <>
+  <Loading fallback={<Spinner />}>
     <Show when={listPending()}>{/* subtle "refreshing…" indicator */}</Show>
-    <Loading fallback={<Spinner />}>
-      <List users={users()} posts={posts()} />
-    </Loading>
-  </>
+    <List users={users()} posts={posts()} />
+  </Loading>
 );
 ```
 
-The intent is to replace `.loading`-style flags that belong to a specific primitive (`createResource`) with something that works for any expression. Since the expression is read normally, the same primitive can guard interactive controls that depend on async data:
+Because this pending read reaches the async values directly, it sits under the same `Loading` boundary as the data read. On first load, the boundary owns fallback UI; after the values have resolved once, the inline indicator can show stale-while-revalidating state. `isPending` may also be used outside a `Loading` boundary when the expression only reads upstream state that cannot itself be not ready.
+
+The intent is to replace `.loading`-style flags that belong to a specific primitive (`createResource`) with something that works for any expression. Since the expression is read normally, the same primitive can guard interactive controls that directly depend on async data when it is placed under the boundary that owns that read:
 
 ```jsx
 <Loading fallback={<button disabled>Loading...</button>}>
@@ -102,7 +102,7 @@ This only works when the expression passed to `isPending` actually reaches the a
 isPending(id);
 ```
 
-This is the preferred protection for interactive controls that would otherwise read async data before it is ready: make the control's rendered disabled state read the same async source with `isPending(fn)`, and provide a disabled Loading fallback for the Loading path.
+For interactive controls that would otherwise read async data before it is ready, make the rendered disabled state read the same async source with `isPending(fn)`, and provide a disabled Loading fallback for that path. If the control only reads upstream state, it can live outside the boundary; it just observes that upstream state rather than the lower async branch.
 
 ### `latest(fn)` (peek at in-flight values)
 
@@ -114,18 +114,6 @@ const user = createMemo(() => fetchUser(userId()));
 
 // During a transition, this can reflect the in-flight userId
 const latestUserId = () => latest(userId);
-```
-
-### `isRefreshing()` (are we inside a refresh cycle?)
-
-`isRefreshing()` returns `true` when code is executing inside a `refresh()` cycle. This can be used inside computations to distinguish between initial evaluation and a refresh-triggered recomputation.
-
-```js
-const data = createMemo(async () => {
-  const id = userId();
-  if (isRefreshing()) console.log("refreshing data for", id);
-  return fetchUser(id);
-});
 ```
 
 ### `resolve(fn)` (wait for a reactive expression to settle)
@@ -171,7 +159,10 @@ const [user] = createResource(id, fetchUser);
 
 // 2.0
 const user = createMemo(() => fetchUser(id()));
-<Show when={isPending(() => user())}>Refreshing...</Show>
+<Loading fallback={<UserSkeleton />}>
+  <Show when={isPending(() => user())}>Refreshing...</Show>
+  <UserDetails user={user()} />
+</Loading>
 ```
 
 Remember: `isPending(fn)` actively reads `fn`. If that read is not ready yet, it follows the same `Loading` path as reading the value directly. Put pending indicators under the boundary that should own initial fallback UI; after the value has resolved once, `isPending` is useful for inline revalidation indicators.
@@ -189,6 +180,8 @@ refetch();
 const user = createMemo(() => fetchUser(id()));
 refresh(user);
 ```
+
+Like an `action(...)` result, `refresh()` is an imperative callback when you hand it to UI. Call it from event handlers, effects, or action workflows; use `Loading` / `isPending` to observe readiness.
 
 #### `resource.mutate` → `createOptimisticStore` / `action`
 
@@ -214,6 +207,8 @@ const addTodo = action(function* (todo) {
   refresh(todos);
 });
 ```
+
+Use optimistic state for the mutation's user-visible intent. `refresh()` is the follow-up invalidation that reconciles the optimistic view with the source of truth; it should not be used as a separate “refreshing” UI flag.
 
 #### Error handling
 

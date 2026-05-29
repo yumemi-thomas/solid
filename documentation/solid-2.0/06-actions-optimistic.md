@@ -16,7 +16,7 @@ Solid 2.0 introduces an `action()` wrapper for async mutations and a pair of opt
 
 ### `action(fn)` for async mutations
 
-`action()` wraps a generator or async generator. It returns an async function you can call from handlers. Inside an action, you can:
+`action()` wraps a generator or async generator and returns an action: an async function you can call from handlers. Inside an action, you can:
 
 - do optimistic writes
 - yield/await async work
@@ -55,14 +55,11 @@ Solid 2.0 exports a `refresh()` helper to explicitly re-run derived reads when y
 
 Conceptually, `refresh()` is “invalidate and recompute now”, without requiring you to thread bespoke `refetch()` methods through your app.
 
-It supports two common forms:
-
-- **Thunk form**: `refresh(() => expr)` re-runs `expr` (typically something that reads async-derived values) and returns its value.
-- **Refreshable form**: `refresh(x)` requests recomputation for `x` when `x` is a derived signal/store/projection that participates in refresh (e.g. things created via function forms like `createStore(() => ...)` / projections).
+Pass a refreshable source directly. `refresh(x)` requests recomputation for `x` when `x` is a derived signal/store/projection that participates in refresh (e.g. things created via function forms like `createStore(() => ...)` / projections).
 
 ```js
-// Re-run a read tree explicitly
-refresh(() => query.user(id()));
+// Re-run one derived source explicitly
+refresh(user);
 ```
 
 ```js
@@ -74,6 +71,10 @@ const addTodo = action(function* (todo) {
   refresh(todos);
 });
 ```
+
+`refresh()` is not a UI state primitive. During mutations, express the expected user-visible state with `createOptimistic` / `createOptimisticStore`, then call `refresh()` to reconcile with the source of truth after the server write.
+
+`refresh()` is also an action: call it from event handlers, effects, or other actions rather than from pure computations. It starts invalidation work; it does not carry user-visible optimistic state by itself.
 
 ### `createOptimistic` (optimistic signal)
 

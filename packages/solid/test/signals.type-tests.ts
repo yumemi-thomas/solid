@@ -123,7 +123,8 @@ const memo1Value: string = memo1();
 const memo1Source: SourceAccessor<string> = memo1;
 const memo1Accessor: Accessor<string> = memo1Source;
 refresh(memo1);
-// @ts-expect-error refresh requires the original source accessor, not a wrapper read
+// Wrapper reads are not refresh targets.
+// @ts-expect-error refresh requires the original source accessor
 refresh(() => memo1());
 
 const memo2 = createMemo((prev?: number) => (prev ?? 0) + 1);

@@ -24,7 +24,6 @@ import {
   flush,
   isPending,
   latest,
-  isRefreshing,
   refresh,
   action,
   onSettled,
@@ -472,10 +471,6 @@ describe("Server utilities", () => {
 
   test("latest passes through", () => {
     expect(latest(() => 42)).toBe(42);
-  });
-
-  test("isRefreshing returns false", () => {
-    expect(isRefreshing()).toBe(false);
   });
 
   test("action passes through", () => {

@@ -8,7 +8,6 @@ import {
   createSignal,
   flush,
   isPending,
-  isRefreshing,
   latest,
   onCleanup,
   refresh,
@@ -665,7 +664,7 @@ describe("async compute", () => {
   it("should only refresh the targeted memo, not its upstream memos (#2691)", () => {
     let upstreamRuns = 0;
     let downstreamRuns = 0;
-    createRoot(() => {
+    const downstream = createRoot(() => {
       const [, setX] = createSignal(0);
       const upstream = createMemo(() => {
         upstreamRuns++;
@@ -679,11 +678,12 @@ describe("async compute", () => {
       flush();
       expect(upstreamRuns).toBe(1);
       expect(downstreamRuns).toBe(1);
-      refresh(downstream);
-      flush();
-      expect(upstreamRuns).toBe(1);
-      expect(downstreamRuns).toBe(2);
+      return downstream;
     });
+    refresh(downstream);
+    flush();
+    expect(upstreamRuns).toBe(1);
+    expect(downstreamRuns).toBe(2);
   });
 
   it("should refresh explicit targets but not their deps (#2691)", () => {
@@ -691,7 +691,7 @@ describe("async compute", () => {
     let bRuns = 0;
     let aDepRuns = 0;
     let bDepRuns = 0;
-    createRoot(() => {
+    const [a, b] = createRoot(() => {
       const [s] = createSignal(0);
       const aDep = createMemo(() => {
         aDepRuns++;
@@ -716,30 +716,31 @@ describe("async compute", () => {
       expect(bRuns).toBe(1);
       expect(aDepRuns).toBe(1);
       expect(bDepRuns).toBe(1);
-      refresh(a);
-      refresh(b);
-      flush();
-      expect(aRuns).toBe(2);
-      expect(bRuns).toBe(2);
-      expect(aDepRuns).toBe(1);
-      expect(bDepRuns).toBe(1);
+      return [a, b] as const;
     });
+    refresh(a);
+    refresh(b);
+    flush();
+    expect(aRuns).toBe(2);
+    expect(bRuns).toBe(2);
+    expect(aDepRuns).toBe(1);
+    expect(bDepRuns).toBe(1);
   });
 
   it("coalesces multiple refreshes of the same target in one flush", () => {
     let runs = 0;
-    createRoot(() => {
+    const target = createRoot(() => {
       const target = createMemo(() => ++runs);
       target();
       flush();
       expect(runs).toBe(1);
-
-      refresh(target);
-      refresh(target);
-      refresh(target);
-      flush();
-      expect(runs).toBe(2);
+      return target;
     });
+    refresh(target);
+    refresh(target);
+    refresh(target);
+    flush();
+    expect(runs).toBe(2);
   });
 
   it("coalesces refreshes triggered by overlapping mutation completions", async () => {
@@ -957,27 +958,6 @@ describe("async compute", () => {
     setDerived(2);
     flush();
     expect(observed).toBe(2);
-  });
-
-  it("sets isRefreshing while a scheduled refresh recomputes", () => {
-    const refreshingStates: boolean[] = [];
-    let targetRuns = 0;
-    createRoot(() => {
-      const target = createMemo(() => {
-        targetRuns++;
-        refreshingStates.push(isRefreshing());
-        return targetRuns;
-      });
-      target();
-      flush();
-      expect(targetRuns).toBe(1);
-      expect(refreshingStates).toEqual([false]);
-
-      refresh(target);
-      flush();
-      expect(targetRuns).toBe(2);
-      expect(refreshingStates).toEqual([false, true]);
-    });
   });
 
   it("should should show pending state in graph", async () => {

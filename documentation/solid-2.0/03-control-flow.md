@@ -11,7 +11,7 @@ Solid 2.0 simplifies and unifies control-flow APIs by consolidating list renderi
 - **One list primitive:** Having both `For` and `Index` encourages bikeshedding and accidental misuse. A single `For` that can be keyed or index-based is easier to teach and document.
 - **Ranges without diffing:** Rendering “count-based” lists (skeletons, ranges, windowing) shouldn’t require list diffing; `Repeat` expresses this directly.
 - **Async and error UX:** Names like Suspense and ErrorBoundary are long and carry baggage. `Loading` and `Errored` are concise and align better with their actual role in the 2.0 async model.
-- **Dynamic components as values:** A factory that returns a stable `Component<P>` composes cleanly with JSX (reactive props, children, refs) and with the async-computation model — async sources suspend through `Loading` via the same `NotReadyError` flow as any other reactive read.
+- **Dynamic components as values:** A factory that returns a stable `Component<P>` composes cleanly with JSX (reactive props, children, refs) and with the async-computation model — async sources flow through `Loading` via the same `NotReadyError` path as any other not-ready reactive read.
 
 ## Detailed design
 
@@ -119,13 +119,15 @@ This is primarily intended for use with **stores**, where the data at each index
 </Loading>
 ```
 
-In 2.0’s async model, async values are part of computations (not a separate `createResource`), so `Loading` is the user-facing “this subtree may suspend” boundary.
+In 2.0’s async model, async values are part of computations (not a separate `createResource`), so `Loading` is the user-facing “this subtree may be not ready yet” boundary.
 
 `Loading` also accepts an `on` prop to control when the boundary re-shows its fallback during revalidation. See [RFC 05](05-async-data.md) for details.
 
 ### Error boundary: `Errored`
 
 `Errored` is the error boundary. It supports a static fallback or a callback form that receives an error accessor and a reset function.
+
+The reset function is an action: pass it to event handlers or other imperative code to retry the errored branch.
 
 ```jsx
 <Errored

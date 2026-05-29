@@ -1576,10 +1576,6 @@ export function latest<T>(fn: () => T): T {
   return fn();
 }
 
-export function isRefreshing(): boolean {
-  return false;
-}
-
 export function refresh<T>(_target: Refreshable<T>): void {
   return undefined;
 }

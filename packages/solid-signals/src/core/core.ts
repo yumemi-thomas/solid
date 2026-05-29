@@ -23,7 +23,6 @@ import {
   REACTIVE_NONE,
   REACTIVE_OPTIMISTIC_DIRTY,
   REACTIVE_RECOMPUTING_DEPS,
-  REACTIVE_REFRESH,
   REACTIVE_SNAPSHOT_STALE,
   REACTIVE_ZOMBIE,
   STATUS_ERROR,
@@ -76,10 +75,15 @@ GlobalQueue._dispose = disposeChildren;
 
 export const PRIMITIVE_IN_FORBIDDEN_SCOPE_MESSAGE =
   "[PRIMITIVE_IN_FORBIDDEN_SCOPE] Cannot create reactive primitives inside createTrackedEffect or owner-backed onSettled";
+export const REACTIVE_WRITE_IN_OWNED_SCOPE_SIGNAL_MESSAGE =
+  "[REACTIVE_WRITE_IN_OWNED_SCOPE] Writing to reactive state inside an owned scope (component, computation) is not allowed. " +
+  "Move the write outside or set the `ownedWrite` option if this is intentional.";
+export const REACTIVE_WRITE_IN_OWNED_SCOPE_REFRESH_MESSAGE =
+  "[REACTIVE_WRITE_IN_OWNED_SCOPE] Calling refresh() inside an owned scope (component, computation) is not allowed. " +
+  "Move the invalidation outside pure computation.";
 
 export let tracking = false;
 export let stale = false;
-export let refreshing = false;
 export let pendingCheckActive = false;
 export let foundPending = false;
 export let latestReadActive = false;
@@ -148,8 +152,6 @@ export function clearSnapshots(): void {
 
 export function recompute(el: Computed<any>, create: boolean = false): void {
   const isEffect = (el as any)._type;
-  const isRefresh = !!(el._flags & REACTIVE_REFRESH);
-  let prevRefreshing = false;
   if (!create) {
     if (el._transition && (!isEffect || activeTransition) && activeTransition !== el._transition)
       globalQueue.initTransition(el._transition);
@@ -177,10 +179,6 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   const oldcontext = context;
   context = el;
   el._depsTail = null;
-  if (isRefresh) {
-    prevRefreshing = refreshing;
-    refreshing = true;
-  }
   el._flags = REACTIVE_RECOMPUTING_DEPS;
   el._time = clock;
   let value = el._pendingValue === NOT_PENDING ? el._value : el._pendingValue;
@@ -265,7 +263,6 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     tracking = prevTracking;
     if (__DEV__) strictRead = prevStrictRead;
     if (isStaleEffect) stale = prevStale;
-    if (isRefresh) refreshing = prevRefreshing;
     el._flags = REACTIVE_NONE | (create ? el._flags & REACTIVE_SNAPSHOT_STALE : 0);
     context = oldcontext;
   }
@@ -909,19 +906,17 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     context &&
     (el as FirewallSignal<any>)._firewall !== context
   ) {
-    const message =
-      "[SIGNAL_WRITE_IN_OWNED_SCOPE] Writing to a Signal inside an owned scope (component, computation) is not allowed. " +
-      "Move the write outside or set the `ownedWrite` option if this is intentional.";
     emitDiagnostic({
-      code: "SIGNAL_WRITE_IN_OWNED_SCOPE",
+      code: "REACTIVE_WRITE_IN_OWNED_SCOPE",
       kind: "write",
       severity: "error",
-      message,
+      message: REACTIVE_WRITE_IN_OWNED_SCOPE_SIGNAL_MESSAGE,
       ownerId: context.id,
       ownerName: (context as any)._name,
-      nodeName: (el as any)._name
+      nodeName: (el as any)._name,
+      data: { operation: "setSignal" }
     });
-    throw new Error(message);
+    throw new Error(REACTIVE_WRITE_IN_OWNED_SCOPE_SIGNAL_MESSAGE);
   }
 
   if (el._transition && activeTransition !== el._transition)
@@ -1001,8 +996,7 @@ export function suppressComputedRecompute(el: Computed<unknown>): void {
   deleteFromHeap(el, el._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
   if (!(el._flags & REACTIVE_MANUAL_WRITE) && el._pendingValue === NOT_PENDING)
     queuePendingNode(el);
-  el._flags =
-    (el._flags & ~(REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_REFRESH)) | REACTIVE_MANUAL_WRITE;
+  el._flags = (el._flags & ~(REACTIVE_DIRTY | REACTIVE_CHECK)) | REACTIVE_MANUAL_WRITE;
 }
 
 /**
@@ -1292,41 +1286,45 @@ export function isPending(fn: () => any): boolean {
  */
 export function refresh<T>(target: Refreshable<T>): void {
   const node = (target as any)?.[$REFRESH] as Computed<any> | undefined;
-  if (__DEV__ && !node) {
-    const message =
-      "[INVALID_REFRESH_TARGET] refresh() expects a Solid source accessor or refreshable store. " +
-      "Pass the original source target, not a wrapper function or derived property read.";
-    emitDiagnostic({
-      code: "INVALID_REFRESH_TARGET",
-      kind: "write",
-      severity: "error",
-      message
-    });
-    throw new Error(message);
+  if (!node) {
+    if (__DEV__) {
+      const message =
+        "[INVALID_REFRESH_TARGET] refresh() expects a Solid source accessor or refreshable store. " +
+        "Pass the original source target, not a wrapper function or derived property read.";
+      emitDiagnostic({
+        code: "INVALID_REFRESH_TARGET",
+        kind: "write",
+        severity: "error",
+        message
+      });
+      throw new Error(message);
+    }
+    return;
   }
   if (
-    node &&
+    __DEV__ &&
+    context &&
+    !((node._config ?? 0) & CONFIG_OWNED_WRITE) &&
+    !(context._config & CONFIG_CHILDREN_FORBIDDEN)
+  ) {
+    emitDiagnostic({
+      code: "REACTIVE_WRITE_IN_OWNED_SCOPE",
+      kind: "write",
+      severity: "error",
+      message: REACTIVE_WRITE_IN_OWNED_SCOPE_REFRESH_MESSAGE,
+      ownerId: context.id,
+      ownerName: (context as any)._name,
+      nodeName: (node as any)._name,
+      data: { operation: "refresh" }
+    });
+    throw new Error(REACTIVE_WRITE_IN_OWNED_SCOPE_REFRESH_MESSAGE);
+  }
+  if (
     typeof node._fn === "function" &&
     !(node._flags & (REACTIVE_DISPOSED | REACTIVE_MANUAL_WRITE))
   ) {
-    node._flags = (node._flags & ~REACTIVE_CHECK) | REACTIVE_DIRTY | REACTIVE_REFRESH;
+    node._flags = (node._flags & ~REACTIVE_CHECK) | REACTIVE_DIRTY;
     insertIntoHeap(node, node._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
     schedule();
   }
-}
-
-/**
- * Returns `true` while a refresh-triggered computation is re-running. Useful
- * for showing a "refreshing" indicator distinct from the initial-load
- * `<Loading>` fallback.
- *
- * @example
- * ```tsx
- * <Show when={isRefreshing()}>
- *   <span class="badge">refreshing…</span>
- * </Show>
- * ```
- */
-export function isRefreshing(): boolean {
-  return refreshing;
 }

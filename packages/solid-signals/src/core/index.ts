@@ -14,7 +14,6 @@ export {
   isPending,
   latest,
   refresh,
-  isRefreshing,
   staleValues,
   setSnapshotCapture,
   markSnapshotScope,

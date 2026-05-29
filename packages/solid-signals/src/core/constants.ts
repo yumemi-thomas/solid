@@ -10,7 +10,6 @@ export const REACTIVE_OPTIMISTIC_DIRTY = 1 << 7;
 export const REACTIVE_SNAPSHOT_STALE = 1 << 8;
 export const REACTIVE_LAZY = 1 << 9;
 export const REACTIVE_MANUAL_WRITE = 1 << 10;
-export const REACTIVE_REFRESH = 1 << 11;
 
 // Static configuration bits packed into Owner/Computed/Signal _config.
 export const CONFIG_OWNED_WRITE = 1 << 0;

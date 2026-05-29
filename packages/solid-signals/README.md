@@ -109,7 +109,7 @@ const data = createMemo(async () => {
 
 // Check async state for this read
 isPending(data); // true while this read touches pending async work
-latest(data); // last resolved value
+latest(data); // last resolved value; follows the not-ready path if no value has resolved yet
 ```
 
 Use `action()` to coordinate async workflows with the reactive graph:
@@ -224,9 +224,8 @@ createRoot(dispose => {
 | `flush()`                | Process all pending updates                                        |
 | `untrack(fn)`            | Run `fn` without tracking dependencies                             |
 | `isPending(accessor)`    | Check if an async accessor is revalidating stale data              |
-| `latest(accessor)`       | Get the last resolved value of an async accessor                   |
+| `latest(accessor)`       | Get the last resolved value, or follow not-ready if none exists    |
 | `refresh(accessor)`      | Re-trigger an async computation                                    |
-| `isRefreshing(accessor)` | Check if an async accessor is refreshing                           |
 | `resolve(fn)`            | Returns a promise that resolves when a reactive expression settles |
 | `mapArray(list, mapFn)`  | Reactive array mapping with keyed reconciliation                   |
 | `repeat(count, mapFn)`   | Reactive repeat based on a reactive count                          |

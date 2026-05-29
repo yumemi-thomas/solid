@@ -10,6 +10,7 @@ import {
   flush,
   getOwner,
   onCleanup,
+  refresh,
   runWithOwner,
   untrack
 } from "../src/index.js";
@@ -57,7 +58,7 @@ describe("diagnostics", () => {
     expect(stopped).toEqual([]);
   });
 
-  it("emits diagnostics before owned-scope write errors", () => {
+  it("emits diagnostics before owned-scope signal write errors", () => {
     const capture = DEV!.diagnostics.capture();
 
     createRoot(() => {
@@ -66,14 +67,35 @@ describe("diagnostics", () => {
         setCount(1);
         return count();
       });
-      expect(() => memo()).toThrow(/Writing to a Signal inside an owned scope/);
+      expect(() => memo()).toThrow(/Writing to reactive state inside an owned scope/);
     });
 
     const events = capture.stop();
     expect(events).toHaveLength(1);
-    expect(events[0].code).toBe("SIGNAL_WRITE_IN_OWNED_SCOPE");
+    expect(events[0].code).toBe("REACTIVE_WRITE_IN_OWNED_SCOPE");
     expect(events[0].severity).toBe("error");
     expect(events[0].nodeName).toBe("count");
+    expect(events[0].data?.operation).toBe("setSignal");
+  });
+
+  it("emits diagnostics before owned-scope refresh errors", () => {
+    const capture = DEV!.diagnostics.capture();
+
+    createRoot(() => {
+      const target = createMemo(() => 1, { name: "target" });
+      const memo = createMemo(() => {
+        refresh(target);
+        return target();
+      });
+      expect(() => memo()).toThrow(/Calling refresh\(\) inside an owned scope/);
+    });
+
+    const events = capture.stop();
+    expect(events).toHaveLength(1);
+    expect(events[0].code).toBe("REACTIVE_WRITE_IN_OWNED_SCOPE");
+    expect(events[0].severity).toBe("error");
+    expect(events[0].nodeName).toBe("target");
+    expect(events[0].data?.operation).toBe("refresh");
   });
 
   it("emits diagnostics for effects created without an owner", () => {
