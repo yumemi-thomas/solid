@@ -241,10 +241,11 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
           applyState(next[j], wrapped, keyFn);
         }
 
+        const nextLength = next.length;
         changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
-        prevLength !== next.length &&
+        prevLength !== nextLength &&
           target[STORE_NODE].length &&
-          setSignal(target[STORE_NODE].length, next.length);
+          setSignal(target[STORE_NODE].length, nextLength);
         return;
       }
 
@@ -289,9 +290,11 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
       }
     }
 
-    if (prevLength !== next.length) {
+    const nextLength = next.length;
+
+    if (prevLength !== nextLength) {
       changed = true;
-      target[STORE_NODE].length && setSignal(target[STORE_NODE].length, next.length);
+      target[STORE_NODE].length && setSignal(target[STORE_NODE].length, nextLength);
     }
     changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
     return;

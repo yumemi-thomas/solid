@@ -10,8 +10,10 @@ import {
   flush,
   isPending,
   latest,
+  mapArray,
   refresh,
-  untrack
+  untrack,
+  type Refreshable
 } from "../../src/index.js";
 
 afterEach(() => flush());
@@ -2046,6 +2048,360 @@ describe("createOptimisticStore", () => {
       expect(todos.length).toBe(2);
       expect(todos[0]).toBe(ref1); // first item identity still preserved
       expect(todos[1]).toBe(ref2); // second item identity preserved
+    });
+
+    it("does not pass undefined rows to mapArray during optimistic add and source change", async () => {
+      type Comment = { id: number; text: string };
+      let commentId = 0;
+      const serverComments = Array.from({ length: 3 }, () => [
+        { id: commentId, text: `Comment ${commentId++}` },
+        { id: commentId, text: `Comment ${commentId++}` },
+        { id: commentId, text: `Comment ${commentId++}` }
+      ]);
+      const fetches: Array<{ issueId: number; resolve: () => void }> = [];
+      const adds: Array<{ issueId: number; text: string; resolve: () => void }> = [];
+      let issue!: () => number;
+      let setIssue!: (fn: (issue: number) => number) => void;
+      let comments!: Refreshable<readonly Comment[]>;
+      let setComments!: (fn: (comments: Comment[]) => void) => void;
+      let addComment!: (issueId: number, text: string) => Promise<void>;
+      let mapped!: () => string[];
+      const rendered: string[][] = [];
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        flush();
+      };
+
+      createRoot(dispose => {
+        const [issueId, setIssueId] = createSignal(0);
+        [comments, setComments] = createOptimisticStore(
+          () =>
+            new Promise<Comment[]>(resolve => {
+              const requestedIssue = issueId();
+              fetches.push({
+                issueId: requestedIssue,
+                resolve: () => resolve(structuredClone(serverComments[requestedIssue]))
+              });
+            }),
+          [] as Comment[]
+        );
+        issue = issueId;
+        setIssue = setIssueId;
+        addComment = action(function* (issueId: number, text: string) {
+          setComments(draft => {
+            draft.push({ id: -1, text });
+          });
+          yield new Promise<void>(resolve => {
+            adds.push({
+              issueId,
+              text,
+              resolve: () => {
+                serverComments[issueId].push({ id: commentId++, text });
+                resolve();
+              }
+            });
+          });
+          refresh(comments);
+        });
+        mapped = mapArray(
+          () => comments,
+          comment => comment.text
+        );
+        createRenderEffect(
+          () => mapped(),
+          value => {
+            rendered.push(value);
+          }
+        );
+        return dispose;
+      });
+
+      flush();
+      const initialFetch = fetches.shift()!;
+      expect(initialFetch).toMatchObject({ issueId: 0 });
+      initialFetch.resolve();
+      await settle();
+
+      expect(mapped()).toEqual(["Comment 0", "Comment 1", "Comment 2"]);
+
+      const firstAdd = addComment(issue(), "First");
+      flush();
+      expect(mapped()).toEqual(["Comment 0", "Comment 1", "Comment 2", "First"]);
+
+      adds.shift()!.resolve();
+      await settle();
+      fetches.shift()!.resolve();
+      await firstAdd;
+      await settle();
+
+      expect(mapped()).toEqual(["Comment 0", "Comment 1", "Comment 2", "First"]);
+
+      const secondAdd = addComment(issue(), "Second");
+      setIssue(id => id + 1);
+      flush();
+
+      expect(mapped()).not.toContain(undefined as unknown as string);
+
+      fetches.find(fetch => fetch.issueId === 1)!.resolve();
+      await settle();
+
+      expect(comments.length).toBe(3);
+      expect(Array.from(comments as Comment[]).map(comment => comment.text)).toEqual([
+        "Comment 3",
+        "Comment 4",
+        "Comment 5"
+      ]);
+      expect(rendered.at(-1)).not.toContain(undefined as unknown as string);
+
+      adds.shift()!.resolve();
+      await secondAdd;
+      await settle();
+    });
+
+    it("clears optimistic rows when a separate source transition resolves fresh data (#2719)", async () => {
+      type Comment = { id: number; text: string };
+      const serverComments = [
+        [
+          { id: 0, text: "Issue 0 A" },
+          { id: 1, text: "Issue 0 B" }
+        ],
+        [
+          { id: 2, text: "Issue 1 A" },
+          { id: 3, text: "Issue 1 B" }
+        ]
+      ];
+      const fetches: Array<{ issueId: number; resolve: () => void }> = [];
+      let setIssue!: (issue: number) => number;
+      let comments!: Refreshable<readonly Comment[]>;
+      let setComments!: (fn: (comments: Comment[]) => void) => void;
+      let addComment!: () => Promise<void>;
+      let nextIssue!: () => Promise<void>;
+      let resolveAdd!: () => void;
+      const rendered: string[][] = [];
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        flush();
+      };
+
+      createRoot(dispose => {
+        const [issueId, setIssueId] = createSignal(0);
+        setIssue = setIssueId;
+        [comments, setComments] = createOptimisticStore(
+          () =>
+            new Promise<Comment[]>(resolve => {
+              const requestedIssue = issueId();
+              fetches.push({
+                issueId: requestedIssue,
+                resolve: () => resolve(structuredClone(serverComments[requestedIssue]))
+              });
+            }),
+          [] as Comment[]
+        );
+        addComment = action(function* () {
+          setComments(draft => {
+            draft.push({ id: -1, text: "Optimistic" });
+          });
+          yield new Promise<void>(resolve => {
+            resolveAdd = resolve;
+          });
+        });
+        nextIssue = action(function* () {
+          setIssue(1);
+          const fetch = fetches.find(fetch => fetch.issueId === 1);
+          if (fetch) yield new Promise<void>(resolve => queueMicrotask(resolve));
+        });
+        createRenderEffect(
+          () => comments.map(comment => comment.text),
+          value => {
+            rendered.push(value);
+          }
+        );
+        return dispose;
+      });
+
+      flush();
+      fetches.shift()!.resolve();
+      await settle();
+
+      expect(rendered.at(-1)).toEqual(["Issue 0 A", "Issue 0 B"]);
+
+      const add = addComment();
+      flush();
+      expect(rendered.at(-1)).toEqual(["Issue 0 A", "Issue 0 B", "Optimistic"]);
+
+      const next = nextIssue();
+      flush();
+      fetches.find(fetch => fetch.issueId === 1)!.resolve();
+      await next;
+      await settle();
+
+      expect(comments.length).toBe(2);
+      expect(rendered.at(-1)).toEqual(["Issue 1 A", "Issue 1 B"]);
+
+      resolveAdd();
+      await add;
+      await settle();
+      expect(rendered.at(-1)).toEqual(["Issue 1 A", "Issue 1 B"]);
+    });
+
+    it("clears optimistic rows when a draft-mutating projection resolves fresh data", async () => {
+      type Comment = { id: number; text: string };
+      const serverComments = [
+        [
+          { id: 0, text: "Issue 0 A" },
+          { id: 1, text: "Issue 0 B" }
+        ],
+        [
+          { id: 2, text: "Issue 1 A" },
+          { id: 3, text: "Issue 1 B" }
+        ]
+      ];
+      const fetches: Array<{ issueId: number; resolve: () => void }> = [];
+      let setIssue!: (issue: number) => number;
+      let comments!: Refreshable<readonly Comment[]>;
+      let setComments!: (fn: (comments: Comment[]) => void) => void;
+      let addComment!: () => Promise<void>;
+      let nextIssue!: () => Promise<void>;
+      let resolveAdd!: () => void;
+      const rendered: string[][] = [];
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        flush();
+      };
+
+      createRoot(dispose => {
+        const [issueId, setIssueId] = createSignal(0);
+        setIssue = setIssueId;
+        [comments, setComments] = createOptimisticStore(async draft => {
+          const requestedIssue = issueId();
+          await new Promise<void>(resolve => {
+            fetches.push({ issueId: requestedIssue, resolve });
+          });
+          const next = serverComments[requestedIssue];
+          for (let i = 0; i < next.length; i++) draft[i] = structuredClone(next[i]);
+          draft.length = next.length;
+        }, [] as Comment[]);
+        addComment = action(function* () {
+          setComments(draft => {
+            draft.push({ id: -1, text: "Optimistic" });
+          });
+          yield new Promise<void>(resolve => {
+            resolveAdd = resolve;
+          });
+        });
+        nextIssue = action(function* () {
+          setIssue(1);
+          const fetch = fetches.find(fetch => fetch.issueId === 1);
+          if (fetch) yield new Promise<void>(resolve => queueMicrotask(resolve));
+        });
+        createRenderEffect(
+          () => comments.map(comment => comment.text),
+          value => {
+            rendered.push(value);
+          }
+        );
+        return dispose;
+      });
+
+      flush();
+      fetches.shift()!.resolve();
+      await settle();
+
+      expect(rendered.at(-1)).toEqual(["Issue 0 A", "Issue 0 B"]);
+
+      const add = addComment();
+      flush();
+      expect(rendered.at(-1)).toEqual(["Issue 0 A", "Issue 0 B", "Optimistic"]);
+
+      const next = nextIssue();
+      flush();
+      fetches.find(fetch => fetch.issueId === 1)!.resolve();
+      await next;
+      await settle();
+
+      expect(comments.length).toBe(2);
+      expect(rendered.at(-1)).toEqual(["Issue 1 A", "Issue 1 B"]);
+
+      resolveAdd();
+      await add;
+      await settle();
+      expect(rendered.at(-1)).toEqual(["Issue 1 A", "Issue 1 B"]);
+    });
+
+    it("recycles an optimistic row when fresh derived data has the same key", async () => {
+      type Todo = { id: string; title: string; saved?: boolean };
+      let serverTodos: Todo[] = [];
+      const fetches: Array<() => void> = [];
+      let todos!: Refreshable<readonly Todo[]>;
+      let setTodos!: (fn: (todos: Todo[]) => void) => void;
+      let addTodo!: () => Promise<void>;
+      let resolveAdd!: () => void;
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        flush();
+      };
+
+      createRoot(dispose => {
+        [todos, setTodos] = createOptimisticStore(
+          () =>
+            new Promise<Todo[]>(resolve => {
+              fetches.push(() => resolve(structuredClone(serverTodos)));
+            }),
+          [] as Todo[],
+          { key: "id" }
+        );
+        createRenderEffect(
+          () => todos.map(todo => todo.title),
+          () => {}
+        );
+        addTodo = action(function* () {
+          setTodos(draft => {
+            draft.push({ id: "1", title: "Optimistic" });
+          });
+          yield new Promise<void>(resolve => {
+            resolveAdd = resolve;
+          });
+        });
+        return dispose;
+      });
+
+      flush();
+      fetches.shift()!();
+      await settle();
+
+      const add = addTodo();
+      flush();
+
+      const optimisticRef = todos[0];
+      expect(optimisticRef.title).toBe("Optimistic");
+
+      serverTodos = [{ id: "1", title: "Saved", saved: true }];
+      refresh(todos);
+      flush();
+      fetches.shift()!();
+      await settle();
+
+      expect(todos.length).toBe(1);
+      expect(todos[0]).toBe(optimisticRef);
+      expect(todos[0].title).toBe("Saved");
+      expect(todos[0].saved).toBe(true);
+
+      resolveAdd();
+      await add;
+      await settle();
+      expect(todos[0].title).toBe("Saved");
     });
 
     it("optimistic write reverts to computed value after async completes", async () => {

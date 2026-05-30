@@ -1,11 +1,18 @@
 import {
   computed,
   CONFIG_AUTO_DISPOSE,
+  NOT_PENDING,
   setSignal,
   type Computed,
   type Refreshable
 } from "../core/index.js";
-import { GlobalQueue, setProjectionWriteActive } from "../core/scheduler.js";
+import {
+  GlobalQueue,
+  insertSubs,
+  projectionWriteActive,
+  schedule,
+  setProjectionWriteActive
+} from "../core/scheduler.js";
 import { runProjectionComputed } from "./projection.js";
 import {
   $DELETED,
@@ -104,26 +111,47 @@ function clearOptimisticStore(store: any): void {
   const target = store[$TARGET] as StoreNode | undefined;
   if (!target || !target[STORE_OPTIMISTIC_OVERRIDE]) return;
 
+  clearOptimisticOverride(target);
+}
+
+function clearOptimisticOverride(target: StoreNode): void {
   const override = target[STORE_OPTIMISTIC_OVERRIDE];
+  if (!override) return;
   const nodes = target[STORE_NODE];
+  delete target[STORE_OPTIMISTIC_OVERRIDE];
 
   // Notify signals for all overridden properties
   // Use projectionWriteActive to bypass optimistic signal behavior (no lane creation)
   // This ensures reversion effects go to regular queues, not lane queues
+  const wasProjectionWriteActive = projectionWriteActive;
   setProjectionWriteActive(true);
   try {
     if (nodes) {
       for (const key of Reflect.ownKeys(override)) {
         if (nodes[key]) {
+          const node = nodes[key];
           // Clear lane association so effects go to regular queue
-          nodes[key]._optimisticLane = undefined;
+          node._optimisticLane = undefined;
           // Re-read from base (STORE_OVERRIDE or STORE_VALUE)
           const baseValue =
             target[STORE_OVERRIDE] && key in target[STORE_OVERRIDE]
               ? target[STORE_OVERRIDE][key]
               : target[STORE_VALUE][key];
           const value = baseValue === $DELETED ? undefined : baseValue;
-          setSignal(nodes[key], isWrappable(value) ? wrap(value, target) : value);
+          const next = isWrappable(value) ? wrap(value, target) : value;
+          const prev =
+            node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING
+              ? node._overrideValue
+              : node._pendingValue !== NOT_PENDING
+                ? node._pendingValue
+                : node._value;
+          node._overrideValue = NOT_PENDING;
+          node._pendingValue = NOT_PENDING;
+          node._value = next;
+          if (!node._equals || !node._equals(prev, next)) {
+            insertSubs(node, true);
+            schedule();
+          }
         }
       }
       // Notify $TRACK
@@ -133,11 +161,8 @@ function clearOptimisticStore(store: any): void {
       }
     }
   } finally {
-    setProjectionWriteActive(false);
+    setProjectionWriteActive(wasProjectionWriteActive);
   }
-
-  // Clear the optimistic override
-  delete target[STORE_OPTIMISTIC_OVERRIDE];
 }
 
 function createOptimisticProjectionInternal<T extends object = {}>(
@@ -175,20 +200,33 @@ function createOptimisticProjectionInternal<T extends object = {}>(
     // All writes inside firewall recompute must go to STORE_OVERRIDE (base), not
     // STORE_OPTIMISTIC_OVERRIDE. The outer wrap covers the sync body (including
     // `fn(draft)` and the initial commit); `wrapCommit` re-applies the flag for
-    // async yields because they fire outside any enclosing try/finally.
+    // async yields because they fire outside any enclosing try/finally. It also
+    // consumes stale optimistic overlays once fresh projected data lands.
+    const clearProjectionOverride = () => {
+      const target = wrappedStore[$TARGET] as StoreNode | undefined;
+      if (target?.[STORE_OPTIMISTIC_OVERRIDE]) clearOptimisticOverride(target);
+    };
     const wrapCommit = (write: () => void) => {
+      const wasProjectionWriteActive = projectionWriteActive;
       setProjectionWriteActive(true);
       try {
         write();
+        clearProjectionOverride();
       } finally {
-        setProjectionWriteActive(false);
+        setProjectionWriteActive(wasProjectionWriteActive);
       }
     };
     node = computed(
       () => {
         setProjectionWriteActive(true);
         try {
-          runProjectionComputed(wrappedStore, fn, options?.key || "id", wrapCommit);
+          runProjectionComputed(
+            wrappedStore,
+            fn,
+            options?.key || "id",
+            wrapCommit,
+            clearProjectionOverride
+          );
         } finally {
           setProjectionWriteActive(false);
         }

@@ -130,14 +130,15 @@ export function runProjectionComputed<T extends object>(
   wrappedStore: Store<T>,
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
   key: string | ((item: NonNullable<any>) => any),
-  wrapCommit?: (write: () => void) => void
+  wrapCommit?: (write: () => void) => void,
+  onDraftWrite?: () => void
 ): Computed<void | T> {
   const owner = getOwner() as Computed<void | T>;
   let settled = false;
   let result: void | T | Promise<void | T> | AsyncIterable<void | T>;
   const draft = new Proxy(
     wrappedStore,
-    createWriteTraps(() => !settled || owner._inFlight === result)
+    createWriteTraps(() => !settled || owner._inFlight === result, onDraftWrite)
   );
   storeSetter<T>(draft, s => {
     result = fn(s);
@@ -152,7 +153,10 @@ export function runProjectionComputed<T extends object>(
   return owner;
 }
 
-export function createWriteTraps(isActive?: () => boolean): ProxyHandler<any> {
+export function createWriteTraps(
+  isActive?: () => boolean,
+  onDraftWrite?: () => void
+): ProxyHandler<any> {
   const traps: ProxyHandler<any> = {
     get(_, prop) {
       let value;
@@ -184,6 +188,7 @@ export function createWriteTraps(isActive?: () => boolean): ProxyHandler<any> {
       setProjectionWriteActive(true);
       try {
         _[prop] = value;
+        onDraftWrite?.();
       } finally {
         setWriteOverride(false);
         setProjectionWriteActive(false);
@@ -196,6 +201,7 @@ export function createWriteTraps(isActive?: () => boolean): ProxyHandler<any> {
       setProjectionWriteActive(true);
       try {
         delete _[prop];
+        onDraftWrite?.();
       } finally {
         setWriteOverride(false);
         setProjectionWriteActive(false);
