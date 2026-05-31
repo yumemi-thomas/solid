@@ -28,6 +28,7 @@ import {
   STORE_OVERRIDE,
   STORE_VALUE,
   STORE_WRAP,
+  notifySelf,
   storeSetter,
   storeTraps,
   wrap,
@@ -157,7 +158,7 @@ function clearOptimisticOverride(target: StoreNode): void {
       // Notify $TRACK
       if (nodes[$TRACK]) {
         nodes[$TRACK]._optimisticLane = undefined;
-        setSignal(nodes[$TRACK], undefined);
+        notifySelf(target);
       }
     }
   } finally {

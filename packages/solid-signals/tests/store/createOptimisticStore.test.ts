@@ -7,6 +7,7 @@ import {
   createRoot,
   createSignal,
   createStore,
+  deep,
   flush,
   isPending,
   latest,
@@ -1623,6 +1624,165 @@ describe("createOptimisticStore", () => {
 
       expect(state!.data).toBe(999);
       expect(values).toContainEqual({ data: 999, pending: true });
+    });
+
+    it("isPending tracks deep optimistic store reads during an optimistic transition", async () => {
+      let state: { count: number };
+      let setState: (fn: (s: { count: number }) => void) => void;
+      let resolveAction!: () => void;
+      let increment!: () => Promise<void>;
+      const pendingValues: boolean[] = [];
+
+      createRoot(() => {
+        [state, setState] = createOptimisticStore({ count: 0 });
+
+        createRenderEffect(
+          () => isPending(() => deep(state)),
+          value => {
+            pendingValues.push(value);
+          }
+        );
+
+        increment = action(function* () {
+          setState(s => {
+            s.count++;
+          });
+          yield new Promise<void>(resolve => {
+            resolveAction = resolve;
+          });
+        });
+      });
+
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
+
+      const actionPromise = increment();
+      flush();
+
+      expect(state!.count).toBe(1);
+      expect(pendingValues.at(-1)).toBe(true);
+
+      resolveAction();
+      await actionPromise;
+      await Promise.resolve();
+      flush();
+
+      expect(state!.count).toBe(0);
+      expect(pendingValues.at(-1)).toBe(false);
+    });
+
+    it("isPending tracks deep optimistic store reads before async refresh starts", async () => {
+      let state: { count: number };
+      let setState: (fn: (s: { count: number }) => void) => void;
+      let save!: () => Promise<void>;
+      let resolveAction!: () => void;
+      const pendingValues: boolean[] = [];
+
+      createRoot(() => {
+        [state, setState] = createOptimisticStore(async () => ({ count: 0 }), { count: 0 });
+
+        createRenderEffect(
+          () => isPending(() => deep(state)),
+          value => {
+            pendingValues.push(value);
+          }
+        );
+
+        save = action(function* () {
+          setState(s => {
+            s.count++;
+          });
+          yield new Promise<void>(resolve => {
+            resolveAction = resolve;
+          });
+          refresh(state);
+        });
+      });
+
+      flush();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
+
+      const actionPromise = save();
+      flush();
+
+      expect(state!.count).toBe(1);
+      expect(pendingValues.at(-1)).toBe(true);
+
+      resolveAction();
+      await actionPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+
+      expect(pendingValues.at(-1)).toBe(false);
+    });
+
+    it("isPending clears for deep optimistic store reads when fresh projection data lands", async () => {
+      let serverCount = 0;
+      const fetches: Array<() => void> = [];
+      let state: { count: number };
+      let setState: (fn: (s: { count: number }) => void) => void;
+      let save!: () => Promise<void>;
+      let resolveAction!: () => void;
+      const pendingValues: boolean[] = [];
+
+      createRoot(() => {
+        [state, setState] = createOptimisticStore(
+          () =>
+            new Promise<{ count: number }>(resolve => {
+              fetches.push(() => resolve({ count: serverCount }));
+            }),
+          { count: 0 }
+        );
+
+        createRenderEffect(
+          () => isPending(() => deep(state)),
+          value => {
+            pendingValues.push(value);
+          }
+        );
+
+        save = action(function* () {
+          setState(s => {
+            s.count = 1;
+          });
+          yield new Promise<void>(resolve => {
+            resolveAction = resolve;
+          });
+          serverCount = 2;
+          refresh(state);
+        });
+      });
+
+      flush();
+      fetches.shift()!();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
+
+      const actionPromise = save();
+      flush();
+
+      expect(state!.count).toBe(1);
+      expect(pendingValues.at(-1)).toBe(true);
+
+      resolveAction();
+      await actionPromise;
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(true);
+
+      fetches.shift()!();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+
+      expect(state!.count).toBe(2);
+      expect(pendingValues.at(-1)).toBe(false);
     });
 
     it("isPending stays true for generator-backed optimistic stores while override is visible", async () => {

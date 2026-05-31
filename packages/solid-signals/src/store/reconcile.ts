@@ -11,6 +11,7 @@ import {
   STORE_OPTIMISTIC_OVERRIDE,
   STORE_OVERRIDE,
   STORE_VALUE,
+  notifySelf,
   storeLookup,
   wrap
 } from "./store.js";
@@ -97,7 +98,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
           applyState(next[j], wrapped, keyFn);
         }
 
-        changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
+        changed && notifySelf(target);
         prevLength !== next.length &&
           target[STORE_NODE].length &&
           setSignal(target[STORE_NODE].length, next.length);
@@ -149,7 +150,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       changed = true;
       target[STORE_NODE].length && setSignal(target[STORE_NODE].length, next.length);
     }
-    changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
+    changed && notifySelf(target);
     return;
   }
 
@@ -242,7 +243,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
         }
 
         const nextLength = next.length;
-        changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
+        changed && notifySelf(target);
         prevLength !== nextLength &&
           target[STORE_NODE].length &&
           setSignal(target[STORE_NODE].length, nextLength);
@@ -296,7 +297,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
       changed = true;
       target[STORE_NODE].length && setSignal(target[STORE_NODE].length, nextLength);
     }
-    changed && target[STORE_NODE][$TRACK] && setSignal(target[STORE_NODE][$TRACK], void 0);
+    changed && notifySelf(target);
     return;
   }
 

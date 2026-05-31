@@ -84,6 +84,7 @@ export const STORE_VALUE = "v",
   STORE_LOOKUP = "l",
   STORE_FIREWALL = "f",
   STORE_OPTIMISTIC = "p";
+const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
   [$PROXY]: any;
@@ -247,6 +248,15 @@ export function trackSelf(target: StoreNode, symbol: symbol = $TRACK) {
     );
 }
 
+export function notifySelf(target: StoreNode) {
+  const node = target[STORE_NODE]?.[$TRACK];
+  node &&
+    setSignal(
+      node,
+      target[STORE_OPTIMISTIC] && !projectionWriteActive ? STORE_SELF_PENDING : undefined
+    );
+}
+
 export function getKeys(
   source: Record<PropertyKey, any>,
   override: Record<PropertyKey, any> | undefined,
@@ -367,7 +377,7 @@ function notifyStoreProperty(
       setSignal(node, undefined);
     }
   }
-  nodes[$TRACK] && setSignal(nodes[$TRACK], undefined);
+  notifySelf(target);
 }
 
 let Writing: Set<Object> | null = null;
