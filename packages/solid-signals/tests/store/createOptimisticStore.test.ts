@@ -1672,7 +1672,7 @@ describe("createOptimisticStore", () => {
     });
 
     it("isPending tracks deep optimistic store reads before async refresh starts", async () => {
-      let state: { count: number };
+      let state: Refreshable<{ count: number }>;
       let setState: (fn: (s: { count: number }) => void) => void;
       let save!: () => Promise<void>;
       let resolveAction!: () => void;
@@ -1723,7 +1723,7 @@ describe("createOptimisticStore", () => {
     it("isPending clears for deep optimistic store reads when fresh projection data lands", async () => {
       let serverCount = 0;
       const fetches: Array<() => void> = [];
-      let state: { count: number };
+      let state: Refreshable<{ count: number }>;
       let setState: (fn: (s: { count: number }) => void) => void;
       let save!: () => Promise<void>;
       let resolveAction!: () => void;
@@ -2309,7 +2309,7 @@ describe("createOptimisticStore", () => {
       await settle();
 
       expect(comments.length).toBe(3);
-      expect(Array.from(comments as Comment[]).map(comment => comment.text)).toEqual([
+      expect(Array.from(comments).map(comment => comment.text)).toEqual([
         "Comment 3",
         "Comment 4",
         "Comment 5"
