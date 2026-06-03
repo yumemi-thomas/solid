@@ -10,7 +10,8 @@ import {
   getOwner,
   markSnapshotScope,
   releaseSnapshotScope,
-  setSnapshotCapture
+  setSnapshotCapture,
+  snapshot
 } from "../src/index.js";
 
 afterEach(() => {
@@ -468,6 +469,14 @@ describe("store snapshot support", () => {
 
     expect($age()).toBe(30);
     clearSnapshots();
+  });
+
+  it("preserves an overridden array length of 0", () => {
+    const [store, setStore] = createStore<number[]>([1, 2, 3]);
+
+    setStore(() => []);
+
+    expect(snapshot(store)).toEqual([]);
   });
 });
 
