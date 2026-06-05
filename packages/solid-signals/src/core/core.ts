@@ -851,17 +851,18 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     return el._overrideValue as T;
   }
 
-  // Entanglement gate: a reader recomputing under an optimistic lane that
-  // reads a plain signal with a pending mid-transition write sees the
-  // committed value. Async drivers are not under an optimistic lane and so
-  // bypass this, reading _pendingValue for correct fetching. The sub is
-  // recorded for replay at commit so it re-runs with the new committed view.
+  // Entanglement gate: a reader recomputing under an optimistic lane that reads
+  // a pending mid-transition write sees the committed value. Projection-store
+  // manual writes use the firewall's manual-write flag to opt into this path.
+  // Async drivers are not under an optimistic lane and so bypass this, reading
+  // _pendingValue for correct fetching. The sub is recorded for replay at commit
+  // so it re-runs with the new committed view.
   if (
     activeTransition !== null &&
     currentOptimisticLane !== null &&
     !latestReadActive &&
     el._pendingValue !== NOT_PENDING &&
-    owner === el &&
+    (owner === el || !!((owner as Computed<unknown>)._flags & REACTIVE_MANUAL_WRITE)) &&
     !(el as Partial<Computed<unknown>>)._fn &&
     c
   ) {
@@ -1094,7 +1095,10 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
     return el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED);
   }
   if (firewall && el._pendingValue !== NOT_PENDING) {
-    return !firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING);
+    return (
+      !!(firewall._flags & REACTIVE_MANUAL_WRITE) ||
+      (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING))
+    );
   }
   // Optimistic nodes with active override:
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {

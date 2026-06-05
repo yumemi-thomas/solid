@@ -783,10 +783,11 @@ export function createStore<T extends object = {}>(
   return [
     wrappedStore,
     derived
-      ? (fn: (draft: T) => void): void => (
-          storeSetter(wrappedStore, fn),
-          suppressComputedRecompute((wrappedStore as any)[$REFRESH])
-        )
+      ? (fn: (draft: T) => void): void => {
+          // Mark the projection as manually written before notifying property nodes.
+          suppressComputedRecompute((wrappedStore as any)[$REFRESH]);
+          storeSetter(wrappedStore, fn);
+        }
       : (fn: (draft: T) => void): void => storeSetter(wrappedStore, fn)
   ];
 }

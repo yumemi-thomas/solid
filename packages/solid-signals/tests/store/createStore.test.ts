@@ -1,6 +1,8 @@
 import {
   $TARGET,
+  action,
   createEffect,
+  createLoadingBoundary,
   createMemo,
   createProjection,
   createRenderEffect,
@@ -152,6 +154,62 @@ describe("Unwrapping Edge Cases", () => {
 });
 
 describe("Tracking State changes", () => {
+  test("isPending sees a derived store property update held by an action", async () => {
+    let resolveInitial!: (value: { a: number; b: number }) => void;
+    let resolveAction!: () => void;
+    let store!: { readonly a?: number; readonly b?: number };
+    let setStore!: (fn: (draft: { a?: number; b?: number }) => void) => void;
+    const renderedValues: string[] = [];
+
+    createRoot(() => {
+      [store, setStore] = createStore<{ a?: number; b?: number }>(
+        async () =>
+          new Promise<{ a: number; b: number }>(resolve => {
+            resolveInitial = resolve;
+          }),
+        {}
+      );
+
+      const boundary = createLoadingBoundary(
+        () =>
+          `a: ${store.a} ${isPending(() => store.a) ? "pending..." : ""} | b: ${
+            store.b
+          } ${isPending(() => store.b) ? "pending..." : ""}`,
+        () => "loading"
+      ) as () => string;
+
+      createRenderEffect(
+        () => boundary(),
+        value => {
+          renderedValues.push(value);
+        }
+      );
+    });
+
+    resolveInitial({ a: 10, b: 20 });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    flush();
+    expect(renderedValues.at(-1)).toBe("a: 10  | b: 20 ");
+
+    const click = action(function* () {
+      setStore(x => {
+        x.a!++;
+      });
+      yield new Promise<void>(resolve => {
+        resolveAction = resolve;
+      });
+    });
+
+    const promise = click();
+    flush();
+    expect(renderedValues.at(-1)).toBe("a: 10 pending... | b: 20 ");
+
+    resolveAction();
+    await promise;
+    flush();
+    expect(renderedValues.at(-1)).toBe("a: 11  | b: 20 ");
+  });
+
   test("isPending sees a derived store update held by async work", async () => {
     const [store, setStore] = createStore<string[]>(() => [], []);
     let asyncMemo: () => string;
