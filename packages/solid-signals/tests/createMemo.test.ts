@@ -912,6 +912,33 @@ describe("async compute", () => {
     expect(derived()).toBe(3);
   });
 
+  it("derived signal resumes tracking after repeated same manual writes (#2745)", () => {
+    let observed: number | undefined;
+    const [setOriginal, setDerived] = createRoot(() => {
+      const [original, setO] = createSignal(0);
+      const [derived, setD] = createSignal(() => original());
+      createRenderEffect(derived, value => {
+        observed = value;
+      });
+      return [setO, setD] as const;
+    });
+
+    flush();
+    expect(observed).toBe(0);
+
+    setDerived(42);
+    flush();
+    expect(observed).toBe(42);
+
+    setDerived(42);
+    flush();
+    expect(observed).toBe(42);
+
+    setOriginal(1);
+    flush();
+    expect(observed).toBe(1);
+  });
+
   it("same-value manual write still trumps recompute within a tick (#2692)", () => {
     const [setOriginal, setDerived, derived] = createRoot(() => {
       const [original, setO] = createSignal(0);
