@@ -8,12 +8,12 @@ import { hydrate, insert } from "@solidjs/web";
 import type * as WebServer from "../../types/server.js";
 
 function setupHydration() {
-  (globalThis as any)._$HY = { events: [], completed: new WeakSet(), r: {} };
+  (globalThis as any)._$HY = { events: [], completed: new WeakSet(), r: {}, fe() {} };
 }
 
 async function renderStreamHtml(code: () => any): Promise<string> {
-  const serverEntry = "../../dist/server.js" as string;
-  const { renderToStream } = (await import(serverEntry)) as typeof WebServer;
+  const serverEntry = new URL("./dist/server.js", `file://${process.cwd()}/`).href;
+  const { renderToStream } = (await import(/* @vite-ignore */ serverEntry)) as typeof WebServer;
   return new Promise(resolve => {
     const chunks: string[] = [];
     renderToStream(code).pipe({
@@ -32,6 +32,20 @@ function mountStreamHtml(container: HTMLDivElement, html: string) {
   const scripts = [...html.matchAll(scriptRe)].map(match => match[1]);
   container.innerHTML = html.replace(scriptRe, "");
   for (const script of scripts) (0, eval)(script);
+}
+
+async function settleHydration() {
+  await Promise.resolve();
+  await Promise.resolve();
+  flush();
+  await new Promise(r => setTimeout(r, 50));
+}
+
+function expectNoOrphanWarnings(warn: ReturnType<typeof vi.spyOn>) {
+  const orphanWarns = warn.mock.calls.filter(
+    c => typeof c[0] === "string" && c[0].includes("unclaimed server-rendered node")
+  );
+  expect(orphanWarns).toHaveLength(0);
 }
 
 describe("Phase 1: Hydration error diagnostics", () => {
@@ -123,18 +137,238 @@ describe("Phase 1: Hydration error diagnostics", () => {
       );
     }, container);
 
-    await Promise.resolve();
-    await Promise.resolve();
-    flush();
-    await new Promise(r => setTimeout(r, 50));
+    await settleHydration();
 
     expect(container.textContent).toBe("ItemError: Item bad-item not found");
     expect(container.innerHTML).not.toContain('id="pl-0"');
 
-    const orphanWarns = warn.mock.calls.filter(
-      c => typeof c[0] === "string" && c[0].includes("unclaimed server-rendered node")
+    expectNoOrphanWarnings(warn);
+    warn.mockRestore();
+  });
+
+  test("Errored wrapping Loading hydrates resolved async siblings once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function Test(props: { id: string }) {
+      const data = createMemo(async () => {
+        await Promise.resolve();
+        return props.id;
+      });
+
+      return (
+        <Errored fallback={"Error loading test query..."}>
+          <Loading fallback={"Loading test query..."}>
+            <div class="test-block">Test query result: {data()}</div>
+          </Loading>
+        </Errored>
+      );
+    }
+
+    function App() {
+      return (
+        <div>
+          <h2>createQueryTest</h2>
+          <Test id="key-1" />
+          <p>Another query</p>
+          <Test id="key-2" />
+        </div>
+      );
+    }
+
+    const html =
+      '<div _hk=0><h2>createQueryTest</h2><!--$--><div _hk=200000 class="test-block">Test query result: <!--$-->key-1<!--/--></div><!--/--><p>Another query</p><!--$--><div _hk=500000 class="test-block">Test query result: <!--$-->key-2<!--/--></div><!--/--></div><script>(self.$R=self.$R||{})[""]=[];_$HY.r["1"]=$R[0]=($R[1]=($R[2]=() => { const resolver = { p: 0, s: 0, f: 0 }; resolver.p = new Promise((resolve, reject) => { resolver.s = resolve; resolver.f = reject; }); return resolver; })()).p;_$HY.r["4"]=$R[3]=($R[4]=$R[2]()).p;_$HY.r["200_fr"]=$R[5]=($R[6]=$R[2]()).p;_$HY.r["500_fr"]=$R[7]=($R[8]=$R[2]()).p;($R[9]=(resolver, data) => { resolver.s(data); resolver.p.s = 1; resolver.p.v = data; })($R[1],"key-1");$R[9]($R[6],!0);$R[9]($R[4],"key-2");$R[9]($R[8],!0);</script>';
+
+    setupHydration();
+    mountStreamHtml(container, html);
+
+    dispose = hydrate(() => <App />, container);
+
+    await settleHydration();
+
+    expect([...container.querySelectorAll(".test-block")].map(el => el.textContent)).toEqual([
+      "Test query result: key-1",
+      "Test query result: key-2"
+    ]);
+
+    expectNoOrphanWarnings(warn);
+    warn.mockRestore();
+  });
+
+  test("Loading wrapping Errored hydrates rejected sibling and reset button once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function Item(props: { id: string }) {
+      const [id, setId] = createSignal(props.id);
+      const item = createMemo(async () => {
+        await Promise.resolve();
+        if (id() !== "1") throw new Error(`Item ${id()} not found`);
+        return { title: "Test Item" };
+      });
+
+      return (
+        <Loading fallback={<div>Item Loading...</div>}>
+          <Errored
+            fallback={(error, reset) => (
+              <div>
+                <div>ItemError: {String(error())}</div>
+                <button
+                  onClick={() => {
+                    setId("1");
+                    reset();
+                  }}
+                >
+                  Reset to valid item
+                </button>
+              </div>
+            )}
+          >
+            <div>{item().title}</div>
+          </Errored>
+        </Loading>
+      );
+    }
+
+    function App() {
+      return (
+        <div>
+          <Item id="1" />
+          <Item id="bad-item" />
+        </div>
+      );
+    }
+
+    const html =
+      '<div _hk=0><!--$--><div _hk=200000>Test Item</div><!--/--><!--$--><div _hk=40010><div>ItemError: <!--$-->Error: Item bad-item not found<!--/--></div><button>Reset to valid item</button></div><!--/--></div><script>(self.$R=self.$R||{})[""]=[];_$HY.r["1"]=$R[0]=($R[1]=($R[2]=() => { const resolver = { p: 0, s: 0, f: 0 }; resolver.p = new Promise((resolve, reject) => { resolver.s = resolve; resolver.f = reject; }); return resolver; })()).p;_$HY.r["2_fr"]=$R[3]=($R[4]=$R[2]()).p;_$HY.r["3"]=$R[5]=($R[6]=$R[2]()).p;_$HY.r["4_fr"]=$R[7]=($R[8]=$R[2]()).p;($R[10]=(resolver, data) => { resolver.s(data); resolver.p.s = 1; resolver.p.v = data; })($R[1],$R[9]={title:"Test Item"});$R[10]($R[4],!0);($R[12]=(resolver, data) => { resolver.f(data); resolver.p.catch(() => {}); resolver.p.s = 2; resolver.p.v = data; })($R[6],$R[11]=new Error("Item bad-item not found"));_$HY.r["4000"]=$R[11];$R[10]($R[8],!0);</script>';
+
+    setupHydration();
+    mountStreamHtml(container, html);
+
+    dispose = hydrate(() => <App />, container);
+
+    await settleHydration();
+
+    expect([...container.querySelectorAll("button")].map(el => el.textContent)).toEqual([
+      "Reset to valid item"
+    ]);
+
+    expectNoOrphanWarnings(warn);
+    warn.mockRestore();
+  });
+
+  test("Errored wrapping Loading hydrates rejected fragment into fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function Item(props: { id: string }) {
+      const [id, setId] = createSignal(props.id);
+      const item = createMemo(async () => {
+        await Promise.resolve();
+        if (id() !== "1") throw new Error(`Item ${id()} not found`);
+        return { title: "Test Item" };
+      });
+
+      return (
+        <Errored
+          fallback={(error, reset) => (
+            <div>
+              <div>ItemError: {String(error())}</div>
+              <button
+                onClick={() => {
+                  setId("1");
+                  reset();
+                }}
+              >
+                Reset to valid item
+              </button>
+            </div>
+          )}
+        >
+          <Loading fallback={<div>Item Loading...</div>}>
+            <div>{item().title}</div>
+          </Loading>
+        </Errored>
+      );
+    }
+
+    function App() {
+      return (
+        <div>
+          <Item id="1" />
+          <Item id="bad-item" />
+        </div>
+      );
+    }
+
+    const html =
+      '<div _hk=0><!--$--><template id="pl-200"></template><div _hk=2000>Item Loading...</div><!--pl-200--><!--/--><!--$--><template id="pl-500"></template><div _hk=5000>Item Loading...</div><!--pl-500--><!--/--></div><template id="200"><div _hk=200000>Test Item</div></template><template id="500"> </template><script>(self.$R=self.$R||{})[""]=[];_$HY.r["1"]=$R[0]=($R[1]=($R[2]=() => { const resolver = { p: 0, s: 0, f: 0 }; resolver.p = new Promise((resolve, reject) => { resolver.s = resolve; resolver.f = reject; }); return resolver; })()).p;_$HY.r["200_fr"]=$R[3]=($R[4]=$R[2]()).p;_$HY.r["4"]=$R[5]=($R[6]=$R[2]()).p;_$HY.r["500_fr"]=$R[7]=($R[8]=$R[2]()).p;($R[10]=(resolver, data) => { resolver.s(data); resolver.p.s = 1; resolver.p.v = data; })($R[1],$R[9]={title:"Test Item"});$R[10]($R[4],!0);($R[12]=(resolver, data) => { resolver.f(data); resolver.p.catch(() => {}); resolver.p.s = 2; resolver.p.v = data; })($R[6],$R[11]=new Error("Item bad-item not found"));$R[12]($R[8],$R[11]);function $df(e,n,o,t){if(!(n=document.getElementById(e))||!(o=document.getElementById("pl-"+e)))return 0;for(;o&&8!==o.nodeType&&o.nodeValue!=="pl-"+e;)t=o.nextSibling,o.remove(),o=t;_$HY.done?o.remove():o.replaceWith(n.content),n.remove(),_$HY.fe(e);return 1}$df("200");$df("500");</script>';
+
+    setupHydration();
+    mountStreamHtml(container, html);
+
+    dispose = hydrate(() => <App />, container);
+
+    await settleHydration();
+
+    expect([...container.querySelectorAll("button")].map(el => el.textContent)).toEqual([
+      "Reset to valid item"
+    ]);
+    expect(container.textContent).toContain("ItemError: Error: Item bad-item not found");
+
+    expectNoOrphanWarnings(warn);
+    warn.mockRestore();
+  });
+
+  test("Errored wrapping Loading hydrates late rejected fragment into fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function Item() {
+      const item = createMemo(async () => {
+        await Promise.resolve();
+        throw new Error("Item bad-item not found");
+      });
+
+      return (
+        <Errored
+          fallback={error => (
+            <div>
+              <div>ItemError: {String(error())}</div>
+              <button>Reset to valid item</button>
+            </div>
+          )}
+        >
+          <Loading fallback={<div>Item Loading...</div>}>
+            <div>{item().title}</div>
+          </Loading>
+        </Errored>
+      );
+    }
+
+    const html =
+      '<div _hk=0><!--$--><template id="pl-200"></template><div _hk=2000>Item Loading...</div><!--pl-200--><!--/--></div><template id="200"> </template><script>(self.$R=self.$R||{})[""]=[];_$HY.r["1"]=$R[0]=($R[1]=($R[2]=() => { const resolver = { p: 0, s: 0, f: 0 }; resolver.p = new Promise((resolve, reject) => { resolver.s = resolve; resolver.f = reject; }); return resolver; })()).p;_$HY.r["200_fr"]=$R[3]=($R[4]=$R[2]()).p;function $df(e,n,o,t){if(!(n=document.getElementById(e))||!(o=document.getElementById("pl-"+e)))return 0;for(;o&&8!==o.nodeType&&o.nodeValue!=="pl-"+e;)t=o.nextSibling,o.remove(),o=t;_$HY.done?o.remove():o.replaceWith(n.content),n.remove(),_$HY.fe(e);return 1}</script>';
+
+    setupHydration();
+    mountStreamHtml(container, html);
+
+    dispose = hydrate(
+      () => (
+        <div>
+          <Item />
+        </div>
+      ),
+      container
     );
-    expect(orphanWarns).toHaveLength(0);
+
+    (0, eval)(
+      '($R[6]=(resolver, data) => { resolver.f(data); resolver.p.catch(() => {}); resolver.p.s = 2; resolver.p.v = data; })($R[1],$R[5]=new Error("Item bad-item not found"));$df("200");$R[6]($R[4],$R[5]);'
+    );
+
+    await settleHydration();
+
+    expect([...container.querySelectorAll("button")].map(el => el.textContent)).toEqual([
+      "Reset to valid item"
+    ]);
+    expect(container.textContent).toContain("ItemError: Error: Item bad-item not found");
+
+    expectNoOrphanWarnings(warn);
     warn.mockRestore();
   });
 });

@@ -1246,36 +1246,46 @@ function createBoundaryTrigger(): () => void {
   return set;
 }
 
-function resumeBoundaryHydration(o: Owner, id: string, set: () => void) {
+function resumeBoundaryHydration(o: Owner, id: string, set: () => void, shouldHydrate = true) {
   _pendingBoundaries--;
   if (isDisposed(o)) {
     checkHydrationComplete();
     return;
   }
-  sharedConfig.gather?.(id);
-  _hydratingValue = true;
-  markSnapshotScope(o);
-  _snapshotRootOwner = o;
+  if (shouldHydrate) sharedConfig.gather?.(id);
+  _hydratingValue = shouldHydrate;
+  if (shouldHydrate) {
+    markSnapshotScope(o);
+    _snapshotRootOwner = o;
+  }
   set();
   flush();
-  _snapshotRootOwner = null;
+  if (shouldHydrate) _snapshotRootOwner = null;
   _hydratingValue = false;
-  releaseSnapshotScope(o);
+  if (shouldHydrate) releaseSnapshotScope(o);
   flush();
   checkHydrationComplete();
 }
 
-function initBoundaryResume(o: Owner, id: string): [trigger: () => void, resume: () => void] {
+function initBoundaryResume(
+  o: Owner,
+  id: string
+): [trigger: () => void, resume: (shouldHydrate?: boolean) => void] {
   _pendingBoundaries++;
   onCleanup(() => {
     if (!isDisposed(o as Owner)) return;
     sharedConfig.cleanupFragment?.(id);
   });
   const set = createBoundaryTrigger();
-  return [set, () => resumeBoundaryHydration(o, id, set)];
+  return [set, shouldHydrate => resumeBoundaryHydration(o, id, set, shouldHydrate)];
 }
 
-function waitAndResume(p: any, resume: () => void, assetPromise?: Promise<void>) {
+function waitAndResume(
+  p: any,
+  resume: (shouldHydrate?: boolean) => void,
+  assetPromise?: Promise<void>,
+  hydrateRejected = true
+) {
   const waitFor = assetPromise ? Promise.all([p, assetPromise]) : p;
   waitFor.then(
     () => {
@@ -1287,7 +1297,7 @@ function waitAndResume(p: any, resume: () => void, assetPromise?: Promise<void>)
         p.s = 2;
         p.v = err;
       }
-      resume();
+      resume(hydrateRejected);
     }
   );
 }
@@ -1386,17 +1396,25 @@ export function createLoadingBoundary(
       const [, resume] = initBoundaryResume(o, id);
 
       if (fr && typeof fr === "object" && (fr.s === 1 || fr.s === 2)) {
+        if (fr.s === 2) {
+          // Rejected stream fragments swap to an empty template; any outer error fallback
+          // has to be created as fresh client DOM, not claimed from server markup.
+          const resumeRejected = () => resume(false);
+          if (assetPromise) assetPromise.then(() => queueMicrotask(resumeRejected));
+          else queueMicrotask(resumeRejected);
+          return undefined;
+        }
         if (scheduleResumeAfterAssets(id, resume, assetPromise)) return undefined;
         return fallback();
       }
 
-      waitAndResume(fr, resume, assetPromise);
+      waitAndResume(fr, resume, assetPromise, false);
       return fallback();
     }
 
     if (assetPromise && !sharedConfig.has!(id)) {
       const [, resume] = initBoundaryResume(o, id);
-      assetPromise.then(resume);
+      assetPromise.then(() => resume());
       return undefined;
     }
     return coreLoadingBoundary(fn, fallback, options);

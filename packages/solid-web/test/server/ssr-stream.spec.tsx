@@ -369,9 +369,89 @@ describe("SSR Streaming — Error Handling", () => {
       );
     }
 
-    const html = await renderComplete(() => <App />);
+    const { shell, chunks } = await collectChunks(() => <App />);
+    const html = chunks.join("");
+
+    expect(shell).toContain("Loading...");
+    expect(shell).not.toContain("Error:");
     expect(html).toContain("Error:");
     expect(html).toContain("Boom");
+  });
+
+  test("Errored wrapping Loading streams resolved async siblings once (#2726)", async () => {
+    function Test(props: { id: string }) {
+      const data = createMemo(async () => asyncValue(props.id, 0));
+
+      return (
+        <Errored fallback={"Error loading test query..."}>
+          <Loading fallback={"Loading test query..."}>
+            <div class="test-block">Test query result: {data()}</div>
+          </Loading>
+        </Errored>
+      );
+    }
+
+    function App() {
+      return (
+        <div>
+          <h2>createQueryTest</h2>
+          <Test id="key-1" />
+          <p>Another query</p>
+          <Test id="key-2" />
+        </div>
+      );
+    }
+
+    const html = await renderComplete(() => <App />);
+    expect([...html.matchAll(/class="test-block"/g)]).toHaveLength(2);
+    expect(html).toContain('_hk=200000 class="test-block"');
+    expect(html).toContain('_hk=500000 class="test-block"');
+    expect(html).toContain('_$HY.r["200_fr"]');
+    expect(html).toContain('_$HY.r["500_fr"]');
+    expect(html).toContain("Test query result: <!--$-->key-1<!--/-->");
+    expect(html).toContain("Test query result: <!--$-->key-2<!--/-->");
+  });
+
+  test("Loading wrapping Errored streams rejected sibling with reset button", async () => {
+    function Item(props: { id: string }) {
+      const data = createMemo(async () => {
+        await delay(10);
+        if (props.id !== "1") throw new Error(`Item ${props.id} not found`);
+        return { title: "Test Item" };
+      });
+
+      return (
+        <Loading fallback={<div>Item Loading...</div>}>
+          <Errored
+            fallback={error => (
+              <div>
+                <div>ItemError: {String(error())}</div>
+                <button>Reset to valid item</button>
+              </div>
+            )}
+          >
+            <div>{data().title}</div>
+          </Errored>
+        </Loading>
+      );
+    }
+
+    function App() {
+      return (
+        <div>
+          <Item id="1" />
+          <Item id="bad-item" />
+        </div>
+      );
+    }
+
+    const html = await renderComplete(() => <App />);
+    expect([...html.matchAll(/Reset to valid item/g)]).toHaveLength(1);
+    expect(html).toContain("_hk=200000");
+    expect(html).toContain("_hk=40010");
+    expect(html).toContain('_$HY.r["4000"]');
+    expect(html).toContain("ItemError:");
+    expect(html).toContain("Item bad-item not found");
   });
 
   test("stream completes after error (no hang)", async () => {

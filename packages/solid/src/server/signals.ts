@@ -1496,6 +1496,7 @@ export function createErrorBoundary<U>(
   const ctx = sharedConfig.context;
   const parent = getOwner();
   const owner = createOwner();
+  const outputOwner = ctx ? createOwner() : undefined;
   const resolve = () => {
     const resolved = ctx!.resolve(runWithOwner(createOwner(), fn));
     if (resolved?.p?.length) throw new NotReadyError(Promise.all(resolved.p));
@@ -1504,8 +1505,7 @@ export function createErrorBoundary<U>(
   const renderFallback = (err: any) =>
     ctx
       ? runWithOwner(parent!, () => {
-          const fallbackOwner = createOwner();
-          return runWithOwner(fallbackOwner, () =>
+          return runWithOwner(outputOwner!, () =>
             fallback(
               () => err,
               () => {}
