@@ -381,6 +381,7 @@ function notifyStoreProperty(
 }
 
 let Writing: Set<Object> | null = null;
+
 export const storeTraps: ProxyHandler<StoreNode> = {
   get(target, property, receiver) {
     if (property === $TARGET) return target;
@@ -390,8 +391,9 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       trackSelf(target);
       return receiver;
     }
+    const selfRead = getObserver() === target[STORE_FIREWALL];
     const nodes = getNodes(target, STORE_NODE);
-    const tracked = nodes[property];
+    const tracked = selfRead ? undefined : nodes[property];
     const source = target[STORE_VALUE];
     if (
       !tracked &&
@@ -403,6 +405,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       !source[$TARGET] &&
       !(property in source) &&
       getObserver() &&
+      !selfRead &&
       !writeOnly(receiver)
     ) {
       return read(getNode(nodes, property, undefined, target[STORE_FIREWALL]));
@@ -459,7 +462,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           proto !== Object.prototype
           ? value.bind(storeValue)
           : value;
-      } else if (getObserver()) {
+      } else if (getObserver() && !selfRead) {
         return read(
           getNode(
             nodes,
@@ -500,7 +503,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           ? target[STORE_OVERRIDE][property] !== $DELETED
           : property in target[STORE_VALUE];
 
-    if (writeOnly(target[$PROXY])) return has;
+    if (writeOnly(target[$PROXY]) || getObserver() === target[STORE_FIREWALL]) return has;
     const nodes = getNodes(target, STORE_HAS);
     // If a has-node already exists, it carries the batched presence — `read()`
     // returns `_value` (committed) for untracked reads and the pending value for
@@ -644,7 +647,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
   },
 
   ownKeys(target: StoreNode) {
-    trackSelf(target);
+    if (getObserver() !== target[STORE_FIREWALL]) trackSelf(target);
     // Merge optimistic override with regular override for key enumeration
     let keys = getKeys(target[STORE_VALUE], target[STORE_OVERRIDE], false);
     if (target[STORE_OPTIMISTIC_OVERRIDE]) {
