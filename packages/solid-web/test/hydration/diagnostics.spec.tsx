@@ -43,7 +43,7 @@ async function settleHydration() {
 
 function expectNoOrphanWarnings(warn: ReturnType<typeof vi.spyOn>) {
   const orphanWarns = warn.mock.calls.filter(
-    c => typeof c[0] === "string" && c[0].includes("unclaimed server-rendered node")
+    (c: unknown[]) => typeof c[0] === "string" && c[0].includes("unclaimed server-rendered node")
   );
   expect(orphanWarns).toHaveLength(0);
 }
@@ -321,7 +321,7 @@ describe("Phase 1: Hydration error diagnostics", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     function Item() {
-      const item = createMemo(async () => {
+      const item = createMemo(async (): Promise<{ title: string }> => {
         await Promise.resolve();
         throw new Error("Item bad-item not found");
       });
