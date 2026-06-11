@@ -363,7 +363,7 @@ export function reconcile<T extends U, U>(
     if (state == null) throw new Error("Cannot reconcile null or undefined state");
     const keyFn = typeof key === "string" ? item => item[key] : key;
     const eq = keyFn(state);
-    if (eq !== undefined && keyFn(value) !== keyFn(state))
+    if (eq !== undefined && keyFn(value) !== eq)
       throw new Error("Cannot reconcile states with different identity");
     applyState(value, state, keyFn);
   };
