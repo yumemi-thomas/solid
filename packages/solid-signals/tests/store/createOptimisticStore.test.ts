@@ -1427,6 +1427,39 @@ describe("createOptimisticStore", () => {
       expect(state.length).toBe(2);
       expect(state[0].name).toBe("Item 1");
     });
+
+    it("commits returned nested arrays read only through mapArray", async () => {
+      type Item = { id: number; title: string };
+      let state!: Refreshable<{ items: Item[] }>;
+      let mapped!: () => string[];
+      let resolveItems!: (items: { items: Item[] }) => void;
+
+      createRoot(() => {
+        [state] = createOptimisticStore(
+          () =>
+            new Promise<{ items: Item[] }>(resolve => {
+              resolveItems = resolve;
+            }),
+          { items: [] }
+        );
+        mapped = mapArray(
+          () => state.items,
+          item => item.title
+        );
+        createRenderEffect(
+          () => mapped(),
+          () => {}
+        );
+      });
+
+      flush();
+      resolveItems({ items: [{ id: 1, title: "Item 1" }] });
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+
+      expect(mapped()).toEqual(["Item 1"]);
+    });
   });
 
   describe("memo depending on optimistic store", () => {

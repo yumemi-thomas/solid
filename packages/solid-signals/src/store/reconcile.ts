@@ -49,6 +49,7 @@ function applyState(next: any, state: any, keyFn: (item: NonNullable<any>) => an
 function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) => any) {
   const previous = target[STORE_VALUE];
   if (next === previous) return;
+  const arrayNodes = target[STORE_NODE];
 
   // swap
   (target[STORE_LOOKUP] || storeLookup).set(next, target[$PROXY]);
@@ -88,20 +89,20 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       if (start > newEnd || start > end) {
         for (j = start; j <= newEnd; j++) {
           changed = true;
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrap(next[j], target));
+          arrayNodes?.[j] && setSignal(arrayNodes[j], wrap(next[j], target));
         }
 
         for (; j < next.length; j++) {
           changed = true;
           const wrapped = wrap(temp[j], target);
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrapped);
+          arrayNodes?.[j] && setSignal(arrayNodes[j], wrapped);
           applyState(next[j], wrapped, keyFn);
         }
 
         changed && notifySelf(target);
         prevLength !== next.length &&
-          target[STORE_NODE].length &&
-          setSignal(target[STORE_NODE].length, next.length);
+          arrayNodes?.length &&
+          setSignal(arrayNodes.length, next.length);
         return;
       }
 
@@ -130,9 +131,9 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       for (j = start; j < next.length; j++) {
         if (j in temp) {
           const wrapped = wrap(temp[j], target);
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrapped);
+          arrayNodes?.[j] && setSignal(arrayNodes[j], wrapped);
           applyState(next[j], wrapped, keyFn);
-        } else target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrap(next[j], target));
+        } else arrayNodes?.[j] && setSignal(arrayNodes[j], wrap(next[j], target));
       }
       if (start < next.length) changed = true;
     } else if (next.length) {
@@ -141,14 +142,14 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
         if (isWrappable(item)) applyState(next[i], wrap(item, target), keyFn);
         else {
           if (item !== next[i]) changed = true;
-          target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+          arrayNodes?.[i] && setSignal(arrayNodes[i], next[i]);
         }
       }
     }
 
     if (prevLength !== next.length) {
       changed = true;
-      target[STORE_NODE].length && setSignal(target[STORE_NODE].length, next.length);
+      arrayNodes?.length && setSignal(arrayNodes.length, next.length);
     }
     changed && notifySelf(target);
     return;
@@ -232,21 +233,19 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
       if (start > newEnd || start > end) {
         for (j = start; j <= newEnd; j++) {
           changed = true;
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrap(next[j], target));
+          nodes?.[j] && setSignal(nodes[j], wrap(next[j], target));
         }
 
         for (; j < next.length; j++) {
           changed = true;
           const wrapped = wrap(temp[j], target);
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrapped);
+          nodes?.[j] && setSignal(nodes[j], wrapped);
           applyState(next[j], wrapped, keyFn);
         }
 
         const nextLength = next.length;
         changed && notifySelf(target);
-        prevLength !== nextLength &&
-          target[STORE_NODE].length &&
-          setSignal(target[STORE_NODE].length, nextLength);
+        prevLength !== nextLength && nodes?.length && setSignal(nodes.length, nextLength);
         return;
       }
 
@@ -275,9 +274,9 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
       for (j = start; j < next.length; j++) {
         if (j in temp) {
           const wrapped = wrap(temp[j], target);
-          target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrapped);
+          nodes?.[j] && setSignal(nodes[j], wrapped);
           applyState(next[j], wrapped, keyFn);
-        } else target[STORE_NODE][j] && setSignal(target[STORE_NODE][j], wrap(next[j], target));
+        } else nodes?.[j] && setSignal(nodes[j], wrap(next[j], target));
       }
       if (start < next.length) changed = true;
     } else if (next.length) {
@@ -286,7 +285,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
         if (isWrappable(item)) applyState(next[i], wrap(item, target), keyFn);
         else {
           if (item !== next[i]) changed = true;
-          target[STORE_NODE][i] && setSignal(target[STORE_NODE][i], next[i]);
+          nodes?.[i] && setSignal(nodes[i], next[i]);
         }
       }
     }
@@ -295,7 +294,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
     if (prevLength !== nextLength) {
       changed = true;
-      target[STORE_NODE].length && setSignal(target[STORE_NODE].length, nextLength);
+      nodes?.length && setSignal(nodes.length, nextLength);
     }
     changed && notifySelf(target);
     return;
