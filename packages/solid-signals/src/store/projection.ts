@@ -168,6 +168,7 @@ export function createWriteTraps(
         setWriteOverride(false);
         setProjectionWriteActive(false);
       }
+      if (prop === $TARGET) return value;
       return typeof value === "object" && value !== null ? new Proxy(value, traps) : value;
     },
     has(_, prop) {

@@ -161,8 +161,27 @@ function writeOnly(proxy: any) {
   return writeOverride || !!Writing?.has(proxy);
 }
 
-function unwrapStoreValue(value: any) {
-  return value?.[$TARGET]?.[STORE_VALUE] ?? value;
+function unwrapStoreValue(value: any, map?: Map<any, any>, lookup?: WeakMap<any, any>) {
+  const target = value?.[$TARGET] || lookup?.get(value)?.[$TARGET];
+  if (!target) return value;
+  const override = target[STORE_OVERRIDE];
+  if (!override) return target[STORE_VALUE];
+  if (!map) map = new Map();
+  if (map.has(value)) return map.get(value);
+
+  const source = target[STORE_VALUE];
+  const isArray = Array.isArray(source);
+  const result = isArray ? [] : Object.create(Object.getPrototypeOf(source));
+  map.set(value, result);
+  lookup = target[STORE_LOOKUP] ?? storeLookup;
+
+  for (const key of getKeys(source, override)) {
+    if (isArray && key === "length") continue;
+    const next = key in override ? override[key] : source[key];
+    if (next !== $DELETED) result[key] = unwrapStoreValue(next, map, lookup);
+  }
+  if (isArray) result.length = override.length ?? source.length;
+  return result;
 }
 
 function isPrototypePollutionKey(property: PropertyKey) {

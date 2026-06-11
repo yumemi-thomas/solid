@@ -183,6 +183,46 @@ describe("Projection basics", () => {
     expect(tmp).toBeCalledTimes(1);
     expect(tmp).toHaveBeenNthCalledWith(1, 3, undefined);
   });
+
+  it("preserves inline object property writes when splicing draft arrays", () => {
+    type Todo = { id: string; title: string; status: string; deleted?: boolean };
+    const [$todos, setTodos] = createSignal<Todo[]>([
+      { id: "1", title: "T1", status: "todo" },
+      { id: "2", title: "T2", status: "todo" },
+      { id: "3", title: "T3", status: "todo" }
+    ]);
+
+    const projection = createRoot(() =>
+      createProjection<Todo[]>(draft => {
+        const todos = $todos();
+        for (let i = 0; i < todos.length; i++) {
+          const todo = todos[i];
+          const index = draft.findIndex(existing => existing.id === todo.id);
+          const target = index === -1 ? draft.length : index;
+          draft[target] = { id: todo.id } as Todo;
+          draft[target].title = todo.title;
+          draft[target].status = todo.status;
+        }
+        for (let i = draft.length - 1; i >= 0; i--) {
+          if (todos.findIndex(todo => todo.id === draft[i].id) === -1) draft.splice(i, 1);
+        }
+      }, [])
+    );
+
+    expect(projection.map(todo => ({ ...todo }))).toEqual([
+      { id: "1", title: "T1", status: "todo" },
+      { id: "2", title: "T2", status: "todo" },
+      { id: "3", title: "T3", status: "todo" }
+    ]);
+
+    setTodos(todos => todos.filter(todo => todo.id !== "2"));
+    flush();
+
+    expect(projection.map(todo => ({ ...todo }))).toEqual([
+      { id: "1", title: "T1", status: "todo" },
+      { id: "3", title: "T3", status: "todo" }
+    ]);
+  });
 });
 
 describe("selection with projections", () => {
