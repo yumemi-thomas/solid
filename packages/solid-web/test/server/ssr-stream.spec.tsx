@@ -77,6 +77,33 @@ function extractHydrationKeys(html: string): string[] {
 // --- Tests ---
 
 describe("SSR Streaming — No Loading Boundary", () => {
+  test("preserves hydration key order when deferred children precede a sibling", async () => {
+    function Parent(props: { children: any }) {
+      return (
+        <div>
+          {props.children}
+          <Sibling />
+        </div>
+      );
+    }
+
+    function Child() {
+      return <span>child</span>;
+    }
+
+    function Sibling() {
+      return <span>sibling</span>;
+    }
+
+    const html = await renderComplete(() => (
+      <Parent>
+        <Child />
+      </Parent>
+    ));
+
+    expect(html).toContain("<span _hk=1>child</span><!--/--><!--$--><span _hk=2>sibling</span>");
+  });
+
   test("top-level async memo blocks the shell", async () => {
     function App() {
       const data = createMemo(async () => asyncValue("TopLevel", 30));
