@@ -4,6 +4,7 @@ import {
   defaultContext,
   REACTIVE_DISPOSED,
   REACTIVE_IN_HEAP,
+  REACTIVE_IN_HEAP_HEIGHT,
   REACTIVE_ZOMBIE
 } from "./constants.js";
 import {
@@ -16,7 +17,7 @@ import {
 } from "./core.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
 import { unlinkSubs } from "./graph.js";
-import { deleteFromHeap, insertIntoHeap } from "./heap.js";
+import { deleteFromHeap, insertIntoHeap, insertIntoHeapHeight } from "./heap.js";
 import { dirtyQueue, globalQueue, zombieQueue } from "./scheduler.js";
 import type { Computed, Disposable, Owner, Root } from "./types.js";
 
@@ -25,10 +26,20 @@ const PENDING_OWNER = {} as Owner; // Dummy owner to trigger store's read() path
 export function markDisposal(el: Owner): void {
   let child = el._firstChild;
   while (child) {
-    (child as Computed<unknown>)._flags |= REACTIVE_ZOMBIE;
-    if ((child as Computed<unknown>)._flags & REACTIVE_IN_HEAP) {
-      deleteFromHeap(child as Computed<unknown>, dirtyQueue);
-      insertIntoHeap(child as Computed<unknown>, zombieQueue);
+    const flags = (child as Computed<unknown>)._flags;
+    (child as Computed<unknown>)._flags = flags | REACTIVE_ZOMBIE;
+    // migrate height-adjust entries too, not just recompute entries: every
+    // `deleteFromHeap` call site picks the queue from the zombie flag, so a
+    // node left physically linked in `dirtyQueue` after being zombified gets
+    // unlinked from the wrong queue on dispose, corrupting the bucket and
+    // livelocking the next `runHeap` that reaches it (#2759)
+    if (flags & (REACTIVE_IN_HEAP | REACTIVE_IN_HEAP_HEIGHT)) {
+      deleteFromHeap(
+        child as Computed<unknown>,
+        flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue
+      );
+      if (flags & REACTIVE_IN_HEAP) insertIntoHeap(child as Computed<unknown>, zombieQueue);
+      else insertIntoHeapHeight(child as Computed<unknown>, zombieQueue);
     }
     markDisposal(child);
     child = child._nextSibling;
