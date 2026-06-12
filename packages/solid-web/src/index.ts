@@ -14,6 +14,9 @@ import {
 import {
   createComponent,
   createMemo,
+  createRoot,
+  getOwner,
+  runWithOwner,
   untrack,
   omit,
   sharedConfig,
@@ -23,7 +26,8 @@ import {
   $DEVCOMP,
   Component,
   createEffect,
-  createRenderEffect
+  createRenderEffect,
+  type Owner
 } from "solid-js";
 import type { JSX } from "./jsx.js";
 
@@ -212,13 +216,26 @@ export function Portal<T extends boolean = false, S extends boolean = false>(pro
     mount = () => props.mount || document.body,
     content = createMemo(() => [startMarker, props.children] as unknown as JSX.Element);
 
-  createRenderEffect<[Element, JSX.Element]>(
-    () => [mount(), content()],
-    ([, c]) => {
-      const m = createElementProxy(untrack(mount), treeMarker);
+  createRenderEffect<[Element, JSX.Element, Owner | null]>(
+    // `getOwner()` is captured in the compute-half: the effect-half runs from
+    // the queue with no ambient owner, so the insert effect must be parented
+    // explicitly or it leaks (NO_OWNER_EFFECT, #2758).
+    () => [mount(), content(), getOwner()],
+    ([, c, owner]) => {
+      const m = untrack(mount);
       m.appendChild(endMarker);
-      insert(m, c, endMarker);
+      // The insert effect lives in its own root scoped to this run: it is
+      // disposed when the mount changes or the Portal is disposed — not
+      // left attached to the component where previous mounts' effects
+      // would accumulate. The owner parenting preserves context.
+      const dispose = runWithOwner(owner, () =>
+        createRoot(d => {
+          insert(m, c, endMarker, undefined, { host: () => treeMarker.parentNode });
+          return d;
+        })
+      );
       return () => {
+        dispose!();
         let c: Node | null = startMarker;
         while (c && c !== endMarker) {
           const n: Node | null = c.nextSibling;
@@ -321,20 +338,3 @@ function createElement(tagName: string, is = undefined): HTMLElement | SVGElemen
   ) as HTMLElement | SVGElement | MathMLElement;
 }
 
-function createElementProxy(el: Element, marker: Text) {
-  return new Proxy(el, {
-    get(target, prop) {
-      if (prop === "appendChild" || prop === "insertBefore") {
-        return (...args: [Node]) => {
-          Object.defineProperty(args[0], "_$host", {
-            get: () => marker.parentNode,
-            configurable: true
-          });
-          (target[prop] as any)(...args);
-        };
-      }
-      const value = Reflect.get(target, prop);
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-  });
-}

@@ -3,7 +3,7 @@
  * @vitest-environment jsdom
  */
 import { describe, expect, test, vi } from "vitest";
-import { createSignal, flush, Show } from "solid-js";
+import { createSignal, flush, Show, DEV } from "solid-js";
 import { render, Portal } from "@solidjs/web";
 
 describe("Testing a simple Portal", () => {
@@ -257,6 +257,204 @@ describe("Testing a Portal with Synthetic Events", () => {
   });
 
   test("dispose", () => disposer());
+});
+
+describe("Testing Portal content swapping (#2757)", () => {
+  test("keyed Show swaps replace content instead of accumulating", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+    const [key, setKey] = createSignal(1);
+
+    const disposer = render(
+      () => (
+        <Portal mount={mount}>
+          <Show keyed when={key()}>
+            {k => <span>content for key {k}</span>}
+          </Show>
+        </Portal>
+      ),
+      div
+    );
+
+    expect(mount.querySelectorAll("span").length).toBe(1);
+    expect(mount.querySelector("span")!.textContent).toBe("content for key 1");
+
+    for (let i = 2; i <= 4; i++) {
+      setKey(i);
+      flush();
+      expect(mount.querySelectorAll("span").length).toBe(1);
+      expect(mount.querySelector("span")!.textContent).toBe(`content for key ${i}`);
+    }
+
+    disposer();
+    expect(mount.innerHTML).toBe("");
+  });
+
+  test("two portals sharing a mount stay isolated", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+    const [key, setKey] = createSignal(1);
+
+    const disposer = render(
+      () => (
+        <>
+          <Portal mount={mount}>
+            <Show keyed when={key()}>
+              {k => <span>swapping {k}</span>}
+            </Show>
+          </Portal>
+          <Portal mount={mount}>
+            <b>stable</b>
+          </Portal>
+        </>
+      ),
+      div
+    );
+
+    expect(mount.querySelectorAll("span").length).toBe(1);
+    expect(mount.querySelectorAll("b").length).toBe(1);
+
+    setKey(2);
+    flush();
+    expect(mount.querySelectorAll("span").length).toBe(1);
+    expect(mount.querySelector("span")!.textContent).toBe("swapping 2");
+    expect(mount.querySelectorAll("b").length).toBe(1);
+    expect(mount.querySelector("b")!.textContent).toBe("stable");
+
+    disposer();
+    expect(mount.innerHTML).toBe("");
+  });
+
+  test("delegated events retarget through nodes inserted by swaps", () => {
+    const root = document.createElement("div");
+    const mount = document.createElement("div");
+    const calls: string[] = [];
+    const [key, setKey] = createSignal(1);
+    let portalButton!: HTMLButtonElement;
+
+    document.body.append(root, mount);
+    const disposer = render(
+      () => (
+        <section onClick={() => calls.push("logical")}>
+          <Portal mount={mount}>
+            <Show keyed when={key()}>
+              {k => <button ref={portalButton} onClick={() => calls.push(`portal ${k}`)} />}
+            </Show>
+          </Portal>
+        </section>
+      ),
+      root
+    );
+
+    portalButton.click();
+    expect(calls).toEqual(["portal 1", "logical"]);
+
+    // the swapped-in button arrives via the runtime's replace path — it must
+    // still carry the host tag for logical-tree bubbling
+    calls.length = 0;
+    setKey(2);
+    flush();
+    portalButton.click();
+    expect(calls).toEqual(["portal 2", "logical"]);
+
+    disposer();
+    root.remove();
+    mount.remove();
+  });
+});
+
+describe("Testing Portal insert effect ownership (#2758)", () => {
+  test("reactive portal children create no ownerless effects", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+    const [key, setKey] = createSignal(1);
+
+    const capture = DEV!.diagnostics.capture();
+    const disposer = render(
+      () => (
+        <Portal mount={mount}>
+          <Show keyed when={key()}>
+            {k => <span>{k}</span>}
+          </Show>
+        </Portal>
+      ),
+      div
+    );
+    setKey(2);
+    flush();
+    disposer();
+    const events = capture.stop();
+
+    expect(events.filter(e => e.code === "NO_OWNER_EFFECT")).toEqual([]);
+  });
+
+  test("insert effect is disposed with the Portal", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+    const [key, setKey] = createSignal(1);
+
+    const disposer = render(
+      () => (
+        <Portal mount={mount}>
+          <Show keyed when={key()}>
+            {k => <span>{k}</span>}
+          </Show>
+        </Portal>
+      ),
+      div
+    );
+    expect(mount.textContent).toBe("1");
+
+    disposer();
+    expect(mount.innerHTML).toBe("");
+
+    // a leaked insert effect would still react to this and try to write
+    // into the unmounted markers
+    expect(() => {
+      setKey(2);
+      flush();
+    }).not.toThrow();
+    expect(mount.innerHTML).toBe("");
+  });
+
+  test("changing mount disposes the previous insert effect", () => {
+    const div = document.createElement("div");
+    const mountA = document.createElement("div");
+    const mountB = document.createElement("div");
+    const [mount, setMount] = createSignal(mountA);
+    const [key, setKey] = createSignal(1);
+
+    const capture = DEV!.diagnostics.capture();
+    const disposer = render(
+      () => (
+        <Portal mount={mount()}>
+          <Show keyed when={key()}>
+            {k => <span>content {k}</span>}
+          </Show>
+        </Portal>
+      ),
+      div
+    );
+    expect(mountA.querySelectorAll("span").length).toBe(1);
+
+    setMount(mountB);
+    flush();
+    expect(mountA.innerHTML).toBe("");
+    expect(mountB.querySelectorAll("span").length).toBe(1);
+
+    // only the live insert effect may respond — a survivor from mountA
+    // would produce duplicates in mountB
+    setKey(2);
+    flush();
+    expect(mountA.innerHTML).toBe("");
+    expect(mountB.querySelectorAll("span").length).toBe(1);
+    expect(mountB.querySelector("span")!.textContent).toBe("content 2");
+
+    disposer();
+    expect(mountB.innerHTML).toBe("");
+    const events = capture.stop();
+    expect(events.filter(e => e.code === "NO_OWNER_EFFECT")).toEqual([]);
+  });
 });
 
 describe("Testing a Portal with direct reactive children", () => {
