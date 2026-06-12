@@ -337,4 +337,3 @@ function createElement(tagName: string, is = undefined): HTMLElement | SVGElemen
         : document.createElement(tagName, { is })
   ) as HTMLElement | SVGElement | MathMLElement;
 }
-
