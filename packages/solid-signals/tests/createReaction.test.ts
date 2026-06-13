@@ -27,6 +27,28 @@ describe("createReaction", () => {
     expect(count).toBe(2);
   });
 
+  test("fires and disposes cleanly when the rerun tracks zero dependencies", () => {
+    let fired = 0;
+    let readDep = true;
+    const [sign, setSign] = createSignal("a");
+    createRoot(() => {
+      const track = createReaction(() => {
+        fired++;
+      });
+      track(() => {
+        // initial run reads a dep; the invalidating rerun reads none
+        if (readDep) sign();
+      });
+    });
+    flush();
+    expect(fired).toBe(0);
+
+    readDep = false;
+    setSign("b");
+    expect(() => flush()).not.toThrow();
+    expect(fired).toBe(1);
+  });
+
   test("throws on invalid cleanup values", () => {
     const [sign, setSign] = createSignal("thoughts");
     const track = createRoot(() =>

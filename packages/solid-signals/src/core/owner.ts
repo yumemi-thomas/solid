@@ -36,10 +36,10 @@ export function markDisposal(el: Owner): void {
 }
 
 export function dispose(node: Computed<unknown>): void {
-  let toRemove = node._deps || null;
-  do {
-    toRemove = unlinkSubs(toRemove!);
-  } while (toRemove !== null);
+  let toRemove = node._deps;
+  while (toRemove !== null) {
+    toRemove = unlinkSubs(toRemove);
+  }
   node._deps = null;
   node._depsTail = null;
   disposeChildren(node, true);
