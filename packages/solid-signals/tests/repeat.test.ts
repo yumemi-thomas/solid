@@ -4,6 +4,7 @@ import {
   createSignal,
   createStore,
   flush,
+  onCleanup,
   repeat
 } from "../src/index.js";
 
@@ -181,6 +182,31 @@ it("should compute map when key by index", () => {
 
   expect(map().length).toBe(0);
   expect(computed).toHaveBeenCalledTimes(4);
+});
+
+it("disposes the rows that leave the window when `from` advances from a non-zero offset", () => {
+  const cleanups: number[] = [];
+  const [from, setFrom] = createSignal(1);
+
+  const map = createRoot(() =>
+    repeat(
+      () => 3,
+      index => {
+        onCleanup(() => cleanups.push(index));
+        return index;
+      },
+      { from }
+    )
+  );
+
+  expect(map()).toEqual([1, 2, 3]);
+
+  // slide window 1-3 -> 3-5: rows 1 and 2 leave, row 3 stays
+  setFrom(3);
+  flush();
+
+  expect(map()).toEqual([3, 4, 5]);
+  expect(cleanups.sort((a, b) => a - b)).toEqual([1, 2]);
 });
 
 it("should retain instances when only `offset` changes", () => {

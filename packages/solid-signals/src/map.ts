@@ -345,12 +345,13 @@ function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
     for (let i = to; i < prevTo; i++) this._nodes[i - this._offset].dispose();
 
     if (this._offset < from) {
-      // clear beginning
-      let i = this._offset;
-      while (i < from && i < this._len) this._nodes[i++].dispose();
+      // clear beginning — `_nodes` is local-indexed, so the rows leaving the
+      // front sit at local positions 0..(from - _offset), clamped to old len.
+      const removed = from - this._offset;
+      for (let i = 0; i < removed && i < this._len; i++) this._nodes[i].dispose();
       // shift indexes
-      this._nodes.splice(0, from - this._offset);
-      this._mappings.splice(0, from - this._offset);
+      this._nodes.splice(0, removed);
+      this._mappings.splice(0, removed);
     } else if (this._offset > from) {
       // shift indexes
       let i = prevTo - this._offset - 1;
