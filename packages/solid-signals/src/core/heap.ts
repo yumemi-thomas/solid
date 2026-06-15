@@ -4,8 +4,10 @@ import {
   REACTIVE_IN_HEAP,
   REACTIVE_IN_HEAP_HEIGHT,
   REACTIVE_MANUAL_WRITE,
-  REACTIVE_RECOMPUTING_DEPS
+  REACTIVE_RECOMPUTING_DEPS,
+  REACTIVE_ZOMBIE
 } from "./constants.js";
+import { dirtyQueue, zombieQueue } from "./scheduler.js";
 import type { Computed, FirewallSignal, Root } from "./types.js";
 
 export interface Heap {
@@ -130,7 +132,12 @@ function adjustHeight(el: Computed<unknown>, heap: Heap) {
   if (el._height !== newHeight) {
     el._height = newHeight;
     for (let s = el._subs; s !== null; s = s._nextSub) {
-      insertIntoHeapHeight(s._sub, heap);
+      // Route each subscriber by its own zombie flag, mirroring the
+      // post-recompute height-adjust path. Inserting into the running `heap`
+      // unconditionally can park a zombie in `dirtyQueue` (or a live node in
+      // `zombieQueue`), breaking the flag/queue invariant `deleteFromHeap`
+      // relies on — the same corruption class as #2759.
+      insertIntoHeapHeight(s._sub, s._sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
     }
   }
 }

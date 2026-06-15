@@ -2,6 +2,39 @@ import { createEffect, createRoot, createSignal, flush } from "../src/index.js";
 
 afterEach(() => flush());
 
+describe("scheduler hygiene around throwing effects", () => {
+  it("balances syncDepth when an effect throws inside flush(fn)", async () => {
+    const [a, setA] = createSignal(0);
+    const [c, setC] = createSignal(0);
+    const seenC: number[] = [];
+
+    createRoot(() => {
+      // Throws without writing a signal, so the drain leaves no pending work —
+      // this isolates the syncDepth leak from any stuck-`scheduled` symptom.
+      createEffect(a, v => {
+        if (v === 1) throw new Error("boom");
+      });
+      createEffect(c, v => {
+        seenC.push(v);
+      });
+    });
+    flush();
+    // Drain the microtask queued by effect creation; a leftover microtask would
+    // otherwise mask a leaked syncDepth by draining the work for us.
+    await Promise.resolve();
+    seenC.length = 0;
+
+    expect(() => flush(() => setA(1))).toThrow("boom");
+
+    // A clean write must still schedule a microtask. If the throw above leaked
+    // syncDepth, `schedule()` would never queue one again and this would stall.
+    setC(3);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seenC).toEqual([3]);
+  });
+});
+
 it("should batch updates", () => {
   const [$x, setX] = createSignal(10);
   const effect = vi.fn();

@@ -658,8 +658,13 @@ export function flush<T>(fn?: () => T): T | void {
     try {
       return fn();
     } finally {
-      flush();
-      syncDepth--;
+      // Decrement even if the drain throws (a throwing effect): a leaked
+      // syncDepth would stop `schedule()` from ever queuing a microtask again.
+      try {
+        flush();
+      } finally {
+        syncDepth--;
+      }
     }
   }
   if (globalQueue._running) {
