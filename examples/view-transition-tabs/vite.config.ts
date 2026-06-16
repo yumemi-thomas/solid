@@ -14,6 +14,7 @@ export default defineConfig({
       "@solidjs/web/jsx-runtime": repo("packages/solid-web/src/index.ts"),
       "@solidjs/web/jsx-dev-runtime": repo("packages/solid-web/src/index.ts"),
       "@solidjs/web": repo("packages/solid-web/src/index.ts"),
+      "@solidjs/signals": repo("packages/solid-signals/src/index.ts"),
       "solid-js": repo("packages/solid/src/index.ts")
     }
   },
