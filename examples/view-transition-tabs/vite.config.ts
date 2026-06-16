@@ -5,7 +5,15 @@ import tailwindcss from "@tailwindcss/vite";
 
 const repo = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // The workspace packages are aliased to source (below), which still contains
+  // the library's compile-time flags. The package builds replace these via
+  // rollup; here we must define them ourselves or they leak as undefined
+  // globals at runtime (ReferenceError: __DEV__ is not defined).
+  define: {
+    __DEV__: JSON.stringify(command === "serve"),
+    __TEST__: "false"
+  },
   plugins: [tailwindcss(), solid()],
   resolve: {
     conditions: ["development", "browser", "import"],
@@ -25,4 +33,4 @@ export default defineConfig({
   server: {
     port: 5174
   }
-});
+}));
