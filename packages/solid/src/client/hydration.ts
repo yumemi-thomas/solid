@@ -1017,7 +1017,9 @@ export const createOptimistic: {
  */
 export const createProjection: <T extends object = {}>(
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-  initialValue: T,
+  // Match core: partial/empty seed stays ergonomic, while a readonly store seed
+  // infers full `T` instead of shadowing `fn` (solidjs/solid#2786).
+  initialValue: Partial<T> | Store<NoFn<T>>,
   options?: ProjectionOptions
 ) => Refreshable<Store<T>> = ((...args: any[]) =>
   (_createProjection || coreProjection)(...args)) as any;

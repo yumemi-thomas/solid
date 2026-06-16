@@ -63,6 +63,7 @@ import {
   insertSubs,
   projectionWriteActive,
   queuePendingNode,
+  recordGestureWrite,
   runInTransition,
   schedule,
   shouldReadStashedOptimisticValue,
@@ -467,6 +468,11 @@ export function createEffectNode<T>(
     _cleanup: undefined as (() => void) | undefined,
     _cleanupRegistered: false,
     _type: type,
+    // Ref-count of `<Activity mode="hidden">` ancestors currently pausing this
+    // effect's side-effect. >0 means `runEffect` skips the body (the effect's
+    // cleanup was already run when the count went 0→1). 0 = running normally.
+    // Kept in the literal so the node shape stays monomorphic.
+    _paused: 0,
     _notifyStatus: notifyStatus
   } as any;
   if (__DEV__) self._name = options?.name ?? "effect";
@@ -922,6 +928,8 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
 
   if (el._transition && activeTransition !== el._transition)
     globalQueue.initTransition(el._transition);
+
+  recordGestureWrite(el);
 
   const isOptimistic = el._overrideValue !== undefined && !projectionWriteActive;
   const hasOverride = el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING;

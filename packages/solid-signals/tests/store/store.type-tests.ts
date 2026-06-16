@@ -75,7 +75,8 @@ import {
   store.active satisfies boolean;
 }
 
-// ── createProjection — partial seed ───────────────────────────────────
+// ── createProjection — partial seed (seed is `NoInfer<Partial<T>>`: a partial or
+// empty seed is allowed, and it never shadows inference from the projection fn) ──
 
 {
   const store = createProjection(() => ({ foo: true }), {});

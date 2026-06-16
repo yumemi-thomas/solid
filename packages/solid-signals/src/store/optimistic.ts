@@ -80,8 +80,10 @@ import {
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
+// Plain value (not a `Store<…>` union) so an array literal infers as an array,
+// not a fixed-length tuple (see the note on createStore).
 export function createOptimisticStore<T extends object = {}>(
-  store: NoFn<T> | Store<NoFn<T>>
+  store: NoFn<T>
 ): [get: Store<T>, set: StoreSetter<T>];
 export function createOptimisticStore<T extends object = {}>(
   fn: (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,

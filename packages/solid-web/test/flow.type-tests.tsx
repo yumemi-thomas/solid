@@ -1,6 +1,16 @@
 /** @jsxImportSource @solidjs/web */
 
 import { createSignal, For, Match, Show, Switch } from "solid-js";
+import {
+  Activity,
+  addTransitionType,
+  startGestureTransition,
+  startViewTransition,
+  ViewTransition,
+  type GestureOptionsRequired,
+  type ViewTransitionScope,
+  type ViewTransitionInstance
+} from "@solidjs/web";
 
 const [count] = createSignal(1);
 
@@ -65,3 +75,64 @@ const rows = [{ id: "a", label: "A" }];
     <div>{row.label}</div>
   )}
 </For>;
+
+<Activity mode="hidden">
+  <div />
+</Activity>;
+<Activity mode="visible">
+  <div />
+</Activity>;
+// @ts-expect-error Activity only accepts visible, hidden, null, or undefined modes
+<Activity mode="collapsed">
+  <div />
+</Activity>;
+
+<ViewTransition
+  name="hero"
+  default="card"
+  enter={{ default: "card-enter", route: "route-enter" }}
+  onEnter={(instance: ViewTransitionInstance, types) => {
+    instance.nodes.forEach(node => node.nodeType);
+    instance.old.animate([{ opacity: 0 }], { duration: 120 });
+    instance.new.getAnimations().forEach(animation => animation.cancel());
+    instance.group.getComputedStyle().opacity;
+    types.forEach(type => type.toUpperCase());
+  }}
+  onGestureEnter={(timeline, options: GestureOptionsRequired, instance, types) => {
+    timeline;
+    options.rangeStart.toFixed();
+    instance.nodes.forEach(node => node.nodeType);
+    types.forEach(type => type.toUpperCase());
+  }}
+>
+  <div />
+</ViewTransition>;
+addTransitionType("route");
+const gestureTransition = startGestureTransition(
+  { currentTime: 0 },
+  () => addTransitionType("gesture"),
+  {
+    rangeStart: 0,
+    rangeEnd: 1
+  }
+);
+gestureTransition.finished.then(() => {});
+gestureTransition.commitGesture();
+gestureTransition.cancelGesture();
+gestureTransition.finishGesture();
+const asyncTransition: ViewTransitionScope<string> = startViewTransition(
+  async () => {
+    addTransitionType("async-route");
+    return "done";
+  },
+  { types: ["route"] }
+);
+asyncTransition.result.then(value => value.toUpperCase());
+// @ts-expect-error addTransitionType requires a string transition type
+addTransitionType(1);
+// @ts-expect-error startViewTransition requires a function scope
+startViewTransition("route");
+// @ts-expect-error ViewTransition callbacks receive an instance and active type list
+<ViewTransition onUpdate={(name: string) => name} />;
+// @ts-expect-error gesture callbacks receive timeline, options, instance, and active type list
+<ViewTransition onGestureUpdate={(instance: ViewTransitionInstance) => instance} />;

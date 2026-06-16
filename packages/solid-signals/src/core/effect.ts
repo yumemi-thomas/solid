@@ -35,6 +35,9 @@ export interface Effect<T> extends Computed<T>, Owner {
   _modified: boolean;
   _prevValue: T | undefined;
   _type: number;
+  // Ref-count of hidden `<Activity>` ancestors pausing this effect (see
+  // `pauseEffects`). >0 → `runEffect` skips the side-effect body.
+  _paused: number;
 }
 
 /**
@@ -121,6 +124,11 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
 
 function runEffect(node: Effect<any>): void {
   if (!node._modified || node._flags & REACTIVE_DISPOSED) return;
+  // Paused by a hidden `<Activity>` ancestor: skip the side-effect (its cleanup
+  // already ran on pause). `_modified` stays set so the effect re-runs on
+  // resume (`pauseEffects`'s disposer re-runs it). Tracking/recompute is
+  // unaffected, so the effect still sees fresh values when it resumes.
+  if (node._paused) return;
   let prevStrictRead: string | false = false;
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
@@ -151,6 +159,56 @@ function runEffect(node: Effect<any>): void {
 }
 
 GlobalQueue._runEffect = runEffect as (el: Computed<unknown>) => void;
+
+/**
+ * Pause every user effect (`createEffect`) in `owner`'s subtree — the core
+ * primitive behind a React-faithful `<Activity mode="hidden">`. Each paused
+ * effect runs its cleanup (the function returned by its effect callback) and
+ * stops running its body until resumed, while its tracking, value, signals, and
+ * DOM are left untouched (render effects are NOT paused, so the hidden subtree's
+ * DOM stays current). This mirrors React destroying an Activity's passive
+ * effects on hide and recreating them on show.
+ *
+ * Returns a disposer that resumes EXACTLY the effects this call paused (so
+ * nested Activities ref-count correctly and a changing subtree can't drift):
+ * each resumed effect's body re-runs, re-establishing its side effect. Only
+ * `EFFECT_USER` effects are paused — render effects keep the DOM in sync.
+ *
+ * @internal
+ */
+export function pauseEffects(owner: Owner): () => void {
+  const paused: Effect<any>[] = [];
+  const walk = (node: Owner): void => {
+    let child = node._firstChild;
+    while (child) {
+      if (!((child as Computed<unknown>)._flags & REACTIVE_DISPOSED)) {
+        if ((child as Effect<any>)._type === EFFECT_USER) {
+          const effectNode = child as Effect<any>;
+          if (++effectNode._paused === 1) {
+            effectNode._cleanup?.();
+            effectNode._cleanup = undefined;
+          }
+          paused.push(effectNode);
+        }
+        walk(child);
+      }
+      child = child._nextSibling;
+    }
+  };
+  walk(owner);
+  return () => {
+    for (let i = 0; i < paused.length; i++) {
+      const node = paused[i];
+      if (node._paused === 0) continue;
+      if (--node._paused === 0 && !(node._flags & REACTIVE_DISPOSED)) {
+        // Re-run the side effect to re-establish it (React recreates effects on
+        // show). `_modified` is forced so `runEffect` doesn't bail.
+        node._modified = true;
+        runEffect(node);
+      }
+    }
+  };
+}
 
 export interface TrackedEffect extends Computed<void> {
   _cleanup?: () => void;

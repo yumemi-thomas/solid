@@ -56,12 +56,14 @@ export type {
   Signal,
   NodeOptions
 } from "./types.js";
-export { effect, trackedEffect, type Effect, type TrackedEffect } from "./effect.js";
+export { effect, trackedEffect, pauseEffects, type Effect, type TrackedEffect } from "./effect.js";
 export { action } from "./action.js";
 export {
   flush,
+  isReactiveFlushActive,
   Queue,
   GlobalQueue,
+  startGestureTransaction,
   trackOptimisticStore,
   enforceLoadingBoundary,
   type IQueue,

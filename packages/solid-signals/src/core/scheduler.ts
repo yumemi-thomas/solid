@@ -169,6 +169,119 @@ export interface Transition {
   _gatedSubs: Set<Computed<any>>;
 }
 
+type GestureRecord = {
+  _value: unknown;
+  _pendingValue: unknown;
+  _overrideValue: unknown;
+  _transition: Transition | null;
+};
+
+export interface GestureTransition {
+  _records: Map<Signal<any> | Computed<any>, GestureRecord>;
+  _active: boolean;
+  _finished: boolean;
+  // User effects deferred out of the gesture scrub: drained on commit, dropped
+  // on cancel.
+  _heldEffects: QueueCallback[];
+}
+
+export type GestureTransaction<T = unknown> = {
+  _gesture: GestureTransition;
+  result: T;
+  commit(): void;
+  cancel(): void;
+};
+
+export let activeGestureTransition: GestureTransition | null = null;
+
+export function recordGestureWrite(node: Signal<any> | Computed<any>): void {
+  const gesture = activeGestureTransition;
+  if (!gesture || !gesture._active || gesture._records.has(node)) return;
+  gesture._records.set(node, {
+    _value: node._value,
+    _pendingValue: node._pendingValue,
+    _overrideValue: node._overrideValue,
+    _transition: node._transition
+  });
+}
+
+export function startGestureTransaction<T>(
+  scope: () => T,
+  previousTransaction?: GestureTransaction<unknown>
+): GestureTransaction<T> {
+  const gesture = previousTransaction?._gesture ?? {
+    _records: new Map(),
+    _active: true,
+    _finished: false,
+    _heldEffects: []
+  };
+  // Drain any already-pending work first, so the only user effects observed
+  // during the gesture below are the ones the gesture itself causes.
+  flush();
+  const previousActiveGesture = activeGestureTransition;
+  gesture._active = true;
+  activeGestureTransition = gesture;
+  let result!: T;
+  try {
+    result = scope();
+    flush();
+  } finally {
+    gesture._active = false;
+    activeGestureTransition = previousActiveGesture;
+  }
+
+  return {
+    _gesture: gesture,
+    result,
+    commit() {
+      if (gesture._finished) return;
+      gesture._finished = true;
+      gesture._records.clear();
+      // The acted-on values are now permanent; run the held user effects once,
+      // against the committed state, then drain any cascade.
+      const held = gesture._heldEffects;
+      if (held.length) {
+        gesture._heldEffects = [];
+        runQueue(held, EFFECT_USER);
+        flush();
+      }
+    },
+    cancel() {
+      if (gesture._finished) return;
+      gesture._finished = true;
+      // The scope's user effects never ran; drop them.
+      gesture._heldEffects = [];
+      const records = [...gesture._records.entries()];
+      gesture._records.clear();
+      // Revert under an active gesture so the revert's render effects restore the
+      // DOM while its user effects are held (then dropped) — a cancelled gesture
+      // fires no user effects at all.
+      const previousActiveGesture = activeGestureTransition;
+      activeGestureTransition = gesture;
+      gesture._active = true;
+      try {
+        for (let i = records.length - 1; i >= 0; i--) {
+          const [node, record] = records[i];
+          node._value = record._value as any;
+          node._pendingValue = record._pendingValue as any;
+          node._overrideValue = record._overrideValue as any;
+          node._transition = record._transition;
+          insertSubs(
+            node,
+            node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING
+          );
+        }
+        schedule();
+        flush();
+      } finally {
+        gesture._active = false;
+        activeGestureTransition = previousActiveGesture;
+      }
+      gesture._heldEffects = [];
+    }
+  };
+}
+
 function mergeTransitionState(target: Transition, outgoing: Transition): void {
   outgoing._done = target;
   target._actions.push(...outgoing._actions);
@@ -218,6 +331,21 @@ function cleanupCompletedLanes(completingTransition: Transition | null): void {
   }
 }
 
+/**
+ * True while the global queue is draining reactive work — i.e. during render-
+ * and user-effect execution inside a flush. The web runtime's `<ViewTransition>`
+ * update detection reads this synchronously to tell Solid-driven DOM writes
+ * (which always happen during a flush) apart from asynchronous third-party
+ * writes — browser extensions stamping `data-*`/`aria-*` attributes fire
+ * outside any flush, so they are ignored. Being synchronous, there is no
+ * observer-timing ambiguity.
+ *
+ * @internal
+ */
+export function isReactiveFlushActive(): boolean {
+  return globalQueue._running;
+}
+
 export function schedule() {
   if (scheduled) return;
   scheduled = true;
@@ -260,7 +388,17 @@ export class Queue implements IQueue {
     if (this._queues[type - 1].length) {
       const effects = this._queues[type - 1];
       this._queues[type - 1] = [];
-      runQueue(effects, type);
+      // User effects are side-effects, so defer them out of a gesture scrub —
+      // render effects still run, so the DOM updates for the snapshot. The gesture
+      // drains pending work before it activates (see startGestureTransaction), so
+      // every user effect seen here is caused by the gesture: hold it, then run on
+      // commit / drop on cancel (like React), while the scope can still write.
+      if (type === EFFECT_USER && activeGestureTransition?._active) {
+        const held = activeGestureTransition._heldEffects;
+        for (let i = 0; i < effects.length; i++) held.push(effects[i]);
+      } else {
+        runQueue(effects, type);
+      }
     }
     for (let i = 0; i < this._children.length; i++) (this._children[i] as any).run?.(type);
   }

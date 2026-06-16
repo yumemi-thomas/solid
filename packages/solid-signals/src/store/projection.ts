@@ -17,6 +17,7 @@ import {
   STORE_WRAP,
   storeSetter,
   storeTraps,
+  type NoFn,
   type ProjectionOptions,
   type Store
 } from "./store.js";
@@ -107,7 +108,12 @@ export function createProjectionInternal<T extends object = {}>(
  */
 export function createProjection<T extends object = {}>(
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-  seed: Partial<T>,
+  // `Partial<T>` keeps a partial/empty seed ergonomic (you needn't restate the
+  // shape `fn` already declares), while the `Store<NoFn<T>>` arm lets a readonly
+  // store seed infer the full `T` instead of shadowing `fn` (the goal of
+  // solidjs/solid#2786). Matches the createStore/createOptimisticStore projection
+  // overloads.
+  seed: Partial<T> | Store<NoFn<T>>,
   options?: ProjectionOptions
 ): Refreshable<Store<T>> {
   return createProjectionInternal(fn, seed, options).store;

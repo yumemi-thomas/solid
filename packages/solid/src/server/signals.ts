@@ -1618,5 +1618,25 @@ export function onSettled(callback: () => void | (() => void)): void {
   if (o?.id != null) getNextChildId(o);
 }
 
+// No reactive scheduler on the server, so a flush is never in progress.
+export function isReactiveFlushActive(): boolean {
+  return false;
+}
+
+// No effects run on the server, so there's nothing to pause; return a no-op
+// resume so `<Activity>` (a pass-through on the server) type-checks.
+export function pauseEffects(_owner?: unknown): () => void {
+  return () => {};
+}
+
+// Gestures are client-only; run the scope synchronously and provide no-op
+// commit/cancel so server code paths that start a gesture transaction don't break.
+export function startGestureTransaction<T>(
+  scope: () => T,
+  _previousTransaction?: unknown
+): { result: T; commit(): void; cancel(): void } {
+  return { result: scope(), commit() {}, cancel() {} };
+}
+
 // NoInfer utility type (also re-exported from signals, but define for local use)
 type NoInfer<T extends any> = [T][T extends any ? 0 : never];

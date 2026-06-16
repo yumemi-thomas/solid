@@ -784,7 +784,11 @@ export function storeSetter<T extends object>(store: Store<T>, fn: (draft: T) =>
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
-export function createStore<T extends object = {}>(store: NoFn<T> | Store<NoFn<T>>): StoreReturn<T>;
+// The initial value is the plain value (not `NoFn<T> | Store<NoFn<T>>`): a union
+// with the readonly `Store<…>` member makes TS infer array literals as
+// fixed-length tuples, which wrongly rejects length changes (`filter`,
+// `reconcile` to a shorter array) in the setter.
+export function createStore<T extends object = {}>(store: NoFn<T>): StoreReturn<T>;
 export function createStore<T extends object = {}>(
   fn: (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
   store: Partial<T> | Store<NoFn<T>>,
