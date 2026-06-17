@@ -313,3 +313,36 @@ it("recovers when count goes to 0, from changes, and count comes back nonzero (#
   flush();
   expect(snapshot.map((r: any) => r.index)).toEqual([0]);
 });
+
+it("slides the window backwards: disposes departing rows and retains the overlap (#2767)", () => {
+  const [from, setFrom] = createSignal(3);
+  const disposed: number[] = [];
+
+  const map = repeat(
+    () => 3,
+    index => {
+      onCleanup(() => disposed.push(index));
+      return { index };
+    },
+    { from }
+  );
+
+  let snapshot: any[] = [];
+  createRoot(() => {
+    createEffect(map, rows => {
+      snapshot = rows.slice();
+    });
+  });
+  flush();
+  expect(snapshot.map(r => r.index)).toEqual([3, 4, 5]);
+  const retained = snapshot[0]; // row at global index 3
+
+  // window 3-5 -> 1-3: rows 4 and 5 leave, rows 1 and 2 enter, row 3 stays
+  setFrom(1);
+  flush();
+  expect(snapshot.map(r => r.index)).toEqual([1, 2, 3]);
+  // overlap row is the same instance, now at the tail
+  expect(snapshot[2]).toBe(retained);
+  // only the departing rows were disposed
+  expect(disposed.sort()).toEqual([4, 5]);
+});
