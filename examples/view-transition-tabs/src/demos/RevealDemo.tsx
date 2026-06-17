@@ -1,11 +1,5 @@
-import {
-  addTransitionType,
-  Loading,
-  Reveal,
-  startViewTransition,
-  ViewTransition
-} from "@solidjs/web";
-import { createMemo, createSignal, flush } from "solid-js";
+import { addTransitionType, Loading, Reveal, ViewTransition } from "@solidjs/web";
+import { createMemo, createSignal } from "solid-js";
 import { cx, desc, panelBox, Panel, primaryBtn, Shimmer, kicker } from "../ui";
 import { TransitionMonitor } from "../vt-monitor";
 
@@ -66,13 +60,13 @@ export function RevealDemo() {
   });
 
   const refreshBoth = () => {
-    startViewTransition(async () => {
-      addTransitionType("reveal");
-      setCycle(value => value + 1);
-      flush();
-      await new Promise(r => setTimeout(r, 820));
-      flush();
-    });
+    // Automatic view transitions: bumping `cycle` makes both lane memos go
+    // pending. They sit in one `Reveal order="together"` group, so the scheduler
+    // holds the commit until both resolve, then auto-wraps the synchronized
+    // waiting → resolved swap as one transition. The "reveal" type is carried
+    // onto the transition from this synchronous declaration.
+    addTransitionType("reveal");
+    setCycle(value => value + 1);
   };
 
   return (

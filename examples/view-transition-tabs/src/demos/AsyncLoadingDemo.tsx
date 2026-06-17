@@ -1,5 +1,5 @@
-import { addTransitionType, Loading, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createMemo, createSignal, flush, For } from "solid-js";
+import { addTransitionType, Loading, ViewTransition } from "@solidjs/web";
+import { createMemo, createSignal, For } from "solid-js";
 import { chip, cx, desc, kicker, Panel, panelCol, wait } from "../ui";
 import { TransitionMonitor } from "../vt-monitor";
 
@@ -44,19 +44,15 @@ export function AsyncLoadingDemo() {
 
   const loadReport = (id: keyof typeof reports) => {
     if (id === reportId()) return;
-    // Await the new report *inside* the scope (like RevealDemo): activeViewTransition
-    // stays set across the await, so the browser holds the old card's snapshot while
-    // Loading settles, then animates old → resolved as one cross-fade. Resolving on a
-    // later, unscoped flush (the previous shape) just popped the new card in with no
-    // animation — no CSS can rescue a swap that commits outside the transition.
-    startViewTransition(async () => {
-      addTransitionType("async");
-      setReportId(id);
-      setRequest(value => value + 1);
-      flush();
-      await wait(680);
-      flush();
-    });
+    // Automatic view transitions: no startViewTransition here. Writing the new id
+    // makes the `report` memo go pending, which forms an async transition; the
+    // scheduler holds the commit until `Loading` settles, then auto-wraps the
+    // old → resolved swap as one cross-fade. `addTransitionType` is declared
+    // synchronously and carried onto the transition (so `:active-view-transition-type(async)`
+    // still matches at the deferred commit).
+    addTransitionType("async");
+    setReportId(id);
+    setRequest(value => value + 1);
   };
 
   return (

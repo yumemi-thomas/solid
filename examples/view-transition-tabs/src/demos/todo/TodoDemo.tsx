@@ -27,11 +27,7 @@ export function TodoDemo() {
   const [search, setSearch] = createSignal("");
   const [network, setNetwork] = createSignal("3g");
 
-  // The filter chip and search box track action-in-flight by hand: their actions
-  // pre-fetch data and *then* commit (so no skeleton flash), which means the
-  // store never enters a pending state for isPending() to observe. The draft also
-  // keeps the input responsive before the debounced search commits.
-  const [pendingFilter, setPendingFilter] = createSignal<TodoFilter | null>(null);
+  // The search box keeps the input responsive before the debounced commit.
   const [searchDraft, setSearchDraft] = createSignal<string | null>(null);
 
   const searchValue = () => searchDraft() ?? search();
@@ -42,67 +38,29 @@ export function TodoDemo() {
   // immediately and auto-reconcile when the action's transition settles.
   const [todos, setTodos] = createOptimisticStore<Todo[]>(() => fetchTodos(filter(), search()), []);
 
-  // Each interaction is a plain `action`: it `yield`s the async work while the
-  // optimistic store keeps the acted-on value responsive. Filter/search prefetch
-  // with the page still live, then run the action inside `startViewTransition`
-  // once the caches are warm so the commit is instant (see chooseFilter); row
-  // toggles below start the action and flush immediately so the browser
-  // snapshots the optimistic state, then reconciliation lands later.
-  const filterAction = action(function* (next: TodoFilter) {
-    // Prefetch then commit so the list never flashes its skeleton on a filter
-    // change. pendingFilter drives the chip shimmer by hand: isPending() can't
-    // see this revalidation — the store's pending establishes asynchronously,
-    // after filter() already changed, so the indicator never re-triggers.
-    setPendingFilter(next);
-    setFilter(next);
-    yield fetchTodos(next, search());
-    refresh(todos);
-    setPendingFilter(null);
-  });
+  // filter()/search() are the source of truth; the store derives from them, so a
+  // change is just a write — the Solid way. The store holds the current list while
+  // it revalidates (no skeleton flash) and that async revalidation auto-wraps into
+  // a single View Transition, so appearing/disappearing rows animate together. The
+  // committed filter drives the tab highlight directly, so there's no pending-state
+  // bookkeeping. (KNOWN LIMITATION: rapid back-to-back filter clicks race at the
+  // data layer — createOptimisticStore doesn't supersede an in-flight derivation
+  // when its source changes again — so the final list can settle on an earlier
+  // click. A single change is always correct. This is a store-level concern, not
+  // the call site: plain setFilter, startTransition, and action all exhibit it.)
   const chooseFilter = (next: TodoFilter) => {
-    if (next === filter()) return;
-    // React's async View Transitions keep the page LIVE while data loads, then
-    // animate only the instant commit. Awaiting the round-trip *inside*
-    // startViewTransition would freeze the page on the captured old snapshot for
-    // the whole request: the clicked tab couldn't repaint (it looks blocked) and
-    // even the transition HUD couldn't advance past idle. So show the pending
-    // chip immediately, prefetch with the page still interactive, and only enter
-    // the transition once the caches are warm — the commit below is then instant.
-    setPendingFilter(next);
-    flush();
-    void fetchTodos(next, search()).then(() =>
-      startViewTransition(async () => {
-        await filterAction(next);
-        flush();
-      })
-    );
+    setFilter(next);
   };
 
-  const searchAction = action(function* (next: string) {
-    setSearch(next);
-    yield fetchTodos(filter(), next);
-    refresh(todos);
-    if (searchDraft() === next) setSearchDraft(null);
-  });
   // The draft updates the input instantly (and drives the pending shimmer); the
-  // revalidation is debounced so we don't start a transition on every keystroke.
+  // revalidation is debounced so we don't refetch on every keystroke.
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   const runSearch = (next: string) => {
     setSearchDraft(next);
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
-      if (next === search()) {
-        setSearchDraft(null);
-        return;
-      }
-      // Same as chooseFilter: prefetch with the page live, then transition the
-      // instant commit so the list cross-fades instead of freezing on the round-trip.
-      void fetchTodos(filter(), next).then(() =>
-        startViewTransition(async () => {
-          await searchAction(next);
-          flush();
-        })
-      );
+      setSearch(next);
+      if (searchDraft() === next) setSearchDraft(null);
     }, 220);
   };
 
@@ -134,9 +92,14 @@ export function TodoDemo() {
     // Skip if this row's optimistic write is still in flight. isPending() reads
     // the row's pending lane without subscribing — fine for a one-shot guard.
     if (isPending(() => latest(() => todos.find(todo => todo.id === id)?.done))) return;
+    // The thing we want to animate is the *optimistic* flip (the row leaving a
+    // filtered view immediately). That shows through the incomplete-transition
+    // path, which the auto seam doesn't wrap (auto-wrap fires on a transition's
+    // commit, and an action commits only when it settles). So drive the optimistic
+    // snapshot explicitly with startViewTransition — the escape hatch for an
+    // immediate change. (The action's later reconciliation usually changes nothing
+    // visible, so its auto-wrapped commit is a harmless no-op.)
     startViewTransition(() => {
-      // Do not await the action here: the optimistic store mutation is the
-      // snapshot we want the View Transition to animate.
       void toggleAction(id);
       flush();
     });
@@ -195,19 +158,10 @@ export function TodoDemo() {
               aria-selected={filter() === option.id ? "true" : "false"}
               class={cx(
                 "relative z-[1] min-h-[40px] min-w-0 flex-1 cursor-pointer rounded-lg border-0 bg-transparent text-[0.9rem] font-bold transition-colors duration-200",
-                filter() === option.id || pendingFilter() === option.id
-                  ? "text-solid"
-                  : "text-muted hover:text-solid"
+                filter() === option.id ? "text-solid" : "text-muted hover:text-solid"
               )}
               onClick={() => chooseFilter(option.id)}
             >
-              {/* On a slow network the real slider stays put until the data is
-                  ready (no skeleton flash), so the tab you picked shows a soft
-                  pill "forming" in its place — pulsing to signal the selection
-                  is loading — and the slider glides over once it lands. */}
-              <Show when={pendingFilter() === option.id}>
-                <span class="ar-tab-ghost" aria-hidden="true" />
-              </Show>
               <span
                 class="relative z-[1]"
                 style={{ "view-transition-name": `vt-tab-${option.id}` }}

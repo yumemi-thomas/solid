@@ -8,9 +8,9 @@ import { cx } from "./ui";
 // View Transition lifecycle (capture the snapshot → `ready` → animating →
 // `finished`) in a small HUD. Crucially this is captured WITHOUT touching any
 // component: `installTransitionMonitor()` patches `document.startViewTransition`
-// once, so every transition Solid starts (tab switches and every demo) drives
-// these shared signals. The demos keep calling `startViewTransition` exactly as
-// they would in real code — nothing here leaks into their logic.
+// once, so every transition Solid starts drives these shared signals — whether
+// it comes from the automatic seam (the common case now) or an explicit
+// `startViewTransition` escape hatch. Nothing here leaks into demo logic.
 // --------------------------------------------------------------------------
 export type VTPhase = "idle" | "capture" | "animate" | "done";
 

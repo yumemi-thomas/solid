@@ -61,13 +61,18 @@ export { action } from "./action.js";
 export {
   flush,
   isReactiveFlushActive,
+  setTransitionCommitWrapper,
+  setCommitGate,
+  onTransitionInit,
+  startTransition,
   Queue,
   GlobalQueue,
   startGestureTransaction,
   trackOptimisticStore,
   enforceLoadingBoundary,
   type IQueue,
-  type QueueCallback
+  type QueueCallback,
+  type TransitionCommitWrapper
 } from "./scheduler.js";
 export {
   DEV,

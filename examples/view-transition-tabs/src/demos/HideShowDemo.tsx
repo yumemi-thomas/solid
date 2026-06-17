@@ -1,5 +1,5 @@
-import { Activity, addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush } from "solid-js";
+import { Activity, addTransitionType, ViewTransition } from "@solidjs/web";
+import { createSignal, startTransition } from "solid-js";
 import { chip, cx, desc, kicker, Panel, panelBox, primaryBtn } from "../ui";
 
 // A self-contained counter with its own local state. It lives inside an
@@ -43,13 +43,12 @@ export function HideShowDemo() {
   const [visible, setVisible] = createSignal(true);
 
   const toggle = () => {
-    // Pass the direction up-front so enter/exit can animate accordingly, and the
-    // HUD shows the active type. The change commits inside startViewTransition,
-    // so hiding plays `exit` and showing plays `enter`.
-    startViewTransition(() => {
+    // A synchronous toggle made into a transition so the auto seam animates it.
+    // The direction type is declared up-front so the HUD shows it and hiding
+    // plays `exit` while showing plays `enter`.
+    startTransition(() => {
       addTransitionType(visible() ? "hide" : "show");
       setVisible(v => !v);
-      flush();
     });
   };
 

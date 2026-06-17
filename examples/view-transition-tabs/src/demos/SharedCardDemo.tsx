@@ -1,5 +1,5 @@
-import { addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createMemo, createSignal, flush, For, Show } from "solid-js";
+import { addTransitionType, ViewTransition } from "@solidjs/web";
+import { createMemo, createSignal, For, Show, startTransition } from "solid-js";
 import { cx, desc, Panel, panelCol } from "../ui";
 
 type GalleryId = "aurora" | "reef" | "harbor";
@@ -60,10 +60,9 @@ export function SharedCardDemo() {
   const current = createMemo(() => galleryItems.find(item => item.id === selected())!);
 
   const choose = (id: GalleryId) => {
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("share");
       setSelected(id);
-      flush();
     });
   };
 

@@ -1,5 +1,5 @@
-import { addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush, For, Show } from "solid-js";
+import { addTransitionType, ViewTransition } from "@solidjs/web";
+import { createSignal, For, Show, startTransition } from "solid-js";
 import { chip, cx, desc, kicker, Panel, panelBox, primaryBtn } from "../ui";
 
 const pages = [
@@ -46,10 +46,9 @@ export function DirectionalNavDemo() {
     if (next < 0 || next >= pages.length) return;
     // The direction is the whole trick: the same enter/exit props pick a class by
     // the active transition type, so "forward" slides left→right and "back" mirrors it.
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType(dir);
       setIndex(next);
-      flush();
     });
   };
 

@@ -11,6 +11,11 @@ export {
   flatten,
   flush,
   isReactiveFlushActive,
+  setTransitionCommitWrapper,
+  setCommitGate,
+  onTransitionInit,
+  startTransition,
+  LoadingRevealedContext,
   pauseEffects,
   startGestureTransaction,
   getNextChildId,
@@ -149,7 +154,6 @@ export {
   onError, // handled by ErrorBoundary
   onMount, // onSettled
   resetErrorBoundaries, // no longer needed with healing
-  startTransition,
   Suspense, // Loading
   SuspenseList, // replaced by Reveal + createRevealOrder
   useTransition,

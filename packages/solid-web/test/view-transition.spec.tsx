@@ -4,6 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createMemo, createSignal, flush, For, Loading, Reveal, Show } from "solid-js";
+import { onTransitionInit, setTransitionCommitWrapper } from "solid-js";
 import {
   addTransitionType,
   render,
@@ -12,6 +13,17 @@ import {
   startViewTransition,
   ViewTransition
 } from "../src/index.js";
+
+// Automatic view transitions install on <ViewTransition> mount. These tests
+// exercise the MANUAL startViewTransition path in isolation, so render and then
+// detach the auto seam via the low-level renderer hooks — the seam re-installs
+// itself only on the next boundary mount, so this stays off for the test body.
+function renderNoAuto(...args: Parameters<typeof render>) {
+  const dispose = render(...args);
+  setTransitionCommitWrapper(null);
+  onTransitionInit(null);
+  return dispose;
+}
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -939,7 +951,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [id, _setId] = createSignal("a");
       setId = _setId;
       const data = createMemo(async () => {
@@ -1002,7 +1014,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [page, _setPage] = createSignal<"a" | "b">("a");
       setPage = _setPage;
       const first = createMemo(async () => {
@@ -1081,7 +1093,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [page, _setPage] = createSignal<"a" | "b">("a");
       setPage = _setPage;
       const first = createMemo(async () => {
@@ -1159,7 +1171,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [page, _setPage] = createSignal<"a" | "b">("a");
       setPage = _setPage;
       const first = createMemo(async () => {
@@ -1242,7 +1254,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [show, _setShow] = createSignal(false);
       setShow = _setShow;
       const first = createMemo(async () =>
@@ -1324,7 +1336,7 @@ describe("ViewTransition", () => {
       };
     });
 
-    const dispose = render(() => {
+    const dispose = renderNoAuto(() => {
       const [show, _setShow] = createSignal(false);
       setShow = _setShow;
       const first = createMemo(async () =>
@@ -1381,6 +1393,46 @@ describe("ViewTransition", () => {
     expect((document as any).startViewTransition).toHaveBeenCalledTimes(1);
     expect(onEnterA).toHaveBeenCalledTimes(1);
     expect(onEnterB).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  test("a <Loading>-wrapped boundary with instantly-ready content fires onEnter", async () => {
+    const root = document.createElement("div");
+    const onEnter = vi.fn();
+    let setShow!: (value: boolean) => void;
+
+    (document as any).startViewTransition = vi.fn((update: () => unknown) => {
+      const updateCallbackDone = Promise.resolve(update());
+      return {
+        ready: updateCallbackDone,
+        finished: updateCallbackDone,
+        updateCallbackDone,
+        skipTransition() {}
+      };
+    });
+
+    const dispose = renderNoAuto(() => {
+      const [show, _setShow] = createSignal(false);
+      setShow = _setShow;
+      return (
+        <Show when={show()}>
+          <Loading fallback={<span>loading</span>}>
+            <ViewTransition name="instant" onEnter={onEnter}>
+              <span>ready</span>
+            </ViewTransition>
+          </Loading>
+        </Show>
+      );
+    }, root);
+
+    flush();
+    expect(onEnter).not.toHaveBeenCalled();
+
+    // Content never suspends, so the Loading shows it immediately — the boundary
+    // still enters when it mounts inside the transition (no suspended phase).
+    await inTransition(() => setShow(true));
+    expect(root.textContent).toBe("ready");
+    expect(onEnter).toHaveBeenCalledTimes(1);
     dispose();
   });
 

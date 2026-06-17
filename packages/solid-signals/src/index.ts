@@ -11,6 +11,10 @@ export {
   startGestureTransaction,
   flush,
   isReactiveFlushActive,
+  setTransitionCommitWrapper,
+  setCommitGate,
+  onTransitionInit,
+  startTransition,
   pauseEffects,
   getNextChildId,
   peekNextChildId,
@@ -50,7 +54,8 @@ export type {
   DiagnosticEvent,
   DiagnosticKind,
   Diagnostics,
-  DiagnosticSeverity
+  DiagnosticSeverity,
+  TransitionCommitWrapper
 } from "./core/index.js";
 export {
   createSignal,
@@ -84,5 +89,6 @@ export {
   createErrorBoundary,
   createRevealOrder,
   flatten,
+  LoadingRevealedContext,
   type RevealOrder
 } from "./boundaries.js";

@@ -1,5 +1,5 @@
-import { Activity, addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush, For } from "solid-js";
+import { Activity, addTransitionType, ViewTransition } from "@solidjs/web";
+import { createSignal, For, startTransition } from "solid-js";
 import { chip, cx, desc, kicker, panelBox, Panel } from "../ui";
 
 type PaneId = "profile" | "appearance" | "alerts";
@@ -66,10 +66,9 @@ export function SettingsTabsDemo() {
   const select = (id: PaneId) => {
     if (id === tab()) return;
     // A plain tap → one cross-fade. The `settings` type drives the pane group.
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("settings");
       setTab(id);
-      flush();
     });
   };
 

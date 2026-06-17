@@ -56,6 +56,7 @@ import { cleanup, disposeChildren, getNextChildId, markDisposal } from "./owner.
 import {
   activeTransition,
   assignOrMergeLane,
+  checkPostAwaitTransitionWrite,
   clock,
   dirtyQueue,
   globalQueue,
@@ -906,6 +907,10 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
 }
 
 export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T)): T {
+  // Skip owned/internal writes (boundary `_disabled`, optimistic plumbing, etc.):
+  // they fire outside a transition during the async gap and would trip the
+  // post-await diagnostic as false positives. Only app-level writes are checked.
+  if (__DEV__ && !(el._config & CONFIG_OWNED_WRITE)) checkPostAwaitTransitionWrite();
   if (
     __DEV__ &&
     !(el._config & CONFIG_OWNED_WRITE) &&

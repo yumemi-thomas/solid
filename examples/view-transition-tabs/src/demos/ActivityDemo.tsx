@@ -1,5 +1,5 @@
-import { Activity, addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createEffect, createSignal, flush } from "solid-js";
+import { Activity, addTransitionType, ViewTransition } from "@solidjs/web";
+import { createEffect, createSignal, startTransition } from "solid-js";
 import { chip, cx, desc, Panel, primaryBtn } from "../ui";
 
 type PaneId = "notes" | "metrics";
@@ -32,13 +32,12 @@ export function ActivityDemo() {
   const [metricCount, setMetricCount] = createSignal(72);
 
   const selectPane = (pane: PaneId) => {
-    // A tab switch is a discrete tap, not a scrub, so it's a plain
-    // `startViewTransition` (which plays the cross-fade once and finishes). The
-    // `activity` transition type drives the `activity-transition` class on the panes.
-    startViewTransition(() => {
+    // A discrete tap (not a scrub): a synchronous change wrapped in
+    // `startTransition`, so the auto seam plays the cross-fade once and finishes.
+    // The `activity` transition type drives the `activity-transition` class.
+    startTransition(() => {
       addTransitionType("activity");
       setActivePane(pane);
-      flush();
     });
   };
 

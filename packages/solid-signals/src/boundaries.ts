@@ -64,6 +64,12 @@ function createBoundChildren<T>(
 
 const ON_INIT: unique symbol = Symbol();
 const RevealControllerContext = createContext<RevealController | null>(null);
+// Lets a descendant observe whether its nearest `<Loading>` boundary is currently
+// showing content (`true`) or its fallback (`false`). Reactive. Used by
+// `<ViewTransition>` to fire `enter` when its slot reveals. Default `null` (not
+// `undefined`, which `createContext` treats as "no default" and would throw on
+// read) means there is no enclosing loading boundary.
+export const LoadingRevealedContext = createContext<(() => boolean) | null>(null);
 let _revealUsed = false;
 
 type RevealSlot = CollectionQueue | RevealController;
@@ -369,6 +375,12 @@ function createCollectionBoundary<T>(
   if (type === STATUS_ERROR)
     queue._error = signal<unknown>(undefined, { ownedWrite: true, _noSnapshot: true });
   if (onFn) queue._onFn = onFn;
+  // Expose this loading boundary's suspended state to descendants (set before the
+  // children are created so they can read it). `_disabled` is the reactive signal
+  // that flips true while a fallback is showing; a descendant `<ViewTransition>`
+  // tracks `!disabled` to fire its `enter` when its slot actually reveals.
+  if (type === STATUS_PENDING)
+    setContext(LoadingRevealedContext, () => !read(queue._disabled), owner);
   const tree = (queue._tree = createBoundChildren(owner, fn, queue, type) as BoundaryComputed<any>);
   // Prime source tracking so reveal registration sees pending sources.
   untrack(() => {

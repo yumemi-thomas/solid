@@ -1,5 +1,5 @@
-import { addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush, For, Show } from "solid-js";
+import { addTransitionType, ViewTransition } from "@solidjs/web";
+import { createSignal, For, Show, startTransition } from "solid-js";
 import { cx, desc, kicker, Panel, panelBox, primaryBtn } from "../ui";
 
 type Item = { id: number; label: string; tone: string };
@@ -25,18 +25,16 @@ export function AddRemoveDemo() {
   // (their stable names make that an `update` reposition, not a re-mount).
   const add = () => {
     if (items().length >= MAX) return;
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("add");
       setItems(list => [make(), ...list]);
-      flush();
     });
   };
 
   const remove = (id: number) => {
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("remove");
       setItems(list => list.filter(item => item.id !== id));
-      flush();
     });
   };
 

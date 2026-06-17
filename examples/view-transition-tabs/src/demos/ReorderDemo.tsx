@@ -1,5 +1,5 @@
-import { addTransitionType, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush, For } from "solid-js";
+import { addTransitionType, ViewTransition } from "@solidjs/web";
+import { createSignal, For, startTransition } from "solid-js";
 import { chip, cx, desc, panelBox, Panel, primaryBtn } from "../ui";
 
 const accentBg: Record<string, string> = {
@@ -19,18 +19,16 @@ export function ReorderDemo() {
   const [items, setItems] = createSignal(initial);
 
   const rotate = () => {
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("reorder");
       setItems(list => [list[1], list[2], list[3], list[0]]);
-      flush();
     });
   };
 
   const reverse = () => {
-    startViewTransition(() => {
+    startTransition(() => {
       addTransitionType("reorder");
       setItems(list => [...list].reverse());
-      flush();
     });
   };
 

@@ -46,6 +46,65 @@ export const zombieQueue: Heap = {
 export let clock = 0;
 export let activeTransition: Transition | null = null;
 let scheduled = false;
+
+/**
+ * A renderer-installed hook that wraps the DOM-mutating render effects of a
+ * committing transition. This is the seam that lets solid-web run a transition
+ * commit inside `document.startViewTransition({ update })` without the rest of
+ * userland calling `startViewTransition` manually — mirroring React, where the
+ * DOM config owns the browser call and the reconciler just hands it a mutation
+ * thunk.
+ *
+ * Contract: the wrapper MUST call `applyMutations()` (which runs the render
+ * effects → DOM mutations). It may run it synchronously (no native support /
+ * fallback) or asynchronously inside a view-transition update callback. When it
+ * returns a thenable, the commit becomes async: layout/user effects and the
+ * release of the scheduler's `_running` guard are deferred until it settles.
+ *
+ * Left `null` (the default), transition commits run fully synchronously exactly
+ * as before — so this code tree-shakes out of sync-only bundles.
+ */
+export type TransitionCommitWrapper = (
+  applyMutations: () => void,
+  transition: Transition
+) => void | PromiseLike<unknown>;
+let commitWrapper: TransitionCommitWrapper | null = null;
+export function setTransitionCommitWrapper(fn: TransitionCommitWrapper | null): void {
+  commitWrapper = fn;
+}
+
+/**
+ * Optional renderer-installed gate consulted right before a completed transition
+ * commits. If it returns a thenable, the commit is deferred until that thenable
+ * settles — leaving the transition active so writes meanwhile coalesce into it,
+ * so the eventual commit reflects the latest state. solid-web returns the
+ * in-flight browser view transition's `finished` promise, mirroring React's
+ * `suspendOnActiveViewTransition`/`waitForCommitToBeReady`: the running animation
+ * runs to completion and a new one fires toward the coalesced latest, instead of
+ * a second `document.startViewTransition` aborting the first. The scheduler stays
+ * renderer-agnostic — it knows nothing about view transitions, only "wait on this
+ * thenable". Left `null` (the default), commits are never gated. Plain sync
+ * updates never reach this branch, so they commit immediately (React parity: a
+ * sync update cuts the animation).
+ */
+let commitGate: (() => PromiseLike<unknown> | null | undefined) | null = null;
+export function setCommitGate(fn: (() => PromiseLike<unknown> | null | undefined) | null): void {
+  commitGate = fn;
+}
+
+/**
+ * Notifies a renderer when a transition is (re)initialized, so it can associate
+ * out-of-band metadata with the transition object before it commits. solid-web
+ * uses this to capture pending view-transition *types* — declared synchronously
+ * via `addTransitionType` — onto the transition that will later commit
+ * asynchronously, since the module-global type buffer is cleared on a microtask
+ * that races ahead of an async commit. Called with the live `activeTransition`;
+ * may fire multiple times for one transition (including across merges).
+ */
+let transitionInitHook: ((transition: Transition) => void) | null = null;
+export function onTransitionInit(hook: ((transition: Transition) => void) | null): void {
+  transitionInitHook = hook;
+}
 let syncDepth = 0;
 export let projectionWriteActive = false;
 let inTrackedQueueCallback = false;
@@ -452,6 +511,8 @@ export class GlobalQueue extends Queue {
   flush() {
     if (this._running) return;
     this._running = true;
+    let committedTransition: Transition | null = null;
+    let deferred = false;
     try {
       runHeap(dirtyQueue, GlobalQueue._update);
       if (activeTransition) {
@@ -493,14 +554,42 @@ export class GlobalQueue extends Queue {
           }
           return;
         }
+        // Commit gate: if a renderer is still animating a previous commit (a
+        // browser view transition), wait for it to finish before committing this
+        // one — rather than committing now and aborting that animation. Holding
+        // `_running` and leaving `activeTransition` + the queues untouched means
+        // writes that arrive during the wait coalesce into this same transition,
+        // so the deferred re-flush commits the latest state in one transition.
+        // `transitionComplete` set a sticky `_done`, so the re-flush re-confirms
+        // completeness for free and goes straight to commit. NOT the `!isComplete`
+        // path above — that one is destructive (resets pending nodes, nulls the
+        // transition). This path must change nothing but `deferred`.
+        if (commitGate) {
+          const wait = commitGate();
+          if (wait != null && typeof (wait as PromiseLike<unknown>).then === "function") {
+            deferred = true;
+            const onClear = () => {
+              this._running = false;
+              // Re-flush on a microtask, not synchronously: the gate's thenable
+              // is typically the same promise the renderer uses to clear its
+              // "transition active" flag, so the hop guarantees that clear runs
+              // before the re-evaluated gate (else it would defer forever).
+              // Both arms resume — a rejected/aborted transition still means the
+              // renderer is free, so the commit must proceed.
+              queueMicrotask(flush);
+            };
+            (wait as PromiseLike<unknown>).then(onClear, onClear);
+            return;
+          }
+        }
         this._pendingNodes !== activeTransition._pendingNodes &&
           this._pendingNodes.push(...activeTransition._pendingNodes);
         this.restoreQueues(activeTransition._queueStash);
         transitions.delete(activeTransition);
-        const completingTransition = activeTransition;
+        committedTransition = activeTransition;
         activeTransition = null;
         reassignPendingTransition(this._pendingNodes);
-        finalizePureQueue(completingTransition);
+        finalizePureQueue(committedTransition);
       } else {
         if (canUseSimpleSyncFlush(this)) {
           commitPendingNodes();
@@ -516,15 +605,80 @@ export class GlobalQueue extends Queue {
       clock++;
       // Check if finalization added items to the heap (from optimistic reversion)
       scheduled = dirtyQueue._max >= dirtyQueue._min;
-      // Run lane effects first (for ready lanes), then regular effects
+      // When a transition commits and a renderer installed a commit wrapper
+      // (e.g. solid-web's document.startViewTransition bridge), hand the
+      // DOM-mutating render effects to the wrapper so they run inside the
+      // browser's view-transition update callback. The commit may then become
+      // async; `commitWithWrapper` owns releasing `_running` via `settle()`.
+      if (committedTransition && commitWrapper) {
+        deferred = this.commitWithWrapper(committedTransition);
+      } else {
+        // Run lane effects first (for ready lanes), then regular effects
+        activeLanes.size && runLaneEffects(EFFECT_RENDER);
+        this.run(EFFECT_RENDER);
+        activeLanes.size && runLaneEffects(EFFECT_USER);
+        this.run(EFFECT_USER);
+        if (__DEV__) DEV.hooks.onUpdate?.();
+      }
+    } finally {
+      if (!deferred) this._running = false;
+    }
+  }
+  /**
+   * Run a committing transition's render effects through the installed
+   * {@link TransitionCommitWrapper}. Render (DOM-mutating) effects are the
+   * wrapper's `applyMutations` thunk; user/layout effects run afterwards.
+   *
+   * Returns `true` — the caller must NOT reset `_running` in its `finally`,
+   * because `settle()` owns that, either synchronously (sync wrapper) or after
+   * the wrapper's thenable resolves (async view transition). Holding `_running`
+   * across the async gap serializes the commit: re-entrant `flush()` calls
+   * early-return and writes made during the gap accumulate, then drain via the
+   * microtask queued in `settle()`.
+   */
+  commitWithWrapper(transition: Transition): boolean {
+    const runRender = () => {
       activeLanes.size && runLaneEffects(EFFECT_RENDER);
       this.run(EFFECT_RENDER);
+    };
+    const runUser = () => {
       activeLanes.size && runLaneEffects(EFFECT_USER);
       this.run(EFFECT_USER);
       if (__DEV__) DEV.hooks.onUpdate?.();
-    } finally {
+    };
+    // Force `scheduled` false so the top-level flush() while-loop exits cleanly
+    // instead of spinning on a guard-blocked re-entrant flush. Any genuinely
+    // pending dirty work is remembered and re-drained once the commit settles.
+    const resumeScheduled = scheduled;
+    scheduled = false;
+    const settle = () => {
+      try {
+        runUser();
+      } finally {
+        this._running = false;
+        if (resumeScheduled) scheduled = true;
+        if (scheduled || activeTransition) queueMicrotask(flush);
+      }
+    };
+    let result: void | PromiseLike<unknown>;
+    try {
+      result = commitWrapper!(runRender, transition);
+    } catch (err) {
+      // The wrapper threw synchronously (e.g. a render effect threw inside a
+      // no-native-support / mocked update). `settle()` never ran, so restore the
+      // `scheduled` flag we cleared above and re-queue, or the genuinely-pending
+      // work is stranded (the flush() loop early-returns while `_running` is held).
       this._running = false;
+      if (resumeScheduled) scheduled = true;
+      if (scheduled || activeTransition) queueMicrotask(flush);
+      throw err;
     }
+    if (result != null && typeof (result as PromiseLike<unknown>).then === "function") {
+      (result as PromiseLike<unknown>).then(settle, settle);
+    } else {
+      settle();
+    }
+    return true;
   }
   notify(node: Computed<any>, mask: number, flags: number, error?: any): boolean {
     // Only track async if the boundary is propagating STATUS_PENDING (not caught by boundary)
@@ -597,6 +751,7 @@ export class GlobalQueue extends Queue {
       for (const store of this._optimisticStores) activeTransition._optimisticStores.add(store);
       this._optimisticStores = activeTransition._optimisticStores;
     }
+    transitionInitHook?.(activeTransition);
   }
 }
 
@@ -817,6 +972,13 @@ export function flush<T>(fn?: () => T): T | void {
   // `flush()` is an explicit drain point, so it must also process an active
   // transition even if no microtask was scheduled for it yet.
   while (scheduled || activeTransition) {
+    // A deferred transition commit (the view-transition seam) holds the queue
+    // with `_running` across its async gap; `globalQueue.flush()` would just
+    // early-return, so spinning here is pointless. Yield — the commit's `settle()`
+    // re-drains via a microtask once the mutation lands. (Without this, a
+    // transition that reveals freshly-mounted async content loops forever, since
+    // the mount re-schedules work while the commit still holds the queue.)
+    if (globalQueue._running) break;
     if (__DEV__ && ++count === 1e5) throw new Error("Potential Infinite Loop Detected.");
     globalQueue.flush();
   }
@@ -901,4 +1063,98 @@ export function runInTransition<T>(transition: Transition, fn: () => T): T {
   } finally {
     activeTransition = prevTransition;
   }
+}
+
+// DEV diagnostic for the async-scope footgun. Counts in-flight async
+// `startTransition` scopes; while any are pending, a write that lands outside a
+// transition (and outside a flush) is almost certainly a post-`await` write in
+// the scope — which is NOT part of the transition. Warn once per pending window.
+let pendingAsyncTransitions = 0;
+let warnedPostAwaitWrite = false;
+
+/** @internal DEV-only. Called from `setSignal`. */
+export function checkPostAwaitTransitionWrite(): void {
+  if (
+    pendingAsyncTransitions > 0 &&
+    !warnedPostAwaitWrite &&
+    activeTransition === null &&
+    !globalQueue._running &&
+    !syncDepth
+  ) {
+    warnedPostAwaitWrite = true;
+    console.warn(
+      "[solid] A signal was written while an async startTransition was pending, but " +
+        "outside the transition. Writes after an `await` inside a startTransition scope " +
+        "are not part of the transition — they won't be batched or animated with it. " +
+        "Make those writes synchronously before the first `await`, or use `action` for " +
+        "multi-step async transactions."
+    );
+  }
+}
+
+/**
+ * Runs `fn` as a transition: every write inside it is deferred and committed
+ * together, and the commit is handed to the view-transition seam — so if it
+ * lands under a `<ViewTransition>` it animates automatically. This is how a
+ * change opts into an animated/batched commit; the async-native paths
+ * (`createAsync`, actions, optimistic) already form transitions on their own.
+ *
+ * - **Synchronous scope** (`fn` returns a non-thenable): the transition
+ *   completes and commits within this call; returns `fn`'s value.
+ * - **Async scope** (`fn` returns a thenable): the transition is held open
+ *   until the scope settles AND any reactive async it triggered resolves, then
+ *   commits as one. Returns a promise for `fn`'s result. Writes made *before*
+ *   the first `await` are part of the transition; writes made *after* an `await`
+ *   are not (a plain async continuation can't carry the transition context — use
+ *   synchronous writes, or `action` for multi-step async transactions).
+ *
+ * Mirrors React's `startTransition`: write through it instead of calling
+ * `startViewTransition` by hand.
+ */
+export function startTransition<T>(fn: () => Promise<T>): Promise<T>;
+export function startTransition<T>(fn: () => T): T;
+export function startTransition<T>(fn: () => T | Promise<T>): T | Promise<T> {
+  globalQueue.initTransition();
+  const ctx = activeTransition!;
+  let result: T | Promise<T>;
+  try {
+    result = fn();
+  } catch (error) {
+    flush();
+    throw error;
+  }
+  // `fn` may have declared view-transition types (addTransitionType) now that the
+  // transition exists. Re-notify the init hook so a renderer can capture them
+  // onto the transition before it commits — the hook fired at initTransition,
+  // before `fn` ran, so it would otherwise miss types declared inside the scope.
+  if (activeTransition) transitionInitHook?.(activeTransition);
+  if (!result || typeof (result as Promise<T>).then !== "function") {
+    flush();
+    return result;
+  }
+  // Async scope: a marker in `_actions` keeps `transitionComplete` false so the
+  // commit waits for the scope to settle (the scheduler may still partially run
+  // ready lanes meanwhile, but pending writes stay uncommitted). On settle we
+  // re-establish the transition and flush, committing once everything is ready.
+  const marker = {} as unknown as Generator<any>;
+  ctx._actions.push(marker);
+  if (__DEV__ && pendingAsyncTransitions++ === 0) warnedPostAwaitWrite = false;
+  const settle = () => {
+    if (__DEV__) pendingAsyncTransitions--;
+    const live = currentTransition(ctx);
+    globalQueue.initTransition(live);
+    const i = live._actions.indexOf(marker);
+    if (i >= 0) live._actions.splice(i, 1);
+    flush();
+  };
+  return (result as Promise<T>).then(
+    value => {
+      settle();
+      return value;
+    },
+    error => {
+      settle();
+      throw error;
+    }
+  );
 }

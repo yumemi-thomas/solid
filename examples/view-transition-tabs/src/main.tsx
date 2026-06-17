@@ -1,5 +1,5 @@
-import { render, startViewTransition, ViewTransition } from "@solidjs/web";
-import { createSignal, flush, For, Show } from "solid-js";
+import { addTransitionType, render, startViewTransition, ViewTransition } from "@solidjs/web";
+import { createSignal, flush, For, Show, startTransition } from "solid-js";
 import { cx, eyebrow } from "./ui";
 import { installTransitionMonitor, vtPhase, vtPhaseLabel } from "./vt-monitor";
 import { SharedCardDemo } from "./demos/SharedCardDemo";
@@ -46,19 +46,14 @@ function App() {
   const [activeTab, setActiveTab] = createSignal<TabId>("gallery");
 
   const selectTab = (id: TabId) => {
-    // Pass the type up-front via options, NOT addTransitionType inside the scope.
-    // The browser captures the OLD snapshot before the update callback runs, so
-    // the type must be active at construction for `:active-view-transition-type(tab)`
-    // to suppress the inner named groups (lanes / report card) during capture.
-    // Added inside the scope it lands too late — those elements get captured as
-    // their own groups and play their exit animation on top of the panel fade.
-    startViewTransition(
-      () => {
-        setActiveTab(id);
-        flush();
-      },
-      { types: ["tab"] }
-    );
+    // A synchronous change made into a transition: the auto seam wraps the commit
+    // in a view transition. `addTransitionType("tab")` is captured at commit (read
+    // before the browser snapshots the old state), so `:active-view-transition-type(tab)`
+    // suppresses the inner named groups (lanes / report card) during capture.
+    startTransition(() => {
+      addTransitionType("tab");
+      setActiveTab(id);
+    });
   };
 
   const isLive = () => vtPhase() !== "idle";
@@ -177,6 +172,13 @@ function App() {
 }
 
 installTransitionMonitor();
+
+// Automatic view transitions are on by default (React parity): just mounting a
+// <ViewTransition> opts in, so any transition commit under a boundary auto-wraps
+// in document.startViewTransition with no setup call. Async demos form
+// transitions on their own (data loads, actions, Reveal); synchronous demos use
+// `startTransition(...)` to make their change a transition. `startViewTransition`
+// is now only the explicit escape hatch — used here to animate the initial mount.
 
 let disposeApp: (() => void) | undefined;
 startViewTransition(() => {

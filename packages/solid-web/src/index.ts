@@ -30,6 +30,9 @@ import {
   enableHydration,
   enforceLoadingBoundary,
   flush,
+  setTransitionCommitWrapper,
+  setCommitGate,
+  onTransitionInit,
   pauseEffects,
   startGestureTransaction as startSolidGestureTransaction,
   $DEVCOMP,
@@ -37,6 +40,7 @@ import {
   createEffect,
   createRenderEffect,
   useContext,
+  LoadingRevealedContext,
   type Accessor,
   type Owner
 } from "solid-js";
@@ -318,6 +322,13 @@ export type ViewTransitionProps = {
 let viewTransitionId = 0;
 let viewTransitionInternalMutation = false;
 let pendingTransitionTypes: string[] | null = null;
+// Automatic view transitions only. Types declared via `addTransitionType` are
+// buffered here (NOT cleared on a microtask, unlike `pendingTransitionTypes`)
+// and captured onto the transition object via the scheduler's `onTransitionInit`
+// hook, so they survive to an async auto-commit. Read back in the commit wrapper.
+let pendingAutoTransitionTypes: string[] | null = null;
+const autoTransitionTypes = new WeakMap<object, string[]>();
+let autoWrapperInstalled = false;
 let pendingGesture:
   | {
       timeline: GestureProvider;
@@ -334,6 +345,24 @@ type BrowserViewTransition = {
   skipTransition?: () => void;
 };
 let activeViewTransition: BrowserViewTransition | undefined;
+// The in-flight browser view transition's `finished` promise (null when none is
+// animating). The scheduler's commit gate (`setCommitGate`) reads this: while a
+// transition is animating, an auto commit WAITS for it to finish instead of
+// starting a second one that would abort it (browsers run one at a time). Writes
+// during the wait coalesce, so the next transition animates toward the latest
+// state — React's "wait, then commit the latest" behavior rather than abort.
+let activeBrowserVTFinished: Promise<unknown> | null = null;
+// Gate the scheduler consults before an auto commit (installed while a
+// <ViewTransition> boundary is mounted). Returning the active `finished` promise
+// defers the commit until that animation completes. Manual `startViewTransition`
+// is unaffected (it's the explicit escape hatch and still supersedes).
+const autoCommitGate = (): PromiseLike<unknown> | null =>
+  // Don't gate a commit that is itself running inside a view transition's update
+  // callback (manual `startViewTransition`, or the auto wrapper re-entering via
+  // its own flush): that commit IS part of the active transition, not a new one
+  // competing with it. Only a fresh commit arriving while a previous transition
+  // animates in the background (no active update callback) should wait.
+  activeViewTransition ? null : activeBrowserVTFinished;
 type ViewTransitionBoundaryState = {
   latest?: ViewTransitionInstance;
   props: ViewTransitionProps;
@@ -1009,6 +1038,25 @@ export function addTransitionType(type: string) {
     pendingTransitionTypes.push(type);
     activeViewTransition?.types?.add?.(type);
   }
+  // For automatic view transitions: buffer the type so it can be captured onto
+  // the transition that will commit later (surviving `pendingTransitionTypes`'
+  // microtask clear) — via the `onTransitionInit` hook, which fires when the
+  // transition forms (a sync write that triggers async data) or is re-fired by
+  // `startTransition` after its scope runs. Only when the seam is installed and
+  // not inside a manual transition (which manages its own types).
+  if (autoWrapperInstalled && !activeViewTransition) {
+    if (pendingAutoTransitionTypes === null) {
+      pendingAutoTransitionTypes = [];
+      // Clear after this turn so the buffer can't leak into a later, unrelated
+      // transition if none forms now. A *macro*task, not a microtask: the
+      // scheduler's flush — where the transition initializes and the hook copies
+      // these types onto it — is itself a microtask that must run first.
+      setTimeout(() => {
+        pendingAutoTransitionTypes = null;
+      });
+    }
+    if (!pendingAutoTransitionTypes.includes(type)) pendingAutoTransitionTypes.push(type);
+  }
 }
 
 function deferredPromise<T>() {
@@ -1074,6 +1122,16 @@ function startBrowserViewTransition(
       transition = start.call(document, { update }) as BrowserViewTransition;
     }
   }
+  // Publish this transition's `finished` so the scheduler's commit gate makes a
+  // pending auto commit WAIT for it rather than aborting it (browsers run one at a
+  // time). Cleared when it finishes (or is skipped/superseded). The gate re-reads
+  // this on its deferred re-flush; the clear runs on the same promise, before the
+  // gate's microtask-hopped re-flush, so it never defers forever.
+  const finished = Promise.resolve(transition?.finished).catch(() => {});
+  activeBrowserVTFinished = finished;
+  finished.finally(() => {
+    if (activeBrowserVTFinished === finished) activeBrowserVTFinished = null;
+  });
   // A skipped or superseded transition rejects `ready`/`finished` with an
   // AbortError, and a given call site only awaits one of them (e.g. exit
   // boundaries read `finished ?? ready`), so the other would surface as an
@@ -1230,6 +1288,132 @@ export function startViewTransition<T>(
       browserTransition?.skipTransition?.();
     }
   };
+}
+
+// Capture types declared synchronously via `addTransitionType` onto the
+// transition object as soon as it exists, before its async commit. Fires for
+// every (re)init of the transition while the buffer is set, so the transition
+// that ultimately commits carries the types even across merges.
+const autoTransitionInitHook = (transition: object) => {
+  if (pendingAutoTransitionTypes && pendingAutoTransitionTypes.length) {
+    autoTransitionTypes.set(transition, [...pendingAutoTransitionTypes]);
+  }
+};
+
+/**
+ * The scheduler seam for automatic view transitions. At a transition's commit,
+ * every transition that reaches the DOM (async data, actions, `Loading`/`Reveal`
+ * reveals, optimistic commits) runs its DOM mutations inside
+ * `document.startViewTransition` — so userland no longer wraps updates in
+ * `startViewTransition` itself. The manual `startViewTransition` remains the
+ * explicit escape hatch (and the only way to animate a purely synchronous change,
+ * which is not a transition).
+ *
+ * `applyMutations` is the scheduler's render-effect runner (the DOM mutation).
+ * Returning the browser transition's `updateCallbackDone` makes the commit
+ * async: the scheduler runs layout/user effects and releases its run-guard only
+ * after the mutation has been applied inside the update callback.
+ */
+const autoCommitWrapper = (
+  applyMutations: () => void,
+  transition: object
+): void | PromiseLike<unknown> => {
+  // Re-entrancy guard: a manual `startViewTransition` runs `flush()` inside its
+  // own update callback, and that flush commits the transition back through
+  // here. We're already inside a browser transition, so don't open a nested
+  // one — just apply the mutations. The manual path's own
+  // `fireViewTransitionUpdates()` fires the boundary events.
+  if (activeViewTransition) {
+    applyMutations();
+    return;
+  }
+  // (A commit landing while another transition is still animating is handled
+  // upstream by the scheduler's commit gate — it defers this whole commit until
+  // the running animation finishes, coalescing writes meanwhile — so by the time
+  // we get here no browser transition is in flight.)
+  // Types for this commit: those captured onto the transition at init (the
+  // async path) plus any still in the live buffer (a synchronous commit).
+  const captured = autoTransitionTypes.get(transition);
+  autoTransitionTypes.delete(transition);
+  pendingAutoTransitionTypes = null;
+  const types = [...new Set([...(captured ?? []), ...getTransitionTypes()])];
+  const gesture = pendingGesture;
+  // Stay fully synchronous (identical to pre-seam behavior) unless the browser
+  // supports the API AND there is something to animate — a mounted
+  // `<ViewTransition>` boundary, an explicit transition type, or a gesture.
+  // This keeps ordinary async commits (no view-transition intent) unwrapped
+  // and avoids deferring their layout/user effects by a microtask.
+  if (
+    typeof document.startViewTransition !== "function" ||
+    (mountedViewTransitionBoundaries.size === 0 && types.length === 0 && !gesture)
+  ) {
+    applyMutations();
+    return;
+  }
+  const previousActiveTransition = activeViewTransition;
+  // A pre-built context object set as `activeViewTransition` during the update
+  // callback. Built up front (not the browser transition itself) because the
+  // browser — and the no-native / mocked fallback — may invoke `update`
+  // synchronously, before `browserTransition` is assigned. Mirrors the manual
+  // path's `scopedTransition`; `types.add`/`skipTransition` forward to the real
+  // transition once it exists.
+  let browserTransition: BrowserViewTransition | undefined;
+  const scopedTransition: BrowserViewTransition = {
+    types: {
+      add(type) {
+        if (!types.includes(type)) types.push(type);
+        browserTransition?.types?.add?.(type);
+      }
+    },
+    skipTransition() {
+      browserTransition?.skipTransition?.();
+    }
+  };
+  browserTransition = startBrowserViewTransition(() => {
+    // Inside the update callback the browser has captured the old state, so the
+    // live DOM is still "old": set the active context (so `addTransitionType`
+    // and `captureViewTransitionContext` see this transition), snapshot rects,
+    // mutate, then fire geometry-driven boundary events — mirroring the manual
+    // path's snapshot → flush → fire ordering.
+    activeViewTransition = scopedTransition;
+    // Surface the captured types to Solid's own class-map + callback `context.types`
+    // for this commit (the native transition already got them via `types`). Without
+    // this an async auto-commit resolves type-keyed classes (e.g. `{{ async: "…" }}`)
+    // to their default, because `pendingTransitionTypes` was microtask-cleared by
+    // commit time. Mirrors the manual `startViewTransition` path (which sets it too).
+    const previousPendingTypes = pendingTransitionTypes;
+    pendingTransitionTypes = types;
+    snapshotViewTransitionRects();
+    try {
+      applyMutations();
+      fireViewTransitionUpdates();
+    } finally {
+      pendingTransitionTypes = previousPendingTypes;
+      activeViewTransition = previousActiveTransition;
+    }
+  }, types);
+  if (gesture) bindGestureViewTransitionAnimations(browserTransition, gesture);
+  // The scheduler awaits this before running layout/user effects + releasing
+  // its run-guard, so the commit stays serialized across the VT async gap.
+  return browserTransition.updateCallbackDone;
+};
+
+/**
+ * Install/uninstall the scheduler seam to match the current state: the wrapper is
+ * active exactly while at least one `<ViewTransition>` is mounted. Mounting a
+ * boundary is the opt-in — like React, there is no separate enable call — and the
+ * wrapper + hook tree-shake away entirely for apps that never render a boundary.
+ * Idempotent; called on boundary mount and unmount.
+ */
+function refreshAutoViewTransitionInstall(): void {
+  if (typeof document === "undefined") return;
+  const shouldInstall = mountedViewTransitionBoundaries.size > 0;
+  if (shouldInstall === autoWrapperInstalled) return;
+  autoWrapperInstalled = shouldInstall;
+  setTransitionCommitWrapper(shouldInstall ? autoCommitWrapper : null);
+  setCommitGate(shouldInstall ? autoCommitGate : null);
+  onTransitionInit(shouldInstall ? autoTransitionInitHook : null);
+  if (!shouldInstall) pendingAutoTransitionTypes = null;
 }
 
 type SelectionState = [start: number, end: number, direction: string];
@@ -1801,9 +1985,18 @@ function runViewTransitionEvent(
 function ViewTransitionContent(props: ViewTransitionProps) {
   const resolved = children(() => props.children);
   const autoName = `solid-vt-${viewTransitionId++}`;
+  // Reactive "is my nearest <Loading> showing content" accessor, if this boundary
+  // sits inside one. When present, the mount-time enter is deferred to the reveal
+  // effect below (a boundary behind a fallback hasn't really entered yet).
+  // Cast bridges the cross-package `Context` type identity (the context is created
+  // in @solidjs/signals; `useContext` here is typed against solid-js's re-export).
+  const loadingRevealed = useContext(
+    LoadingRevealedContext as unknown as Parameters<typeof useContext>[0]
+  ) as (() => boolean) | null;
   let mounted = false;
   let mountedName: string | undefined;
   let disposed = false;
+  let entered = false;
   let latest: ViewTransitionInstance | undefined;
   const duplicateNameToken = {};
   const boundaryState: ViewTransitionBoundaryState = {
@@ -1812,6 +2005,9 @@ function ViewTransitionContent(props: ViewTransitionProps) {
     disposed: false
   };
   mountedViewTransitionBoundaries.add(boundaryState);
+  // Mounting a boundary is the opt-in: install the automatic-view-transition seam
+  // (no app-level call needed). Uninstalled again when the last boundary unmounts.
+  refreshAutoViewTransitionInstall();
 
   createEffect(
     () => props.name,
@@ -1871,6 +2067,7 @@ function ViewTransitionContent(props: ViewTransitionProps) {
           // A same-name element departed earlier this flush and registered a
           // pending exit synchronously — pair as a share immediately. Fire when
           // either side committed inside a transition.
+          entered = true;
           pending.cancelled = true;
           pendingViewTransitionExits.delete(transitionName);
           const shareContext = context ?? pending.context;
@@ -1893,6 +2090,7 @@ function ViewTransitionContent(props: ViewTransitionProps) {
           // this render effect is not).
           const entry: AppearingViewTransition = { context };
           appearingViewTransitions.set(transitionName, entry);
+          entered = true;
           const enterInstance = latest;
           queueMicrotask(() => {
             if (appearingViewTransitions.get(transitionName) === entry)
@@ -1920,9 +2118,12 @@ function ViewTransitionContent(props: ViewTransitionProps) {
               );
             }
           });
-        } else if (context) {
+        } else if (context && !loadingRevealed) {
           // Fresh mount (no same-name element live or departing): fire enter
           // synchronously — no deferral, so no timing change for the common case.
+          // Skipped when inside a <Loading>: the reveal effect below fires enter
+          // when the slot's content actually reveals (it may be behind a fallback).
+          entered = true;
           runViewTransitionEvent(
             "enter",
             latest,
@@ -1945,10 +2146,42 @@ function ViewTransitionContent(props: ViewTransitionProps) {
     }
   );
 
+  // When this boundary sits inside a <Loading>, its enter is deferred (above) and
+  // fired here when the slot is actually showing content. A *user* effect runs
+  // after the boundary's suspended state has settled for the flush, so its first
+  // run reflects reality: suspended slots read `false` (wait), while content that
+  // mounts already-ready reads `true` (fire now). Re-runs on each fallback↔content
+  // flip, so each Reveal slot enters as its own content lands (sequential frontier
+  // / natural out-of-order), under whatever transition is active at reveal time.
+  // `entered` guards against re-firing on a later flip.
+  if (loadingRevealed) {
+    createEffect(
+      () => loadingRevealed(),
+      isRevealed => {
+        if (isRevealed && !entered && !disposed && latest) {
+          const context = captureViewTransitionContext();
+          if (context) {
+            entered = true;
+            runViewTransitionEvent(
+              "enter",
+              latest,
+              props,
+              props.onEnter,
+              props.onGestureEnter,
+              context
+            );
+          }
+        }
+      }
+    );
+  }
+
   onCleanup(() => {
     disposed = true;
     boundaryState.disposed = true;
     mountedViewTransitionBoundaries.delete(boundaryState);
+    // Uninstall the seam once the last boundary is gone (idempotent otherwise).
+    refreshAutoViewTransitionInstall();
     if (mountedName !== undefined) {
       const count = (liveViewTransitionNames.get(mountedName) ?? 1) - 1;
       if (count <= 0) liveViewTransitionNames.delete(mountedName);
