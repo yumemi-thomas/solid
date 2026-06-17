@@ -289,16 +289,16 @@ it("recovers when count goes to 0, from changes, and count comes back nonzero (#
   const [count, setCount] = createSignal(2);
   const [from, setFrom] = createSignal(2);
 
-  const map = repeat(count, (index) => ({ index }), { from });
+  const map = repeat(count, index => ({ index }), { from });
 
   let snapshot: any[] = [];
   createRoot(() => {
-    createEffect(map, (rows) => {
+    createEffect(map, rows => {
       snapshot = rows;
     });
   });
   flush();
-  expect(snapshot.map((r) => r.index)).toEqual([2, 3]);
+  expect(snapshot.map(r => r.index)).toEqual([2, 3]);
 
   // 1. clear rows
   setCount(0);
