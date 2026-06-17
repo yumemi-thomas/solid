@@ -325,6 +325,11 @@ function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
         this._nodes = [];
         this._mappings = [];
         this._len = 0;
+        // Reset offset to match the cleared data. Without this, a subsequent
+        // nonzero render with a smaller `from` would enter the end-clear loop
+        // with `prevTo = stale_offset + 0` > `to` and dispose `_nodes[-1]`
+        // (#2767, repro 2).
+        this._offset = 0;
       }
       if (this._fallback && !this._mappings[0]) {
         // create fallback

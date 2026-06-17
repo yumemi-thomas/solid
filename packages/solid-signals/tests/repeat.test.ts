@@ -284,3 +284,32 @@ it("should retain instances when only `offset` changes", () => {
   expect(e4.index).toBe(4);
   expect(computed).toHaveBeenCalledTimes(7);
 });
+
+it("recovers when count goes to 0, from changes, and count comes back nonzero (#2767)", () => {
+  const [count, setCount] = createSignal(2);
+  const [from, setFrom] = createSignal(2);
+
+  const map = repeat(count, (index) => ({ index }), { from });
+
+  let snapshot: any[] = [];
+  createRoot(() => {
+    createEffect(map, (rows) => {
+      snapshot = rows;
+    });
+  });
+  flush();
+  expect(snapshot.map((r) => r.index)).toEqual([2, 3]);
+
+  // 1. clear rows
+  setCount(0);
+  flush();
+  expect(snapshot.map((r: any) => r.index)).toEqual([]);
+
+  // 2. show row 0 — simultaneously moves `from` to 0 and `count` to 1.
+  // Without the `_offset` reset this throws "Cannot read properties of
+  // undefined (reading 'dispose')" inside updateRepeat.
+  setFrom(0);
+  setCount(1);
+  flush();
+  expect(snapshot.map((r: any) => r.index)).toEqual([0]);
+});
