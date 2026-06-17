@@ -417,6 +417,27 @@ describe("Server createErrorBoundary", () => {
       { id: "test" }
     );
   });
+
+  test("catches errors thrown from createEffect on the server (#2777)", () => {
+    createRoot(
+      () => {
+        const result = createErrorBoundary(
+          () => {
+            createEffect(
+              () => {
+                throw new Error("server effect boom");
+              },
+              () => {}
+            );
+            return "children";
+          },
+          (err: () => unknown) => `caught: ${(err() as Error).message}`
+        );
+        expect(result()).toBe("caught: server effect boom");
+      },
+      { id: "test" }
+    );
+  });
 });
 
 // === createLoadingBoundary ===

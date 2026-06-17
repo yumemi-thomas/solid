@@ -935,7 +935,14 @@ function serverEffect<T>(
     }
     effectFn?.((ssrSource ? (comp.value ?? result) : result) as any, undefined);
   } catch (err) {
-    // Swallow errors from effects on server
+    // NotReadyError is suspense control flow — must keep propagating so the
+    // surrounding Loading boundary can react. For real errors, record on the
+    // computation and re-throw so a wrapping `createErrorBoundary` /
+    // `<Errored>` can catch instead of the error vanishing into the void
+    // (#2777).
+    if (err instanceof NotReadyError) throw err;
+    comp.error = err;
+    throw err;
   }
 }
 
