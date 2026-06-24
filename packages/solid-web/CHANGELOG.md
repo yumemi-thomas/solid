@@ -1,5 +1,20 @@
 # @solidjs/web
 
+## 2.0.0-beta.15
+
+### Patch Changes
+
+- a5d15f6: Fix Portal mount timing so earlier sibling refs can be used as Portal targets.
+- 2c0a336: Rewrite `Portal` mounting: pass the real mount element to `insert` with the new `host` option instead of a `Proxy` wrapper, and run the insert in an owner-parented root that is disposed on mount change or Portal disposal. Fixes portal content accumulating on keyed swaps (#2757), `NO_OWNER_EFFECT` leaks from scheduled portal effects (#2758), and event retargeting for nodes inserted through replace paths.
+- Updated dependencies [8402421]
+- Updated dependencies [f083220]
+- Updated dependencies [98a7385]
+- Updated dependencies [c943c5c]
+- Updated dependencies [4f14a34]
+- Updated dependencies [bff4c21]
+- Updated dependencies [52255dc]
+  - solid-js@2.0.0-beta.15
+
 ## 2.0.0-beta.14
 
 ### Patch Changes

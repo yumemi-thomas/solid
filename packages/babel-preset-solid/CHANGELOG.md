@@ -1,5 +1,18 @@
 # babel-preset-solid
 
+## 2.0.0-beta.15
+
+### Patch Changes
+
+- Updated dependencies [8402421]
+- Updated dependencies [f083220]
+- Updated dependencies [98a7385]
+- Updated dependencies [c943c5c]
+- Updated dependencies [4f14a34]
+- Updated dependencies [bff4c21]
+- Updated dependencies [52255dc]
+  - solid-js@2.0.0-beta.15
+
 ## 2.0.0-beta.14
 
 ### Patch Changes

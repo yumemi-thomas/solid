@@ -1,5 +1,42 @@
 # solid-js
 
+## 2.0.0-beta.15
+
+### Patch Changes
+
+- 8402421: Demote low-level `solid-js` boundary primitive docs in favor of the component APIs.
+- f083220: Align server `Errored` boundaries with client hydration and preserve streamed outer error fallbacks for rejected `Loading` content.
+- 98a7385: Fix late-streamed `<Loading>` fragments being orphaned/duplicated during hydration when a chained async memo recomputes between stream chunks. A computation is now treated as still hydrating while the overall lifecycle is in progress (`!done`) and it has an unconsumed serialized value, so it short-circuits to the server's deferred value instead of re-running its async body on the client.
+- c943c5c: Stop SSR from silently swallowing errors thrown in server effects. `serverEffect` now re-throws real errors so a wrapping `createErrorBoundary`/`<Errored>` can catch them (matching the client/hydration path), while still propagating `NotReadyError` as suspense control flow (#2777).
+- 4f14a34: Fix rejected SSR `lazy()` so it reaches `<Errored>` instead of stack-overflowing or leaking an unhandled rejection (#2780). `lazy()` hand-rolls its own promise tracking and previously had no rejection handler, so a failed module load left `p.v` undefined forever (the render memo kept throwing `NotReadyError`, i.e. perpetual "loading") and the orphaned rejection escaped as a process-level `unhandledRejection`. The loader now captures the rejection on the lazy and surfaces it through the render memo, and `ctx.block` swallows its duplicate rejection branch — bringing `lazy()` to parity with async memos, whose rejections already propagate to error boundaries. Once the error reaches the boundary, the existing streamed-fragment hydration path renders the fallback as usual.
+- bff4c21: Handle pending store reads in server projections during SSR.
+- 52255dc: Remove the public `isRefreshing()` API and treat `refresh()` as write-like invalidation in dev owned-scope diagnostics.
+
+  `refresh()` is an action that invalidates an explicit refresh target; it should not expose ambient phase state to pure computations. User-visible mutation or retry intent should be modeled with actions and optimistic state, while readiness remains observable through `Loading` and `isPending`.
+
+- Updated dependencies [0564da2]
+- Updated dependencies [e141459]
+- Updated dependencies [97b4111]
+- Updated dependencies [f0bdfad]
+- Updated dependencies [0eb7f4e]
+- Updated dependencies [910b0ee]
+- Updated dependencies [dfcd7bd]
+- Updated dependencies [f97643c]
+- Updated dependencies [f0bdfad]
+- Updated dependencies [b26bc04]
+- Updated dependencies [03369dd]
+- Updated dependencies [99d829e]
+- Updated dependencies [e5761bd]
+- Updated dependencies [1847868]
+- Updated dependencies [5466a3b]
+- Updated dependencies [db88de1]
+- Updated dependencies [d8921ac]
+- Updated dependencies [e141b64]
+- Updated dependencies [baa47d2]
+- Updated dependencies [52255dc]
+- Updated dependencies [23c9563]
+  - @solidjs/signals@2.0.0-beta.15
+
 ## 2.0.0-beta.14
 
 ### Patch Changes

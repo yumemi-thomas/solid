@@ -1,5 +1,34 @@
 # @solidjs/signals
 
+## 2.0.0-beta.15
+
+### Patch Changes
+
+- 0564da2: Avoid recomputing reconcile state identity keys.
+- e141459: fix scheduler livelock after disposing a subtree with a stale height-adjust heap entry
+- 97b4111: Coalesce same-flush refresh calls by scheduling refresh invalidations through the reactive queue.
+- f0bdfad: Route height-adjusted subscribers to the queue that matches their own zombie flag in `adjustHeight`, mirroring the post-recompute height-adjust path. Inserting into the currently running heap unconditionally could park a zombie node in `dirtyQueue` (or a live node in `zombieQueue`), breaking the flag/queue invariant `deleteFromHeap` relies on — the same corruption class behind the #2759 livelock, reachable through a different trigger.
+- 0eb7f4e: Track pending state for deep reads of optimistic stores during transitions.
+- 910b0ee: Clear derived optimistic store overlays when fresh projected data commits.
+- dfcd7bd: Resume derived signal tracking after repeated same-value manual writes.
+- f97643c: Report pending state for action-held writes to derived stores.
+- f0bdfad: `flush(fn)` now restores its sync-depth counter when the drain throws. An effect that throws inside a synchronous flush scope previously leaked the counter, which left `schedule()` permanently unable to queue a microtask and silently froze all later reactivity. Balancing it in a `finally` keeps the scheduler usable after the error propagates.
+- b26bc04: Avoid reconcile crashes when async optimistic stores return nested arrays that have not created store nodes.
+- 03369dd: Track pending state for nested deep optimistic store reads.
+- 99d829e: Fix overlapping same-value optimistic writes so overrides stay active until all actions settle.
+- e5761bd: Prevent projection draft inspection from subscribing projections to their own store.
+- 1847868: Fix projection pending state on first refresh after initial async resolution.
+- 5466a3b: Preserve pending projection object property writes when draft arrays move store proxies.
+- db88de1: Fix `createReaction` crashing with `Cannot read properties of null (reading '_dep')` when the invalidating rerun of the tracked callback reads zero dependencies. `dispose()` now guards its dependency-unlink loop instead of unconditionally calling `unlinkSubs` once.
+- d8921ac: Fix `repeat` (`<Repeat>`) disposing the wrong row owners when `from` advances from a non-zero offset. The front-clear loop indexed the local `_nodes` array with a global index, so a sliding window (e.g. rows 1-3 → 3-5) disposed rows that stayed visible and leaked rows that left. It now disposes the correct local positions.
+- e141b64: Reset `<Repeat>`'s window offset when its count drops to zero. Previously the empty-window path cleared the row data but left `_offset` stale, so a later nonzero render with a smaller `from` computed a negative local index and disposed `_nodes[-1]`, crashing `updateRepeat`. This is the second symptom of #2767 (the first, wrong-row disposal on a forward slide, was fixed separately).
+- baa47d2: Preserve snapshot array length overrides when the overridden length is 0.
+- 52255dc: Remove the public `isRefreshing()` API and treat `refresh()` as write-like invalidation in dev owned-scope diagnostics.
+
+  `refresh()` is an action that invalidates an explicit refresh target; it should not expose ambient phase state to pure computations. User-visible mutation or retry intent should be modeled with actions and optimistic state, while readiness remains observable through `Loading` and `isPending`.
+
+- 23c9563: update primitive store array mappings
+
 ## 2.0.0-beta.14
 
 ### Patch Changes
