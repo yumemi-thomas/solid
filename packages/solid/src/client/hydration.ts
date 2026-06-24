@@ -276,10 +276,16 @@ function readHydratedValue(initP: any, refresh: () => void) {
 
 /** Shared “serialized init or run compute” path for memo/signal/optimistic/effect under hydration. */
 function readSerializedOrCompute(compute: (prev: any) => any, prev: any) {
-  if (!sharedConfig.hydrating) return compute(prev);
   const o = getOwner()!;
-  let initP: any;
-  if (sharedConfig.has!(o.id!)) initP = sharedConfig.load!(o.id!);
+  // A computation must adopt its serialized server value for the whole
+  // hydration lifecycle (`!done`), not just inside a synchronous resume window.
+  // A streamed section can recompute between chunks; running the client body
+  // there would commit a fresh Promise and orphan the server-streamed fragment.
+  // So short-circuit to the server value whenever one is still waiting; once
+  // hydration is `done`, always compute.
+  const hasSerialized = !sharedConfig.done && sharedConfig.has!(o.id!);
+  if (!sharedConfig.hydrating && !hasSerialized) return compute(prev);
+  const initP = hasSerialized ? sharedConfig.load!(o.id!) : undefined;
   const init = readHydratedValue(initP, () => subFetch(compute, prev));
   return init !== NO_HYDRATED_VALUE ? init : compute(prev);
 }
