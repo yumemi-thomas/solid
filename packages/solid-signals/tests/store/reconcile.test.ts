@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createStore, reconcile, snapshot } from "../../src/index.js";
+import { createStore, reconcile, snapshot, $TRACK, createMemo, createRoot, createEffect, createRenderEffect, flush } from "../../src/index.js";
 
 describe("setState with reconcile", () => {
   test("Reconcile a simple object", () => {
@@ -157,6 +157,27 @@ describe("setState with reconcile", () => {
     expect(store.value).toEqual([1, 2, 3]);
     setStore(reconcile({ value: { q: "aa" } }, "id"));
     expect(store.value).toEqual({ q: "aa" });
+  });
+  test("Reconcile keyed trailing removal notifies $TRACK subscribers", () => {
+    let effectRunCount = 0;
+    const [state, setState] = createStore({ arr: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+    createRoot(() => {
+      createRenderEffect(() => {
+        effectRunCount++;
+        // accessing $TRACK subscribes to ownKeys notifications on arr
+        (state.arr as any)[$TRACK];
+        return undefined;
+      }, () => undefined);
+    });
+    // flush to run the effect initially
+    flush();
+    const runsBefore = effectRunCount;
+    setState(s => {
+      reconcile([{ id: 1 }, { id: 2 }], "id")(s.arr);
+    });
+    // flush to propagate invalidation and re-run the effect
+    flush();
+    expect(effectRunCount).toBeGreaterThan(runsBefore);
   });
 });
 // type tests
