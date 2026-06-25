@@ -179,6 +179,23 @@ describe("setState with reconcile", () => {
     flush();
     expect(effectRunCount).toBeGreaterThan(runsBefore);
   });
+
+  test("Reconcile overwrite tracked array with object updates the signal node", () => {
+    const [store, setStore] = createStore<{ value: any }>({ value: [1, 2] });
+    let derived: any;
+
+    // Establish a tracking subscription on store.value so a signal node is created for it
+    createRoot(() => {
+      derived = createMemo(() => store.value);
+    });
+    expect(Array.isArray(derived())).toBe(true);
+
+    setStore(reconcile({ value: { a: 1 } }, "id"));
+    flush();
+
+    expect(Array.isArray(derived())).toBe(false);
+    expect((derived() as any).a).toBe(1);
+  });
 });
 // type tests
 
