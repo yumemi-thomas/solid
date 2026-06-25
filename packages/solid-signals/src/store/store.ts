@@ -578,6 +578,21 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           override[property] = value;
           if (nextLength !== undefined) override.length = nextLength;
         }
+        // When shrinking an array's length, mark truncated indices as deleted in the
+        // override so that `has`, `ownKeys`, and index reads correctly reflect the
+        // shorter array rather than leaking stale entries from the underlying value.
+        if (
+          Array.isArray(state) &&
+          property === "length" &&
+          typeof value === "number" &&
+          typeof prev === "number" &&
+          value < prev
+        ) {
+          const override = target[overrideKey] || (target[overrideKey] = Object.create(null));
+          for (let i = value; i < prev; i++) {
+            if (i in state) override[i] = $DELETED;
+          }
+        }
         notifyStoreProperty(target, property, "set", value, prev, prevHas);
         // notify length change
         if (Array.isArray(state) && property !== "length" && nextLength !== undefined) {
@@ -690,7 +705,9 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       // Get base descriptor structure, override just the value
       const baseDesc = getPropertyDescriptor(target[STORE_VALUE], target[STORE_OVERRIDE], property);
       if (baseDesc) {
-        return { ...baseDesc, value: target[STORE_OPTIMISTIC_OVERRIDE][property] };
+        const targetDesc = Reflect.getOwnPropertyDescriptor(target, property);
+        const configurable = !targetDesc || targetDesc.configurable ? true : baseDesc.configurable;
+        return { ...baseDesc, configurable, value: target[STORE_OPTIMISTIC_OVERRIDE][property] };
       }
       return {
         value: target[STORE_OPTIMISTIC_OVERRIDE][property],
@@ -699,7 +716,17 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         configurable: true
       };
     }
-    return getPropertyDescriptor(target[STORE_VALUE], target[STORE_OVERRIDE], property);
+    const desc = getPropertyDescriptor(target[STORE_VALUE], target[STORE_OVERRIDE], property);
+    // The proxy target is an internal node object, not the original source. When the
+    // source has a non-configurable property that does not also exist as non-configurable
+    // on the proxy target, the proxy invariant is violated: the engine requires that a
+    // property reported as non-configurable must actually be non-configurable on the
+    // target object. Override configurable to true only in that case.
+    if (desc && !desc.configurable) {
+      const targetDesc = Reflect.getOwnPropertyDescriptor(target, property);
+      if (!targetDesc || targetDesc.configurable) return { ...desc, configurable: true };
+    }
+    return desc;
   },
 
   getPrototypeOf(target) {
