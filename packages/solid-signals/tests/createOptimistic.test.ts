@@ -905,6 +905,40 @@ describe("createOptimistic", () => {
       expect(isPending($data!)).toBe(false);
     });
 
+    it("isPending reports pending while refresh() refetches an async optimistic accessor (#2799)", async () => {
+      let resolveFetch: ((v: number[]) => void) | null = null;
+      const makeFetch = () => new Promise<number[]>(r => (resolveFetch = r));
+
+      let $data!: SourceAccessor<number[]>;
+      createRoot(() => {
+        const [data] = createOptimistic<number[]>(() => makeFetch());
+        $data = data;
+        // Keep the node alive / recomputing on refresh.
+        createRenderEffect(data, () => {});
+      });
+
+      // Initial load — isPending stays false for the first load (no stale data).
+      flush();
+      resolveFetch!([1, 2, 3]);
+      await Promise.resolve();
+      flush();
+      expect($data()).toEqual([1, 2, 3]);
+      expect(isPending(() => $data())).toBe(false);
+
+      // refresh() forces a refetch; the resolved value is still visible while the
+      // new fetch is in flight, so isPending must report true (same as an async memo).
+      refresh($data);
+      flush();
+      expect(isPending(() => $data())).toBe(true);
+
+      // Settling the refetch clears pending.
+      resolveFetch!([4, 5, 6]);
+      await Promise.resolve();
+      flush();
+      expect($data()).toEqual([4, 5, 6]);
+      expect(isPending(() => $data())).toBe(false);
+    });
+
     it("plain optimistic stays true through refresh-of-unrelated-async (issue #2685)", async () => {
       // github.com/solidjs/solid/issues/2685 — the optimistic signal itself
       // is plain (no async source); the async work comes from refresh()ing

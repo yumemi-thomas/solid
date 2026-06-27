@@ -1118,11 +1118,18 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
     }
     return true;
   }
-  if (el._overrideValue !== undefined && el._overrideValue === NOT_PENDING && !el._parentSource) {
-    return false;
-  }
-  // Upstream: value held in transition (not during initial load)
-  if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) return true;
+  // Upstream: value held in transition (not during initial load). Excluded for a
+  // *resting* optimistic node (`_overrideValue === NOT_PENDING`, no active override):
+  // its held `_pendingValue` belongs to a reverting optimistic write, not a refetch, so
+  // it must not read as pending. Muting pending is the job of an active override; a
+  // resting optimistic node otherwise behaves like a plain async memo and reports
+  // pending only via the downstream async-in-flight check below (#2799).
+  if (
+    el._overrideValue !== NOT_PENDING &&
+    el._pendingValue !== NOT_PENDING &&
+    !(comp._statusFlags & STATUS_UNINITIALIZED)
+  )
+    return true;
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
   return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
