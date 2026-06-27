@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import {
   renderToString,
   renderToStream,
+  renderToStringAsync,
   Loading,
   Reveal,
   Show,
@@ -702,6 +703,62 @@ describe("SSR Streaming — Chained Async", () => {
     const full = chunks.join("");
     expect(shell).toContain("Loading...");
     expect(full).toContain("Hello world");
+  });
+
+  // A chained async memo reached through a SYNC derived memo must serialize its
+  // resolved VALUE, including inside a NESTED Loading boundary. `b` only resolves
+  // after `a`, so when nested it serializes *after* the surrounding boundary has
+  // already flushed/committed. Previously that late serialization landed in a
+  // buffer that never flushed again, dropping `b`'s value — the client then
+  // re-ran the compute and orphaned the server fragment ("unclaimed
+  // server-rendered node"). This is the shape TanStack Start produces (route
+  // content nested in the root layout's boundary).
+  const fetchItems = async (id: number) => ["item " + id];
+  function ChainedInner() {
+    const a = createMemo(async () => asyncValue([1], 10));
+    const m = createMemo(() => a()[0]); // sync — re-throws while a is pending
+    const b = createMemo(() => fetchItems(m())); // body throws synchronously first pass
+    return (
+      <Loading fallback={<div>loading</div>}>
+        <For each={b()}>{x => <div>{x}</div>}</For>
+      </Loading>
+    );
+  }
+
+  test("serializes chained memo value (single boundary)", async () => {
+    const html = await renderComplete(() => <ChainedInner />);
+    expect(html).toMatch(/=\[1\]/);
+    expect(html).toContain(`["item 1"]`);
+  });
+
+  test("serializes chained memo value (nested boundary)", async () => {
+    const html = await renderComplete(() => (
+      <Loading fallback={<div>outer</div>}>
+        <ChainedInner />
+      </Loading>
+    ));
+    expect(html).toMatch(/=\[1\]/);
+    expect(html).toContain(`["item 1"]`);
+  });
+
+  test("serializes chained memo value (deeply nested boundaries)", async () => {
+    const html = await renderComplete(() => (
+      <Loading fallback={<div>l1</div>}>
+        <Loading fallback={<div>l2</div>}>
+          <ChainedInner />
+        </Loading>
+      </Loading>
+    ));
+    expect(html).toContain(`["item 1"]`);
+  });
+
+  test("serializes chained memo value (nested boundary, renderToStringAsync)", async () => {
+    const html = await renderToStringAsync(() => (
+      <Loading fallback={<div>outer</div>}>
+        <ChainedInner />
+      </Loading>
+    ));
+    expect(html).toContain(`["item 1"]`);
   });
 });
 

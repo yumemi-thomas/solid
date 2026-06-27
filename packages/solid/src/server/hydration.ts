@@ -86,15 +86,24 @@ export function createLoadingBoundary(
   let handledRenderError: any;
   let retryPromise: Promise<any> | undefined;
   let serializeBuffer: [string, any, boolean?][] = [];
+  // Once this boundary has flushed, it never buffers again (resets only happen
+  // during retry discovery, before the first flush). A chained async source can
+  // resolve *after* the boundary commits — e.g. `b` depends on `a`, so `b`
+  // serializes only once `a` settled and the boundary already flushed. Those
+  // late serializations must write through to the parent ctx instead of landing
+  // in a buffer that will never flush again (which would orphan the fragment).
+  let flushed = false;
   const bufferedCtx = Object.create(ctx) as typeof ctx;
   bufferedCtx.serialize = (id: string, value: any, deferStream?: boolean) => {
-    serializeBuffer.push([id, value, deferStream]);
+    if (flushed) ctx.serialize(id, value, deferStream);
+    else serializeBuffer.push([id, value, deferStream]);
   };
   bufferedCtx._currentBoundaryId = id;
 
   function flushSerializeBuffer() {
     for (const args of serializeBuffer) ctx.serialize(args[0], args[1], args[2]);
     serializeBuffer = [];
+    flushed = true;
   }
 
   function commitBoundaryState() {
