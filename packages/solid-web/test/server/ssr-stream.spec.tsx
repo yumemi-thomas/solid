@@ -436,6 +436,42 @@ describe("SSR Streaming — Error Handling", () => {
     expect(html).toContain("Boom");
   });
 
+  test("isPending inside an Errored fallback resolves to false on the errored source (#2790)", async () => {
+    // Server parity for the client #2790 fix. The server uses its own pull-based
+    // primitives (packages/solid/src/server/signals.ts): `isPending` runs the
+    // thunk once and swallows non-NotReadyErrors, the async memo read throws the
+    // stored (real) error, and there is no observer graph / retry-on-read. So
+    // `isPending(data)` on the errored source is false, the `<Show>` renders
+    // nothing, the render completes, and no unhandled rejection escapes.
+    function App() {
+      const data = createMemo(async () => {
+        await delay(10);
+        throw new Error("Boom");
+      });
+      return (
+        <Loading fallback={<span>Loading...</span>}>
+          <Errored
+            fallback={(err: any) => (
+              <div>
+                <span>err: {String(err()?.message ?? err())}</span>
+                <Show when={isPending(data)}>
+                  <span>resetting</span>
+                </Show>
+              </div>
+            )}
+          >
+            <p>{data()}</p>
+          </Errored>
+        </Loading>
+      );
+    }
+
+    const html = await renderComplete(() => <App />);
+    expect(html).toContain("err:");
+    expect(html).toContain("Boom");
+    expect(html).not.toContain("resetting");
+  });
+
   test("Errored wrapping Loading streams resolved async siblings once (#2726)", async () => {
     function Test(props: { id: string }) {
       const data = createMemo(async () => asyncValue(props.id, 0));

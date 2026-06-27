@@ -28,7 +28,7 @@ import {
   schedule,
   zombieQueue
 } from "./scheduler.js";
-import type { Computed, FirewallSignal } from "./types.js";
+import type { Computed, FirewallSignal, Link } from "./types.js";
 
 function addPendingSource(el: Computed<any>, source: Computed<any>): boolean {
   if (el._pendingSource === source || el._pendingSources?.has(source)) return false;
@@ -82,14 +82,30 @@ function setPendingError(el: Computed<any>, source?: Computed<any>, error?: any)
   }
 }
 
-function forEachDependent(el: Computed<any>, fn: (node: Computed<any>) => void): void {
-  for (let s = el._subs; s !== null; s = s._nextSub) fn(s._sub);
+function forEachDependent(el: Computed<any>, fn: (node: Computed<any>, link: Link) => void): void {
+  for (let s = el._subs; s !== null; s = s._nextSub) fn(s._sub, s);
   for (
     let child: FirewallSignal<unknown> | null = el._child;
     child !== null;
     child = child._nextChild
   ) {
-    for (let s = child._subs; s !== null; s = s._nextSub) fn(s._sub);
+    for (let s = child._subs; s !== null; s = s._nextSub) fn(s._sub, s);
+  }
+}
+
+// Queue a node to re-run on the next flush (used both when a pending source
+// settles and when an `isPending` observer must re-evaluate after a real error).
+function enqueueForRerun(node: Computed<any>): void {
+  if ((node as any)._type === EFFECT_TRACKED) {
+    const tracked = node as any;
+    if (!tracked._modified) {
+      tracked._modified = true;
+      tracked._queue.enqueue(EFFECT_USER, tracked._run);
+    }
+  } else {
+    const queue = node._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
+    if (queue._min > node._height) queue._min = node._height;
+    insertIntoHeap(node, queue);
   }
 }
 
@@ -109,17 +125,7 @@ export function settlePendingSource(el: Computed<any>): void {
       setPendingError(node);
       updatePendingSignal(node);
       if (node._blocked) {
-        if ((node as any)._type === EFFECT_TRACKED) {
-          const tracked = node as any;
-          if (!tracked._modified) {
-            tracked._modified = true;
-            tracked._queue.enqueue(EFFECT_USER, tracked._run);
-          }
-        } else {
-          const queue = node._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
-          if (queue._min > node._height) queue._min = node._height;
-          insertIntoHeap(node, queue);
-        }
+        enqueueForRerun(node);
         scheduled = true;
       }
       node._blocked = false;
@@ -379,7 +385,7 @@ export function notifyStatus(
     }
     return;
   }
-  forEachDependent(el, sub => {
+  forEachDependent(el, (sub, link) => {
     sub._time = clock;
     if (
       (status === STATUS_PENDING &&
@@ -389,6 +395,16 @@ export function notifyStatus(
       (status !== STATUS_PENDING &&
         (sub._error !== error || sub._pendingSource || sub._pendingSources))
     ) {
+      // A pending-observer link is the subscription an `isPending` read created.
+      // It exists so the observer re-runs when the source settles, but it must
+      // not carry a real (non-NotReadyError) error — the synchronous `isPending`
+      // read swallows those, and the async path must match. Re-run the observer
+      // so `isPending` re-evaluates (to not-pending) instead of forwarding.
+      if (link._pendingObserver && status !== STATUS_PENDING && !(error instanceof NotReadyError)) {
+        enqueueForRerun(sub);
+        schedule();
+        return;
+      }
       if (!downstreamBlockStatus && !sub._transition) queuePendingNode(sub);
       notifyStatus(sub, status, error, downstreamBlockStatus, downstreamLane);
     }

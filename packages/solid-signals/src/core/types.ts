@@ -11,6 +11,11 @@ export interface Link {
   _nextDep: Link | null;
   _prevSub: Link | null;
   _nextSub: Link | null;
+  // True when the link was created by an `isPending` read. Such a link observes
+  // the dep's pending state only: `notifyStatus` re-runs the subscriber on a
+  // real (non-NotReadyError) error instead of propagating the error through it,
+  // matching the synchronous `isPending` read which swallows such errors.
+  _pendingObserver?: boolean;
 }
 
 export interface NodeOptions<T> {

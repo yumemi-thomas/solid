@@ -53,9 +53,16 @@ export function unobserved(el: Computed<unknown>) {
 }
 
 // https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L52
-export function link(dep: Signal<any> | Computed<any>, sub: Computed<any>) {
+export function link(
+  dep: Signal<any> | Computed<any>,
+  sub: Computed<any>,
+  pendingObserver: boolean = false
+) {
   const prevDep = sub._depsTail;
-  if (prevDep !== null && prevDep._dep === dep) return;
+  if (prevDep !== null && prevDep._dep === dep) {
+    prevDep._pendingObserver = pendingObserver;
+    return;
+  }
 
   let nextDep: Link | null = null;
   const isRecomputing = sub._flags & REACTIVE_RECOMPUTING_DEPS;
@@ -63,13 +70,16 @@ export function link(dep: Signal<any> | Computed<any>, sub: Computed<any>) {
     nextDep = prevDep !== null ? prevDep._nextDep : sub._deps;
     if (nextDep !== null && nextDep._dep === dep) {
       sub._depsTail = nextDep;
+      nextDep._pendingObserver = pendingObserver;
       return;
     }
   }
 
   const prevSub = dep._subsTail;
-  if (prevSub !== null && prevSub._sub === sub && (!isRecomputing || isValidLink(prevSub, sub)))
+  if (prevSub !== null && prevSub._sub === sub && (!isRecomputing || isValidLink(prevSub, sub))) {
+    prevSub._pendingObserver = pendingObserver;
     return;
+  }
 
   const newLink =
     (sub._depsTail =
@@ -79,7 +89,8 @@ export function link(dep: Signal<any> | Computed<any>, sub: Computed<any>) {
         _sub: sub,
         _nextDep: nextDep,
         _prevSub: prevSub,
-        _nextSub: null
+        _nextSub: null,
+        _pendingObserver: pendingObserver
       });
   if (prevDep !== null) prevDep._nextDep = newLink;
   else sub._deps = newLink;

@@ -757,7 +757,7 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
   }
 
   if (c && tracking) {
-    link(el, c as Computed<any>);
+    link(el, c as Computed<any>, pendingCheckActive);
 
     if ((owner as Computed<unknown>)._fn) {
       const isZombie = (el as Computed<unknown>)._flags & REACTIVE_ZOMBIE;
@@ -813,7 +813,11 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     }
   }
   if ((el as Computed<any>)._fn && (el as Computed<any>)._statusFlags & STATUS_ERROR) {
-    if (el._time < clock) {
+    // Only a genuine reactive re-read may retry an errored async source:
+    // - tracking: owned/tracked scope only (never events / `untrack` / effect side-effect phase)
+    // - !pendingCheckActive: an `isPending` probe observes the error, never refetches
+    // - el._time < clock: only on a later cycle than the one the error was found
+    if (tracking && !pendingCheckActive && el._time < clock) {
       recompute(el as Computed<unknown>);
       return read(el);
     } else throw (el as Computed<any>)._error;
