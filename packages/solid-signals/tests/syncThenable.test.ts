@@ -1,4 +1,5 @@
 import {
+  createErrorBoundary,
   createMemo,
   createRenderEffect,
   createRoot,
@@ -87,6 +88,35 @@ describe("sync thenable support", () => {
   it("should handle sync thenable returning undefined", () => {
     const value = createMemo(() => syncThenable(undefined));
     expect(value()).toBe(undefined);
+  });
+
+  it("should surface a synchronously-rejecting thenable to the error boundary (#2764)", () => {
+    // A thenable (e.g. a cache that already knows it failed) that invokes its
+    // rejection handler synchronously during `.then()` must settle the error,
+    // not stay stuck on the pending path.
+    function syncRejectingThenable(reason: unknown): PromiseLike<never> {
+      return {
+        then<R1, R2 = never>(
+          _onfulfilled?: ((v: never) => R1 | PromiseLike<R1>) | null,
+          onrejected?: ((reason: any) => R2 | PromiseLike<R2>) | null
+        ): PromiseLike<R1 | R2> {
+          onrejected?.(reason);
+          return syncThenable(undefined as any);
+        }
+      };
+    }
+
+    const result = createRoot(() =>
+      createErrorBoundary(
+        () => {
+          const value = createMemo(() => syncRejectingThenable(new Error("sync-reject")));
+          return value();
+        },
+        err => `errored: ${(err() as Error).message}`
+      )
+    );
+
+    expect(result()).toBe("errored: sync-reject");
   });
 
   it("should ignore stale thenable resolution during invalidation cleanup", () => {

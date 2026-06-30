@@ -135,6 +135,30 @@ describe("action", () => {
       expect(receivedValue).toBe(42);
     });
 
+    it("should await a yielded non-Promise thenable and resume with its value (#2765)", async () => {
+      let receivedValue: any;
+
+      // Promise-like, but not `instanceof Promise` (custom thenable / cache
+      // wrapper / cross-realm promise). `await` would wait for this; so must
+      // the action, instead of resuming with the raw object.
+      const thenable = {
+        then(onFulfilled: (v: number) => void) {
+          queueMicrotask(() => onFulfilled(42));
+        }
+      };
+
+      const myAction = action(function* () {
+        receivedValue = yield thenable as any;
+      });
+
+      myAction();
+      expect(receivedValue).toBeUndefined();
+
+      await new Promise(resolve => queueMicrotask(() => resolve(undefined)));
+      await Promise.resolve();
+      expect(receivedValue).toBe(42);
+    });
+
     it("should handle multiple async yields in sequence", async () => {
       const values: number[] = [];
 

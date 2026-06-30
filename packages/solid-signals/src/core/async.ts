@@ -138,21 +138,30 @@ export function settlePendingSource(el: Computed<any>): void {
   if (scheduled) schedule();
 }
 
+// Object-thenable detection (Promises/A+ shape).
+export function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
 export function handleAsync<T>(
   el: Computed<T>,
   result: T | PromiseLike<T> | AsyncIterable<T>,
   setter?: (value: T) => void
 ): T {
   let iterator: any = false;
-  let isThenable = false;
+  let thenable = false;
   if (typeof result === "object" && result !== null) {
     untrack(() => {
       iterator = (result as any)[Symbol.asyncIterator];
-      isThenable = !iterator && typeof (result as any).then === "function";
+      thenable = !iterator && isThenable(result as T | PromiseLike<T>);
     });
   }
 
-  if (!isThenable && !iterator) {
+  if (!thenable && !iterator) {
     el._inFlight = null;
     return result as T;
   }
@@ -166,7 +175,7 @@ export function handleAsync<T>(
   if (__DEV__ && el._config & CONFIG_SYNC) {
     const message =
       `[SYNC_NODE_RECEIVED_ASYNC] A computed/effect created with \`sync: true\` returned ` +
-      `${isThenable ? "a Promise" : "an AsyncIterable"}. The value would be stored as-is and ` +
+      `${thenable ? "a Promise" : "an AsyncIterable"}. The value would be stored as-is and ` +
       `never awaited in production; remove \`sync: true\` to use async-aware behavior, or ` +
       `unwrap the value before returning.`;
     emitDiagnostic({
@@ -243,8 +252,10 @@ export function handleAsync<T>(
     then?.();
   };
 
-  if (isThenable) {
+  if (thenable) {
     let resolved = false,
+      rejected = false,
+      syncError: any,
       isSync = true;
     (result as PromiseLike<T>).then(
       v => {
@@ -254,11 +265,20 @@ export function handleAsync<T>(
         } else asyncWrite(v);
       },
       e => {
-        if (!isSync) handleError(e);
+        if (isSync) {
+          syncError = e;
+          rejected = true;
+        } else handleError(e);
       }
     );
     isSync = false;
-    if (!resolved) {
+    if (rejected) {
+      // Settle through the same status path an async rejection uses, then
+      // unwind the in-progress synchronous read so the errored node isn't
+      // momentarily read as `undefined`.
+      handleError(syncError);
+      throw syncError;
+    } else if (!resolved) {
       globalQueue.initTransition(resolveTransition(el as any));
       throw new NotReadyError(context!);
     }
@@ -274,9 +294,7 @@ export function handleAsync<T>(
       completed = true;
       try {
         const returned = it.return?.();
-        if (returned && typeof (returned as PromiseLike<IteratorResult<T>>).then === "function") {
-          (returned as PromiseLike<IteratorResult<T>>).then(undefined, () => {});
-        }
+        if (isThenable(returned)) returned.then(undefined, () => {});
       } catch {}
     });
 

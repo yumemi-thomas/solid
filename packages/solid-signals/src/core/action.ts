@@ -7,6 +7,7 @@ import {
   setActiveTransition,
   type Transition
 } from "./scheduler.js";
+import { isThenable } from "./async.js";
 
 function restoreTransition<T>(transition: Transition, fn: () => T): T {
   globalQueue.initTransition(transition);
@@ -75,14 +76,14 @@ export function action<Args extends any[], Y, R>(
         } catch (e) {
           return done(undefined, e);
         }
-        if (r instanceof Promise)
+        if (isThenable(r))
           return void r.then(run, e => restoreTransition(ctx, () => step(e, true)));
         run(r);
       };
 
       const run = (r: IteratorResult<Y, R>) => {
         if (r.done) return done(r.value);
-        if (r.value instanceof Promise)
+        if (isThenable(r.value))
           return void r.value.then(
             v => restoreTransition(ctx, () => step(v)),
             e => restoreTransition(ctx, () => step(e, true))
