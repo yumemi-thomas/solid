@@ -694,6 +694,13 @@ export function createOptimistic<T>(
  * `onCleanup` is **not** allowed inside the callback — return a cleanup
  * function instead. The returned cleanup runs on owner disposal.
  *
+ * A cleanup return is only honored when `onSettled` is called from an **owned**
+ * scope (e.g. a component body). When it fires out of band from an *unowned*
+ * scope — an event handler, a tracked effect, or another `onSettled` — there is
+ * no owner lifecycle to bind a cleanup to; returning one is a dev-mode error
+ * (and is dropped in production). Use the post-settle/event-handler forms below
+ * for one-shot work, and keep setup-with-teardown in an owned scope.
+ *
  * @example
  * ```tsx
  * // Component-level setup + teardown — replaces onMount + onCleanup.
@@ -748,12 +755,21 @@ export function onSettled(callback: () => void | (() => void)): void {
   owner && !(owner._config & CONFIG_CHILDREN_FORBIDDEN)
     ? createTrackedEffect(() => untrack(callback), __DEV__ ? { name: "onSettled" } : undefined)
     : globalQueue.enqueue(EFFECT_USER, () => {
+        // Unowned, out-of-band fire (no owner, or a children-forbidden one this
+        // one-shot must not bind to): a returned cleanup has no lifecycle to
+        // attach to. Reject it in dev; in production the return is simply
+        // dropped — never bound to an unrelated owner or run eagerly.
         const cleanup = callback();
-        if (__DEV__ && cleanup !== undefined && typeof cleanup !== "function") {
-          throw new Error(
-            "onSettled callback returned an invalid cleanup value. Return a cleanup function or undefined."
-          );
+        if (__DEV__ && cleanup !== undefined) {
+          const message =
+            "[SETTLED_CLEANUP_UNOWNED] onSettled returned a cleanup in an unowned scope; a cleanup can only be honored under an owner. Call your setup helper from an owned scope (e.g. the component body) instead of from inside an event handler, tracked effect, or another onSettled.";
+          emitDiagnostic({
+            code: "SETTLED_CLEANUP_UNOWNED",
+            kind: "lifecycle",
+            severity: "error",
+            message
+          });
+          throw new Error(message);
         }
-        cleanup?.();
       });
 }

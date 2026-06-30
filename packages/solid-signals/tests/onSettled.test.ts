@@ -129,14 +129,32 @@ it("should call cleanup when disposed", () => {
   expect(cleanup).toHaveBeenCalledTimes(1);
 });
 
-it("should call cleanup immediately when no owner", () => {
+it("should reject a returned cleanup in an unowned scope (#2766)", () => {
   const cleanup = vi.fn();
 
+  // No owner: an out-of-band fire has no owner lifecycle to bind a cleanup to.
+  // Returning one is a dev-mode error; the cleanup is never run.
   onSettled(() => cleanup);
 
+  expect(() => flush()).toThrow("[SETTLED_CLEANUP_UNOWNED]");
   expect(cleanup).toHaveBeenCalledTimes(0);
-  flush();
-  expect(cleanup).toHaveBeenCalledTimes(1);
+});
+
+it("should reject a returned cleanup from a nested onSettled (#2766)", () => {
+  const cleanup = vi.fn();
+
+  // The inner onSettled fires out of band from a children-forbidden owner, so
+  // it lands on the unowned path — a returned cleanup must not silently bind to
+  // the outer owner's lifecycle. Composing a setup-with-teardown helper here is
+  // the reporter's mistake; the fix is to call it from an owned scope instead.
+  createRoot(() => {
+    onSettled(() => {
+      onSettled(() => cleanup);
+    });
+  });
+
+  expect(() => flush()).toThrow("[SETTLED_CLEANUP_UNOWNED]");
+  expect(cleanup).toHaveBeenCalledTimes(0);
 });
 
 it("should throw on invalid cleanup values", () => {

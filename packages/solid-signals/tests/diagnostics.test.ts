@@ -10,6 +10,7 @@ import {
   flush,
   getOwner,
   onCleanup,
+  onSettled,
   refresh,
   runWithOwner,
   untrack
@@ -164,6 +165,19 @@ describe("diagnostics", () => {
     expect(events).toHaveLength(1);
     expect(events[0].code).toBe("CLEANUP_IN_FORBIDDEN_SCOPE");
     expect(events[0].severity).toBe("error");
+  });
+
+  it("emits a diagnostic and throws when onSettled returns a cleanup in an unowned scope", () => {
+    const capture = DEV!.diagnostics.capture();
+
+    onSettled(() => () => {});
+    expect(() => flush()).toThrow(/\[SETTLED_CLEANUP_UNOWNED\]/);
+
+    const events = capture.stop();
+    expect(events).toHaveLength(1);
+    expect(events[0].code).toBe("SETTLED_CLEANUP_UNOWNED");
+    expect(events[0].severity).toBe("error");
+    expect(events[0].kind).toBe("lifecycle");
   });
 
   it("emits a diagnostic and throws when createEffect is called without an effect function", () => {

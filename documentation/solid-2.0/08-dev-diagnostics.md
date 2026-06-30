@@ -104,6 +104,30 @@ onSettled(() => {
 });
 ```
 
+#### `SETTLED_CLEANUP_UNOWNED`
+
+**Message:** "onSettled returned a cleanup in an unowned scope; a cleanup can only be honored under an owner. Call your setup helper from an owned scope (e.g. the component body) instead of from inside an event handler, tracked effect, or another onSettled."
+
+A returned cleanup is only honored when `onSettled` runs in an **owned** scope (a component body), where it fires on owner disposal. When `onSettled` fires out of band — from an event handler (no owner), a tracked effect, or another `onSettled` (a children-forbidden owner) — there is no owner lifecycle to bind a cleanup to. Returning one is a dev-mode error (the cleanup is dropped in production); the out-of-band fire itself is fine for one-shot work.
+
+```js
+// Throws (in dev): the inner onSettled fires out of band, so its cleanup
+// has no owner lifecycle to attach to.
+onSettled(() => {
+  useSubscription(); // internally: onSettled(() => { sub(); return unsub; })
+});
+
+// Fix: call setup-with-teardown directly from an owned scope. A plain owned
+// onSettled already waits for settle AND ties cleanup to disposal.
+useSubscription();
+
+// Out-of-band, one-shot work (no cleanup) stays fine:
+const handleClick = () => {
+  save();
+  onSettled(() => toast("Saved!"));
+};
+```
+
 #### Cannot create nested primitives in forbidden scope
 
 **Message:** "Cannot create reactive primitives inside createTrackedEffect or owner-backed onSettled"
@@ -283,6 +307,7 @@ Each `DiagnosticEvent` has:
 | `PENDING_ASYNC_UNTRACKED_READ` | error | async | Reading pending async outside tracking scope |
 | `ASYNC_OUTSIDE_LOADING_BOUNDARY` | warn | async | Async computation outside Loading boundary (non-halting; root mount is deferred) |
 | `CLEANUP_IN_FORBIDDEN_SCOPE` | error | lifecycle | `onCleanup` inside trackedEffect/onSettled |
+| `SETTLED_CLEANUP_UNOWNED` | error | lifecycle | `onSettled` returned a cleanup in an unowned (out-of-band) scope |
 | `STRICT_READ_UNTRACKED` | warn | strict-read | Untracked reactive read in component/effect body |
 | `PENDING_ASYNC_FORBIDDEN_SCOPE` | warn | async | Pending async read in trackedEffect/onSettled |
 | `NO_OWNER_EFFECT` | warn | lifecycle | Effect created without reactive owner |
