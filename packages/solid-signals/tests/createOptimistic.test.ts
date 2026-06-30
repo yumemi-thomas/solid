@@ -939,6 +939,52 @@ describe("createOptimistic", () => {
       expect(isPending(() => $data())).toBe(false);
     });
 
+    it("isPending fires on the FIRST refresh when it is the only consumer (#2806)", async () => {
+      // The #2799 test above keeps the node alive with a value-observer
+      // (`createRenderEffect(data, () => {})`), which drives the pending-node
+      // commit that clears STATUS_UNINITIALIZED on the initial load. When the
+      // only consumer is a reactive `isPending(() => data())` (the real JSX
+      // `disabled={isPending(data)}` shape), a resting optimistic node's async
+      // completion must still commit like a plain async memo — otherwise the
+      // flag is never cleared and the *first* refresh reads as an initial load,
+      // so isPending never reports true.
+      let resolveFetch: ((v: number[]) => void) | null = null;
+      const makeFetch = () => new Promise<number[]>(r => (resolveFetch = r));
+
+      const seen: boolean[] = [];
+      let $data!: SourceAccessor<number[]>;
+      createRoot(() => {
+        const [data] = createOptimistic<number[]>(() => makeFetch());
+        $data = data;
+        // isPending is the sole consumer — no eager read of data().
+        createEffect(
+          () => isPending(() => data()),
+          p => {
+            seen.push(p);
+          }
+        );
+      });
+
+      // Initial load settles — no stale data yet, so isPending stays false.
+      flush();
+      resolveFetch!([1, 2, 3]);
+      await Promise.resolve();
+      flush();
+      expect(seen.at(-1)).toBe(false);
+
+      // The very FIRST refresh must drive the effect to `true`.
+      refresh($data);
+      flush();
+      expect(seen.at(-1)).toBe(true);
+
+      // Settling the refetch swaps in the new value and clears pending.
+      resolveFetch!([4, 5, 6]);
+      await Promise.resolve();
+      flush();
+      expect($data()).toEqual([4, 5, 6]);
+      expect(seen.at(-1)).toBe(false);
+    });
+
     it("plain optimistic stays true through refresh-of-unrelated-async (issue #2685)", async () => {
       // github.com/solidjs/solid/issues/2685 — the optimistic signal itself
       // is plain (no async source); the async work comes from refresh()ing

@@ -207,10 +207,16 @@ export function handleAsync<T>(
       setter(value);
       if (wasUninitialized) clearStatus(el, true);
     } else if (el._overrideValue !== undefined) {
-      if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING)
+      if (el._overrideValue !== NOT_PENDING) {
+        // Active override: hold the fresh value as the revert target. The override
+        // stays visible, so this must not commit.
         el._pendingValue = value;
-      else {
-        el._value = value;
+      } else {
+        // Resting optimistic node (no active override): commit through the shared
+        // pending-node path, exactly like a plain async memo, so the commit clears
+        // STATUS_UNINITIALIZED — no divergence from a non-optimistic source (#2806).
+        if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
+        el._pendingValue = value;
         insertSubs(el);
       }
       el._time = clock;
