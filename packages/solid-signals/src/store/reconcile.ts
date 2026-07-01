@@ -99,7 +99,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
           applyState(next[j], wrapped, keyFn);
         }
 
-        changed && notifySelf(target);
+        (changed || prevLength !== next.length) && notifySelf(target);
         prevLength !== next.length &&
           arrayNodes?.length &&
           setSignal(arrayNodes.length, next.length);
@@ -244,7 +244,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
         }
 
         const nextLength = next.length;
-        changed && notifySelf(target);
+        (changed || prevLength !== nextLength) && notifySelf(target);
         prevLength !== nextLength && nodes?.length && setSignal(nodes.length, nextLength);
         return;
       }
