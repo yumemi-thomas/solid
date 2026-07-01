@@ -170,6 +170,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
         !previousValue ||
         !isWrappable(previousValue) ||
         !isWrappable(nextValue) ||
+        Array.isArray(previousValue) !== Array.isArray(nextValue) ||
         (keyFn(previousValue) != null && keyFn(previousValue) !== keyFn(nextValue))
       ) {
         tracked && setSignal(tracked, void 0);
@@ -314,6 +315,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
         !previousValue ||
         !isWrappable(previousValue) ||
         !isWrappable(nextValue) ||
+        Array.isArray(previousValue) !== Array.isArray(nextValue) ||
         (keyFn(previousValue) != null && keyFn(previousValue) !== keyFn(nextValue))
       ) {
         tracked && setSignal(tracked, void 0);
