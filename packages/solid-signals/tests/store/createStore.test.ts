@@ -1319,3 +1319,35 @@ describe("derived store manual writes", () => {
     expect(store.count).toBe(2);
   });
 });
+
+describe("Proxy invariant correctness", () => {
+  test("Object.keys does not throw for stores wrapping objects with non-configurable own properties", () => {
+    // A non-configurable property on the source must not cause the getOwnPropertyDescriptor
+    // proxy trap to violate the proxy invariant when the store proxy target is a plain object
+    // that does not have the property as non-configurable.
+    const source: any = {};
+    Object.defineProperty(source, "id", {
+      value: 1,
+      enumerable: true,
+      writable: true,
+      configurable: false
+    });
+    const [store] = createStore(source);
+    expect(() => Object.keys(store)).not.toThrow();
+    expect(store.id).toBe(1);
+  });
+
+  test("Truncating array length clears stale indices from the store proxy", () => {
+    // Writing store.length = N must mark indices >= N as deleted so that `has`,
+    // index reads, and Object.keys all reflect the shorter array.
+    const [list, setList] = createStore([1, 2, 3]);
+    setList(s => {
+      s.length = 2;
+    });
+    flush();
+    expect(list.length).toBe(2);
+    expect(list[2]).toBeUndefined();
+    expect(2 in list).toBe(false);
+    expect(Object.keys(list).filter(k => k !== "length")).not.toContain("2");
+  });
+});
