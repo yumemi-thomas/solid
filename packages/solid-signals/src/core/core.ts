@@ -373,6 +373,7 @@ export function computed<T>(
       (options?.ownedWrite ? CONFIG_OWNED_WRITE : 0) |
       (!context || options?.lazy ? CONFIG_AUTO_DISPOSE : 0) |
       (options?.sync ? CONFIG_SYNC : 0) |
+      (options?._noSnapshot ? CONFIG_NO_SNAPSHOT : 0) |
       (snapshotCaptureActive && ownerInSnapshotScope(context) ? CONFIG_IN_SNAPSHOT_SCOPE : 0),
     _equals: options?.equals != null ? options.equals : isEqual,
     _unobserved: options?.unobserved,
@@ -517,7 +518,7 @@ function setupComputedNode<T>(self: Computed<T>, options: NodeOptions<T> | undef
   }
   !options?.lazy && recompute(self, true);
   if (snapshotCaptureActive && !options?.lazy) {
-    if (!(self._statusFlags & STATUS_PENDING)) {
+    if (!(self._statusFlags & STATUS_PENDING) && !(self._config & CONFIG_NO_SNAPSHOT)) {
       self._snapshotValue = self._value === undefined ? NO_SNAPSHOT : self._value;
       snapshotSources!.add(self);
     }

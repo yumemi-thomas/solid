@@ -38,8 +38,21 @@ function boundaryComputed<T>(fn: () => T, propagationMask: number): BoundaryComp
     // Use passed values if provided, otherwise read from node
     const flags = status !== undefined ? status : node._statusFlags;
     const actualError = error !== undefined ? error : node._error;
+    // Notify both status dimensions like a render effect does; the queue chain
+    // consumes this boundary's own type and forwards the remainder upward until
+    // a boundary that handles it is found.
     node._statusFlags &= ~node._propagationMask;
-    node._queue.notify(node, node._propagationMask, flags, actualError);
+    node._queue.notify(node, STATUS_PENDING | STATUS_ERROR, flags, actualError);
+    // The queue is the only propagation channel: a foreign status must not stay
+    // reader-visible on the tree, or reads re-throw it across the boundary and
+    // link unrelated ambient contexts (the #2809 nested-boundary loop). Deps are
+    // untouched, so the tree still recomputes when the foreign source settles.
+    const foreign = flags & ~node._propagationMask & (STATUS_PENDING | STATUS_ERROR);
+    if (foreign) {
+      node._statusFlags &= ~foreign;
+      if (node._error === actualError && !(node._statusFlags & (STATUS_PENDING | STATUS_ERROR)))
+        node._error = undefined;
+    }
   };
   node._propagationMask = propagationMask;
   node._config &= ~CONFIG_AUTO_DISPOSE;
@@ -288,12 +301,20 @@ export class CollectionQueue extends Queue {
       }
     }
 
-    if (this._collectionType & STATUS_PENDING && this._initialized)
-      return super.notify(node, type, flags, error);
-
+    // Notify-through: a real error inside a `Loading` is not this boundary's to
+    // handle — remap it to ERROR and forward toward the `Errored` that catches it.
+    // This must run before the initialized passthrough below so the error still
+    // reaches its catcher after this boundary has committed. The mirror case
+    // (pending inside an `Errored`) needs no explicit rule: the PENDING dimension
+    // survives `type &= ~collectionType` below and reaches the outer `Loading`
+    // natively, while a pending already caught by an inner `Loading` arrives here
+    // as a bare ERROR-dimension remainder and is correctly swallowed.
     if (this._collectionType & STATUS_PENDING && flags & STATUS_ERROR) {
       return super.notify(node, STATUS_ERROR, flags, error);
     }
+
+    if (this._collectionType & STATUS_PENDING && this._initialized)
+      return super.notify(node, type, flags, error);
 
     if (flags & this._collectionType) {
       this._pending = true;
@@ -390,14 +411,21 @@ function createCollectionBoundary<T>(
     cleanup(() => controller.unregister(queue));
   }
   return accessor(
-    computed(() => {
-      if (!read(queue._disabled)) {
-        const resolved = read(tree);
-        if (!untrack(() => read(queue._disabled))) return ((queue._initialized = true), resolved);
-      }
-      if (_revealUsed && read(queue._collapsed)) return undefined;
-      return fallback(queue);
-    })
+    computed(
+      () => {
+        if (!read(queue._disabled)) {
+          const resolved = read(tree);
+          if (!untrack(() => read(queue._disabled))) return ((queue._initialized = true), resolved);
+        }
+        if (_revealUsed && read(queue._collapsed)) return undefined;
+        return fallback(queue);
+      },
+      // Boundary structure, not a user source: its value is fallback-or-content and
+      // legitimately swaps mid-hydration (reveal/resume), so it must never be frozen
+      // by snapshot capture. The tree no longer carries foreign status flags, so
+      // capture can't rely on PENDING to skip this node the way it used to.
+      { _noSnapshot: true }
+    )
   );
 }
 

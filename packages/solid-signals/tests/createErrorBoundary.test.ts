@@ -1,5 +1,6 @@
 import {
   action,
+  clearSnapshots,
   createEffect,
   createErrorBoundary,
   createLoadingBoundary,
@@ -8,7 +9,10 @@ import {
   createRoot,
   createSignal,
   flush,
+  getOwner,
   isPending,
+  markSnapshotScope,
+  setSnapshotCapture,
   untrack
 } from "../src/index.js";
 
@@ -701,13 +705,18 @@ it("isPending inside Loading > Errored fallback does not loop when the source re
   // forwarded as an error.
   expect(JSON.stringify(result)).not.toContain("resetting");
 
-  // Concern 3 negative path: a naked/untracked `isPending` read of the
-  // now-errored source returns false and does not re-fetch. Advance the clock
-  // after the error so the source looks stale (el._time < clock) — the case
-  // the read-time retry would otherwise fire on. Because the read is untracked
-  // (`tracking === false`), the `tracking` gate suppresses the retry: the read
-  // surfaces the stored error, which `isPending` swallows -> false.
+  // Concern 3 negative path: a naked/untracked `isPending` read of an errored
+  // source returns false and does not re-fetch. `setCount(2)` is a genuine
+  // dependency change, so it *does* refetch (the source goes pending, then
+  // settles back to the same error since `current` is still rejected) and also
+  // advances the clock — leaving the source errored and stale (el._time < clock),
+  // the case the read-time retry would otherwise fire on. Because the read is
+  // untracked (`tracking === false`) and a pending-check, the retry is suppressed:
+  // the read surfaces the stored error, which `isPending` swallows -> false.
   setCount(2);
+  flush();
+  await Promise.resolve();
+  await Promise.resolve();
   flush();
   let syncThrew = false;
   let syncVal: boolean | undefined;
@@ -731,4 +740,105 @@ it("isPending inside Loading > Errored fallback does not loop when the source re
   await Promise.resolve();
   flush();
   expect(result).toEqual(["data: ", 10]);
+});
+
+/**
+ * #2809: `Loading > Errored > <async memo read>` infinite-looped. The boundary
+ * tree used to keep the foreign PENDING status reader-visible; reading it across
+ * the `Errored` re-threw NotReady into the outer `Loading`'s ambient context and
+ * linked unrelated computeds, looping on every settle. A boundary now handles its
+ * own status type and notifies the rest through its queue chain — it never
+ * re-throws a foreign status to reactive readers.
+ */
+it("does not loop when an async memo is read inside Loading > Errored (#2809)", async () => {
+  const resolved = Promise.resolve({ id: 1 });
+  const rejected = Promise.reject(new Error("posts failed"));
+  rejected.catch(() => {});
+
+  let ok: any;
+  let bad: any;
+  createRoot(() => {
+    function App(source: Promise<{ id: number }>) {
+      const posts = createMemo(() => source);
+      return createLoadingBoundary(
+        () =>
+          createErrorBoundary(
+            () => posts().id,
+            err => "caught: " + (err() as Error).message
+          ),
+        () => "loading"
+      );
+    }
+    ok = App(resolved);
+    bad = App(rejected);
+  });
+
+  const unwrap = (v: any) => {
+    while (typeof v === "function") v = v();
+    return v;
+  };
+
+  flush();
+  expect(unwrap(ok)).toBe("loading");
+  expect(unwrap(bad)).toBe("loading");
+
+  await Promise.resolve();
+  await Promise.resolve();
+  flush();
+
+  expect(unwrap(ok)).toBe(1);
+  expect(unwrap(bad)).toBe("caught: posts failed");
+});
+
+/**
+ * #2809 hydration interaction: with snapshot capture active (as during
+ * `hydrate()`), boundary computeds must not become snapshot sources. The tree no
+ * longer carries the foreign PENDING flag (see above), so capture can't rely on
+ * it to skip mid-async boundary nodes — they are excluded explicitly via
+ * `_noSnapshot`. Regression shape: the resolved value stayed frozen at the
+ * captured `undefined` after settling.
+ */
+it("reveals resolved content under snapshot capture (Loading > Errored > async)", async () => {
+  const resolved = Promise.resolve({ title: "Test Item" });
+
+  setSnapshotCapture(true);
+  try {
+    let result: any;
+    createRoot(() => {
+      markSnapshotScope(getOwner()!);
+      const item = createMemo(() => resolved);
+      // Boundary wrapped in a memo with children built in the boundary body —
+      // the shape hydration's Loading wrapper produces.
+      const props = {
+        get children() {
+          return createErrorBoundary(
+            () => item().title,
+            err => "caught: " + String(err())
+          );
+        }
+      };
+      result = createMemo(() =>
+        createLoadingBoundary(
+          () => props.children,
+          () => "loading"
+        )
+      );
+    });
+
+    const unwrap = (v: any) => {
+      while (typeof v === "function") v = v();
+      return v;
+    };
+
+    flush();
+    expect(unwrap(result)).toBe("loading");
+
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+
+    expect(unwrap(result)).toBe("Test Item");
+  } finally {
+    clearSnapshots();
+  }
 });
