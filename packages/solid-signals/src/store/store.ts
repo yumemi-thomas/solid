@@ -188,6 +188,11 @@ function isPrototypePollutionKey(property: PropertyKey) {
   return property === "__proto__" || property === "constructor" || property === "prototype";
 }
 
+// Own enumerable keys including symbols (`Object.keys` drops symbol-keyed props). #2769
+export function ownEnumerableKeys(o: object): (string | symbol)[] {
+  return Reflect.ownKeys(o).filter(k => Object.prototype.propertyIsEnumerable.call(o, k));
+}
+
 function hasOwnStoreProperty(target: StoreNode, property: PropertyKey) {
   const optimisticOverride = target[STORE_OPTIMISTIC_OVERRIDE];
   if (
@@ -474,7 +479,11 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       : storeValue[property];
     value === $DELETED && (value = undefined);
     if (!tracked) {
-      if (!overridden && typeof value === "function" && !storeValue.hasOwnProperty(property)) {
+      if (
+        !overridden &&
+        typeof value === "function" &&
+        !Object.prototype.hasOwnProperty.call(storeValue, property)
+      ) {
         let proto;
         return !Array.isArray(target[STORE_VALUE]) &&
           (proto = Object.getPrototypeOf(target[STORE_VALUE])) &&
@@ -559,7 +568,11 @@ export const storeTraps: ProxyHandler<StoreNode> = {
               ? target[STORE_OVERRIDE][property] !== $DELETED
               : property in target[STORE_VALUE];
         const value = unwrapStoreValue(rawValue);
-        const isArrayIndexWrite = Array.isArray(state) && property !== "length";
+        // Symbol-keyed writes on arrays are metadata, not index writes — never run
+        // them through the numeric index/length machinery (`parseInt` on a symbol
+        // throws). #2769
+        const isArrayIndexWrite =
+          Array.isArray(state) && property !== "length" && typeof property !== "symbol";
         const nextIndex = isArrayIndexWrite ? parseInt(property as string) + 1 : 0;
         const len =
           isArrayIndexWrite &&
@@ -578,9 +591,10 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           override[property] = value;
           if (nextLength !== undefined) override.length = nextLength;
         }
-        // When shrinking an array's length, mark truncated indices as deleted in the
-        // override so that `has`, `ownKeys`, and index reads correctly reflect the
-        // shorter array rather than leaking stale entries from the underlying value.
+        notifyStoreProperty(target, property, "set", value, prev, prevHas);
+        // Shrinking an array's length must remove the truncated indices, otherwise
+        // they leak through `has`, `ownKeys`, and (tracked) index reads from the
+        // underlying value. Mark each as deleted and notify so reactive reads update. #2768
         if (
           Array.isArray(state) &&
           property === "length" &&
@@ -590,10 +604,13 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         ) {
           const override = target[overrideKey] || (target[overrideKey] = Object.create(null));
           for (let i = value; i < prev; i++) {
-            if (i in state) override[i] = $DELETED;
+            if (override[i] === $DELETED) continue;
+            const prevIndex = i in override ? override[i] : state[i];
+            if (!(i in override) && !(i in state)) continue;
+            override[i] = $DELETED;
+            notifyStoreProperty(target, i, "delete", undefined, prevIndex, true);
           }
         }
-        notifyStoreProperty(target, property, "set", value, prev, prevHas);
         // notify length change
         if (Array.isArray(state) && property !== "length" && nextLength !== undefined) {
           const nodes = getNodes(target, STORE_NODE);
@@ -745,10 +762,10 @@ export function storeSetter<T extends object>(store: Store<T>, fn: (draft: T) =>
         for (let i = 0, len = value.length; i < len; i++) store[i] = value[i];
         (store as any).length = value.length;
       } else {
-        const keys = new Set([...Object.keys(store), ...Object.keys(value)]);
+        const keys = new Set([...ownEnumerableKeys(store), ...ownEnumerableKeys(value)]);
         keys.forEach(key => {
-          if (key in value) store[key] = value[key];
-          else delete store[key];
+          if (key in value) store[key] = (value as any)[key];
+          else delete (store as any)[key];
         });
       }
     }

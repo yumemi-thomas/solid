@@ -8,6 +8,7 @@ import {
   getKeys,
   getPropertyDescriptor,
   isWrappable,
+  ownEnumerableKeys,
   STORE_OVERRIDE,
   STORE_LOOKUP,
   STORE_VALUE,
@@ -129,7 +130,7 @@ function trueFn() {
 const propTraps: ProxyHandler<{
   get: (k: string | number | symbol) => any;
   has: (k: string | number | symbol) => boolean;
-  keys: () => string[];
+  keys: () => (string | symbol)[];
 }> = {
   get(_, property, receiver) {
     if (property === $PROXY) return receiver;
@@ -251,9 +252,9 @@ export function merge<T extends unknown[]>(...sources: T): Merge<T> {
           return false;
         },
         keys() {
-          const keys = new Set<string>();
+          const keys = new Set<string | symbol>();
           for (let i = 0; i < flattened.length; i++) {
-            const sourceKeys = Object.keys(resolveSource(flattened[i]));
+            const sourceKeys = ownEnumerableKeys(resolveSource(flattened[i]));
             for (let j = 0; j < sourceKeys.length; j++) keys.add(sourceKeys[j]);
           }
           return [...keys];
@@ -345,7 +346,7 @@ export function omit<T extends Record<any, any>, K extends readonly (keyof T)[]>
           return !keys.includes(property as keyof T) && property in props;
         },
         keys() {
-          return Object.keys(props).filter(k => !keys.includes(k));
+          return ownEnumerableKeys(props).filter(k => !keys.includes(k as keyof T));
         }
       },
       propTraps

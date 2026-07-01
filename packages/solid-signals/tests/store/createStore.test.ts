@@ -12,7 +12,11 @@ import {
   flush,
   isPending,
   mapArray,
+  merge,
+  omit,
+  reconcile,
   snapshot,
+  storePath,
   untrack
 } from "../../src/index.js";
 
@@ -1349,5 +1353,77 @@ describe("Proxy invariant correctness", () => {
     expect(list[2]).toBeUndefined();
     expect(2 in list).toBe(false);
     expect(Object.keys(list).filter(k => k !== "length")).not.toContain("2");
+  });
+});
+
+describe("Store key handling and tracked truncation", () => {
+  test("Array truncation notifies tracked index reads (#2768)", () => {
+    // #2797 fixes untracked reads/ownKeys after truncation; this asserts the
+    // stronger property that a *tracked* index read is notified and re-runs.
+    const [list, setList] = createStore<number[]>([1, 2, 3]);
+    let tracked: number | undefined = -1;
+    createRoot(() =>
+      createRenderEffect(
+        () => list[2],
+        v => {
+          tracked = v;
+        }
+      )
+    );
+    flush();
+    expect(tracked).toBe(3);
+    setList(l => {
+      l.length = 2;
+    });
+    flush();
+    expect(tracked).toBeUndefined();
+  });
+
+  test("Null-prototype store reads a function-valued property (#2771)", () => {
+    const dictionary: Record<string, unknown> = Object.create(null);
+    dictionary.getValue = () => 42;
+    const [store] = createStore(dictionary);
+    expect(() => (store.getValue as () => number)()).not.toThrow();
+    expect((store.getValue as () => number)()).toBe(42);
+  });
+
+  describe("symbol-keyed properties (#2769)", () => {
+    const meta = Symbol("meta");
+
+    test("Array symbol write is metadata, not an index write", () => {
+      const [list, setList] = createStore<Record<PropertyKey, unknown>>([1, 2, 3] as any);
+      expect(() => {
+        setList(l => {
+          l[meta] = 42;
+        });
+        flush();
+      }).not.toThrow();
+      expect(list[meta]).toBe(42);
+      expect((list as unknown as number[]).length).toBe(3);
+    });
+
+    test("Returned object replacement keeps symbol keys", () => {
+      const [returned, setReturned] = createStore<Record<PropertyKey, unknown>>({});
+      setReturned(() => ({ [meta]: 42 }) as Record<PropertyKey, unknown>);
+      flush();
+      expect(returned[meta]).toBe(42);
+    });
+
+    test("storePath root merge keeps symbol keys", () => {
+      const [pathStore, setPathStore] = createStore<Record<PropertyKey, unknown>>({});
+      setPathStore(storePath({ [meta]: 42 } as Record<PropertyKey, unknown>));
+      flush();
+      expect(pathStore[meta]).toBe(42);
+    });
+
+    test("merge/omit enumerate symbol keys", () => {
+      const [source] = createStore<Record<PropertyKey, unknown>>({ visible: true, [meta]: 42 });
+      const merged = merge({ fallback: true }, source);
+      const omitted = omit(source as Record<string, unknown>, "visible");
+      expect((merged as Record<PropertyKey, unknown>)[meta]).toBe(42);
+      expect(Reflect.ownKeys(merged).includes(meta)).toBe(true);
+      expect((omitted as Record<PropertyKey, unknown>)[meta]).toBe(42);
+      expect(Reflect.ownKeys(omitted).includes(meta)).toBe(true);
+    });
   });
 });

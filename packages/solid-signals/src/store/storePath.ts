@@ -1,4 +1,4 @@
-import { isWrappable, type NotWrappable } from "./store.js";
+import { isWrappable, ownEnumerableKeys, type NotWrappable } from "./store.js";
 
 type W<T> = Exclude<T, NotWrappable>;
 
@@ -92,10 +92,10 @@ function updatePath(current: any, args: any[], i = 0) {
     (isWrappable(prev) && isWrappable(value) && !Array.isArray(value))
   ) {
     const target = part !== undefined ? current[part] : current;
-    const keys = Object.keys(value);
+    const keys = ownEnumerableKeys(value);
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
-      if (isPrototypePollutionKey(key)) continue;
+      if (typeof key === "string" && isPrototypePollutionKey(key)) continue;
       const desc = Object.getOwnPropertyDescriptor(value, key)!;
       if (desc.get || desc.set) Object.defineProperty(target, key, desc);
       else target[key] = desc.value;

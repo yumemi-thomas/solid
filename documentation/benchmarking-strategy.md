@@ -101,9 +101,24 @@ Reactivity lane — `pnpm --filter @solidjs/signals bench`:
     tree walked. Real production idiom (sync engines, worker bridges).
   The `deep()` vs `sparse`/`per-leaf` ratio is the visibility of the
   listened-paths optimization; if anyone regresses `applyState` to
-  always walk the full tree, that ratio collapses. This is the only
-  Tier-1 bench that JFB and UIBench *can't* cover, because both
-  subscribe to every field per row by construction.
+  always walk the full tree, that ratio collapses.
+- `packages/solid-signals/tests/store/reconcile-tree.bench.ts` — the
+  UIBench lane. UIBench drives Solid entirely through `store` +
+  `reconcile()`: each frame hands the framework a fresh *immutable*
+  state tree that Solid reconciles into a `createStore`, so UIBench's
+  hot path for Solid is `store/reconcile.ts` (keyed map/LIS reorder,
+  node reuse, `applyState` walk) — **not** `mapArray`/`dom-expressions`
+  (that is the JFB/DOM lane; see `reconcile-permute.bench.tsx`). This
+  bench mirrors UIBench's `tree` scenario: a nested tree of keyed
+  `{ id, children }` nodes (root + 10 + 100 + 1000 = 1111) reconciled
+  per iteration, with `reverse` and Fisher–Yates `shuffle` permutations
+  that preserve ids so `reconcile` takes the recursive move-detection
+  path at every level rather than replacing nodes. A recursive tracking
+  effect subscribes to every node id and children index (what a
+  recursive `<For>` does) so the reorder actually reuses nodes and
+  re-runs consumers. It is the store-lane analog to the DOM-lane
+  `reconcile-permute.bench.tsx`; the two exercise different code
+  (`store/reconcile.ts` vs `dom-expressions/reconcile.js`).
 
 Used during the 2026-04 → 2026-05 session for the missing-key store
 fast path, scheduler micro paths, and listened-paths regression gating.
@@ -211,15 +226,24 @@ not commitments — promote them only if the Tier-2 work demands it.
 
 1. **Diff / reconcile.** **Tier-2 anchor:** UIBench (existing).
    Run UIBench against `solid-next` to baseline diff/reconcile cost
-   and identify the hot operations. *Tier-1 covered:*
-   `reconcile-permute.bench.tsx` (DOM lane) covers the
-   `dom-expressions/reconcile.js` array-permute path with `reverse`
-   and Fisher–Yates `shuffle` modes. `listened-paths.bench.ts`
-   (signals lane) covers the `applyState` listened-paths walk with
-   sparse / per-leaf / `deep()` subscription shapes. Both promoted
-   into Tier 1 in the 2026-05 session because the UIBench loop was
-   too slow to bisect, and because the listened-paths optimization
-   has no equivalent in JFB or UIBench.
+   and identify the hot operations. Note UIBench drives Solid through
+   `store` + `reconcile()` (fresh immutable tree reconciled per frame),
+   so its hot path is `store/reconcile.ts`, not `mapArray`/
+   `dom-expressions`. *Tier-1 covered:*
+   `store/reconcile-tree.bench.ts` (store lane) is the UIBench analog —
+   a keyed nested `{ id, children }` tree reconciled per frame with
+   `reverse`/`shuffle` permutations, exercising `store/reconcile.ts`'s
+   recursive move-detection (map/LIS) path. `reconcile-permute.bench.tsx`
+   (DOM lane) is the JFB-style analog and covers the *separate*
+   `dom-expressions/reconcile.js` array-permute path (`<For>` over a
+   signal → `mapArray`) with `reverse` and Fisher–Yates `shuffle` modes;
+   it does **not** touch `store/reconcile.ts`. `listened-paths.bench.ts`
+   (store lane) covers the `applyState` listened-paths walk with
+   sparse / per-leaf / `deep()` subscription shapes — the one thing JFB
+   and UIBench *can't* cover, because both subscribe to every field per
+   row by construction. Promoted into Tier 1 because the UIBench loop
+   was too slow to bisect and the store-reconcile reorder path had no
+   focused coverage.
 2. **SSR.** **Tier-2 anchor:** `isomorphic-ui-benchmarks` (Patrick
    Steele-Idem's repo, sibling checkout at
    `../isomorphic-ui-benchmarks`). Two suites — `color-picker` and

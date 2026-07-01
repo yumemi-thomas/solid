@@ -1,5 +1,15 @@
 import { describe, expect, test } from "vitest";
-import { createStore, reconcile, snapshot, $TRACK, createMemo, createRoot, createEffect, createRenderEffect, flush } from "../../src/index.js";
+import {
+  createStore,
+  reconcile,
+  snapshot,
+  $TRACK,
+  createMemo,
+  createRoot,
+  createEffect,
+  createRenderEffect,
+  flush
+} from "../../src/index.js";
 
 describe("setState with reconcile", () => {
   test("Reconcile a simple object", () => {
@@ -162,12 +172,15 @@ describe("setState with reconcile", () => {
     let effectRunCount = 0;
     const [state, setState] = createStore({ arr: [{ id: 1 }, { id: 2 }, { id: 3 }] });
     createRoot(() => {
-      createRenderEffect(() => {
-        effectRunCount++;
-        // accessing $TRACK subscribes to ownKeys notifications on arr
-        (state.arr as any)[$TRACK];
-        return undefined;
-      }, () => undefined);
+      createRenderEffect(
+        () => {
+          effectRunCount++;
+          // accessing $TRACK subscribes to ownKeys notifications on arr
+          (state.arr as any)[$TRACK];
+          return undefined;
+        },
+        () => undefined
+      );
     });
     // flush to run the effect initially
     flush();
@@ -195,6 +208,24 @@ describe("setState with reconcile", () => {
 
     expect(Array.isArray(derived())).toBe(false);
     expect((derived() as any).a).toBe(1);
+  });
+
+  test("Keyed reconcile preserves null entries between keyed objects (#2772)", () => {
+    const [state, setState] = createStore<Array<{ id: number; value?: string } | null>>([
+      { id: 1 },
+      null,
+      { id: 2 }
+    ]);
+    setState(reconcile([{ id: 1 }, null, { id: 2, value: "updated" }], "id"));
+    expect(snapshot(state)).toEqual([{ id: 1 }, null, { id: 2, value: "updated" }]);
+  });
+
+  test("Keyed reconcile replaces a keyed object with a primitive (#2772)", () => {
+    const [state, setState] = createStore<Array<{ id: number; value: string } | number>>([
+      { id: 1, value: "object" }
+    ]);
+    setState(reconcile([5], "id"));
+    expect(snapshot(state)).toEqual([5]);
   });
 });
 // type tests
