@@ -36,6 +36,31 @@ describe("strictRead", () => {
       warn.mockRestore();
     });
 
+    it("does not leak the strict-read flag when a cleanup throws", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const [$x, setX] = createSignal(0);
+      const [$y] = createSignal(2);
+
+      createRoot(() => {
+        createEffect(
+          () => $x(),
+          v => {
+            return () => {
+              if (v === 0) throw new Error("cleanup boom");
+            };
+          }
+        );
+      });
+      flush();
+
+      setX(1);
+      expect(() => flush()).toThrow("cleanup boom");
+
+      $y();
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
     it("warns on store property read in effect callback", () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const [$x] = createSignal(1);

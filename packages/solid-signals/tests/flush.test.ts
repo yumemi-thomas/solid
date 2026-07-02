@@ -171,6 +171,33 @@ describe("scheduler hygiene around throwing effects", () => {
     expect(seen).toEqual([1, 2]);
   });
 
+  it("does not wedge an effect whose cleanup throws", () => {
+    const [n, setN] = createSignal(0);
+    const ran: number[] = [];
+    const cleaned: number[] = [];
+
+    createRoot(() => {
+      createEffect(n, v => {
+        ran.push(v);
+        return () => {
+          cleaned.push(v);
+          if (v === 0) throw new Error("cleanup boom");
+        };
+      });
+    });
+    flush();
+
+    setN(1);
+    expect(() => flush()).toThrow("cleanup boom");
+    expect(ran).toEqual([0]);
+    expect(cleaned).toEqual([0]);
+
+    setN(2);
+    flush();
+    expect(ran).toEqual([0, 2]);
+    expect(cleaned).toEqual([0]);
+  });
+
   it("self-heals when the drain itself aborts", async () => {
     const [b, setB] = createSignal(0);
     const seen: number[] = [];

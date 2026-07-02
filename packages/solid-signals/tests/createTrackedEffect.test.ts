@@ -252,6 +252,34 @@ it("should throw uncaught tracked effect errors during flush", () => {
   expect(() => flush()).toThrow("tracked boom");
 });
 
+it("should not wedge on a throwing cleanup", () => {
+  const [$x, setX] = createSignal(0);
+  const ran: number[] = [];
+  const cleaned: number[] = [];
+
+  createRoot(() => {
+    createTrackedEffect(() => {
+      const v = $x();
+      ran.push(v);
+      return () => {
+        cleaned.push(v);
+        if (v === 0) throw new Error("cleanup boom");
+      };
+    });
+  });
+  flush();
+
+  setX(1);
+  expect(() => flush()).toThrow("cleanup boom");
+  expect(ran).toEqual([0]);
+  expect(cleaned).toEqual([0]);
+
+  setX(2);
+  flush();
+  expect(ran).toEqual([0, 2]);
+  expect(cleaned).toEqual([0]);
+});
+
 it("should throw on invalid cleanup values", () => {
   createRoot(() => {
     createTrackedEffect(() => ({}) as any);

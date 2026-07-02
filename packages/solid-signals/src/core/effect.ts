@@ -90,8 +90,9 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
       try {
         return this._errorFn
           ? this._errorFn(err, () => {
-              this._cleanup?.();
+              const prevCleanup = this._cleanup;
               this._cleanup = undefined;
+              prevCleanup?.();
             })
           : console.error(err);
       } catch (e) {
@@ -126,9 +127,11 @@ function runEffect(node: Effect<any>): void {
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
   }
-  node._cleanup?.();
+  // Detach first so a throwing cleanup cannot wedge future runs.
+  const prevCleanup = node._cleanup;
   node._cleanup = undefined;
   try {
+    prevCleanup?.();
     const nextCleanup = node._effectFn(node._value, node._prevValue);
     if (__DEV__ && nextCleanup !== undefined && typeof nextCleanup !== "function") {
       throw new Error(
@@ -179,8 +182,10 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
 
   const node = computed<void>(
     () => {
-      node._cleanup?.();
+      // Detach first so a throwing cleanup cannot wedge future runs.
+      const prevCleanup = node._cleanup;
       node._cleanup = undefined;
+      prevCleanup?.();
       const cleanup = staleValues(fn);
       if (__DEV__ && cleanup !== undefined && typeof cleanup !== "function") {
         throw new Error(

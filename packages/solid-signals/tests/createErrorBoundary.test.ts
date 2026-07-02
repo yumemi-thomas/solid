@@ -360,6 +360,45 @@ it("should catch errors thrown in user effect callbacks (back half)", () => {
   expect(result).toBe("errored");
 });
 
+it("should catch errors thrown in user effect cleanups", () => {
+  const error = new Error("user effect cleanup error");
+  const handler = vi.fn();
+  const [$x, setX] = createSignal(0);
+  let result: any;
+
+  createRoot(() => {
+    const b = createErrorBoundary(
+      () => {
+        createEffect(
+          () => $x(),
+          v => {
+            return () => {
+              if (v === 0) throw error;
+            };
+          }
+        );
+        return "content";
+      },
+      err => {
+        handler(err());
+        return "errored";
+      }
+    );
+    createRenderEffect(
+      () => (result = b()),
+      () => {}
+    );
+  });
+  flush();
+  expect(result).toBe("content");
+
+  setX(1);
+  flush();
+  expect(handler).toHaveBeenCalledTimes(1);
+  expect(handler).toHaveBeenCalledWith(error);
+  expect(result).toBe("errored");
+});
+
 it("should catch errors thrown in user effect callbacks with error handler (back half)", () => {
   const error = new Error("user effect bundle error");
   const handler = vi.fn();
