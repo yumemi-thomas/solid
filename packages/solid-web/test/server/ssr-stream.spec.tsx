@@ -549,6 +549,56 @@ describe("SSR Streaming — Error Handling", () => {
     expect(html).toContain("Item bad-item not found");
   });
 
+  test("async memo created inside Errored settles instead of looping (#2809)", async () => {
+    // The boundary used to discard its partial template when children went
+    // async and dispose + re-run them on every retry pull — recreating the
+    // memo (and its fetch) each pass, so the render never completed. The
+    // boundary now resumes its surviving holes across retries.
+    let fetches = 0;
+    function Child() {
+      const posts = createMemo(() => {
+        fetches++;
+        return asyncValue([{ id: 1 }], 10);
+      });
+      return <span>{posts()[0].id}</span>;
+    }
+
+    const html = await renderComplete(() => (
+      <Loading fallback="loading…">
+        <Errored fallback={err => "caught: " + String(err())}>
+          <Child />
+        </Errored>
+      </Loading>
+    ));
+
+    expect(html).toMatch(/<span[^>]*>1<\/span>/);
+    expect(html).not.toContain("caught:");
+    expect(fetches).toBe(1);
+  });
+
+  test("rejected async memo created inside Errored renders fallback (#2809)", async () => {
+    let fetches = 0;
+    function Child() {
+      const posts = createMemo(async () => {
+        fetches++;
+        await delay(10);
+        throw new Error("posts failed");
+      });
+      return <>{(posts() as any)[0].id}</>;
+    }
+
+    const html = await renderComplete(() => (
+      <Loading fallback="loading…">
+        <Errored fallback={err => "caught: " + ((err() as Error)?.message ?? String(err()))}>
+          <Child />
+        </Errored>
+      </Loading>
+    ));
+
+    expect(html).toContain("caught: posts failed");
+    expect(fetches).toBe(1);
+  });
+
   test("stream completes after error (no hang)", async () => {
     function App() {
       const data = createMemo(async () => {

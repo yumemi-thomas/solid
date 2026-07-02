@@ -1504,9 +1504,18 @@ export function createErrorBoundary<U>(
   const parent = getOwner();
   const owner = createOwner();
   const outputOwner = ctx ? createOwner() : undefined;
+  // Partial template from a pass that went async. A retry pull must resume
+  // these surviving holes (their owners and any async computations created
+  // inside the boundary stay alive) rather than dispose and re-run the
+  // children — re-running would recreate the async work from scratch, which
+  // is pending again on every pass and can never settle (#2809 SSR loop).
+  let pending: { t: string[]; h: Function[]; p: Promise<any>[] } | undefined;
   const resolve = () => {
-    const resolved = ctx!.resolve(runWithOwner(createOwner(), fn));
-    if (resolved?.p?.length) throw new NotReadyError(Promise.all(resolved.p));
+    const resolved: any = pending
+      ? ctx!.ssr(pending.t, ...pending.h)
+      : ctx!.resolve(runWithOwner(createOwner(), fn));
+    pending = resolved?.p?.length ? resolved : undefined;
+    if (pending) throw new NotReadyError(Promise.all(pending.p));
     return resolved;
   };
   const renderFallback = (err: any) =>
@@ -1535,7 +1544,9 @@ export function createErrorBoundary<U>(
   return () => {
     let result: any;
     let handled = false;
-    if (ctx) disposeOwner(owner, false);
+    // Disposing while resuming would tear down the very computations the
+    // stashed holes read from (marking them disposed drops their settlement).
+    if (ctx && !pending) disposeOwner(owner, false);
     try {
       result = ctx
         ? runWithBoundaryErrorContext(owner, resolve, err => {
@@ -1547,6 +1558,7 @@ export function createErrorBoundary<U>(
         : runWithOwner(owner, fn);
     } catch (err) {
       if (err instanceof NotReadyError) throw err;
+      pending = undefined;
       result = handled ? result : handleError(err);
     }
     return result;
