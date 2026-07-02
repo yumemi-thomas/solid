@@ -46,9 +46,15 @@ export const zombieQueue: Heap = {
 export let clock = 0;
 export let activeTransition: Transition | null = null;
 let scheduled = false;
+// `scheduled` means dirty work exists; `drainArmed` means a microtask exists
+// to drain it. Keeping them separate lets a failed drain recover on next write.
+let drainArmed = false;
 let syncDepth = 0;
 export let projectionWriteActive = false;
 let inTrackedQueueCallback = false;
+
+// Unhandled errors collected during a drain and rethrown after queues finish.
+let flushErrors: unknown[] | null = null;
 
 let _enforceLoadingBoundary = false;
 export let _hitUnhandledAsync = false;
@@ -218,10 +224,31 @@ function cleanupCompletedLanes(completingTransition: Transition | null): void {
   }
 }
 
+function drainMicrotask(): void {
+  drainArmed = false;
+  flush();
+}
+
 export function schedule() {
-  if (scheduled) return;
   scheduled = true;
-  if (!syncDepth && !globalQueue._running && !projectionWriteActive) queueMicrotask(flush);
+  if (!drainArmed && !syncDepth && !globalQueue._running && !projectionWriteActive) {
+    drainArmed = true;
+    queueMicrotask(drainMicrotask);
+  }
+}
+
+/**
+ * Surface an error that no queue (error boundary) handled. During a drain,
+ * collect it so queued siblings still run (#2762); outside a drain, throw in
+ * place to preserve creation-time semantics.
+ */
+export function reportUncaughtError(error: unknown): void {
+  if (globalQueue._running) {
+    if (flushErrors === null) flushErrors = [];
+    flushErrors.push(error);
+  } else {
+    throw error;
+  }
 }
 
 export interface IQueue {
@@ -384,6 +411,15 @@ export class GlobalQueue extends Queue {
       activeLanes.size && runLaneEffects(EFFECT_USER);
       this.run(EFFECT_USER);
       if (__DEV__) DEV.hooks.onUpdate?.();
+    } catch (error) {
+      // User errors are funneled through `reportUncaughtError`; if an internal
+      // failure still unwinds the drain, conservatively re-arm pending work.
+      scheduled = true;
+      if (!drainArmed) {
+        drainArmed = true;
+        queueMicrotask(drainMicrotask);
+      }
+      throw error;
     } finally {
       this._running = false;
     }
@@ -682,10 +718,25 @@ export function flush<T>(fn?: () => T): T | void {
     if (__DEV__ && ++count === 1e5) throw new Error("Potential Infinite Loop Detected.");
     globalQueue.flush();
   }
+  if (flushErrors !== null) {
+    const errors = flushErrors;
+    flushErrors = null;
+    // Only one error can be thrown; the rest must still surface, not vanish.
+    for (let i = 1; i < errors.length; i++) console.error(errors[i]);
+    throw errors[0];
+  }
 }
 
 function runQueue(queue: QueueCallback[], type: number): void {
-  for (let i = 0; i < queue.length; i++) queue[i](type);
+  for (let i = 0; i < queue.length; i++) {
+    try {
+      queue[i](type);
+    } catch (error) {
+      // The queue array is already detached, so skipped siblings would be lost.
+      if (flushErrors === null) flushErrors = [];
+      flushErrors.push(error);
+    }
+  }
 }
 
 function reporterBlocksSource(reporter: Computed<any>, source: Computed<any>): boolean {

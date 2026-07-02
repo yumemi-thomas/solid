@@ -22,6 +22,7 @@ import { cleanup } from "./owner.js";
 import {
   _hitUnhandledAsync,
   GlobalQueue,
+  reportUncaughtError,
   resetUnhandledAsync,
   setTrackedQueueCallback
 } from "./scheduler.js";
@@ -97,7 +98,7 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
         err = e;
       }
     }
-    if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) throw err;
+    if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) reportUncaughtError(err);
   } else if (this._type === EFFECT_RENDER) {
     this._queue.notify(this, STATUS_PENDING | STATUS_ERROR, actualStatus, actualError);
     if (__DEV__ && _hitUnhandledAsync) {
@@ -142,7 +143,7 @@ function runEffect(node: Effect<any>): void {
   } catch (error) {
     node._error = new StatusError(node, error);
     node._statusFlags |= STATUS_ERROR;
-    if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) throw error;
+    if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) reportUncaughtError(error);
   } finally {
     if (__DEV__) setStrictRead(prevStrictRead);
     node._prevValue = node._value;
@@ -200,7 +201,7 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
     if (actualStatus & STATUS_ERROR) {
       node._queue.notify(node, STATUS_PENDING, 0);
       const err = error !== undefined ? error : node._error;
-      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) throw err;
+      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) reportUncaughtError(err);
     }
   };
   node._run = run;

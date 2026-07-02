@@ -97,9 +97,9 @@ it("should throw when owner-backed onSettled calls flush reentrantly", () => {
   expect(() => flush()).toThrow(
     "Cannot call flush() from inside onSettled or createTrackedEffect. flush() is not reentrant there."
   );
-  expect(log).toEqual(["outer"]);
+  expect(log).toEqual(["outer", "inner"]);
   expect(values[0]).toBe(0);
-  expect(values.at(-1)).toBe(0);
+  expect(values.at(-1)).toBe(5);
 });
 
 it("should forbid onCleanup inside owner-backed onSettled", () => {

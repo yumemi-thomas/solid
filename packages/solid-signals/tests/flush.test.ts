@@ -1,4 +1,5 @@
-import { createEffect, createRoot, createSignal, flush } from "../src/index.js";
+import { createEffect, createRenderEffect, createRoot, createSignal, flush } from "../src/index.js";
+import { globalQueue } from "../src/core/scheduler.js";
 
 afterEach(() => flush());
 
@@ -32,6 +33,191 @@ describe("scheduler hygiene around throwing effects", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(seenC).toEqual([3]);
+  });
+
+  it("recovers scheduling when an effect writes a signal and then throws (#2761)", async () => {
+    const [a, setA] = createSignal(0);
+    const [b, setB] = createSignal(0);
+    const [, setC] = createSignal(0);
+    const seenB: number[] = [];
+
+    createRoot(() => {
+      createEffect(a, v => {
+        if (v === 1) {
+          setC(100);
+          throw new Error("boom");
+        }
+      });
+      createEffect(b, v => {
+        seenB.push(v);
+      });
+    });
+    flush();
+    await Promise.resolve();
+    seenB.length = 0;
+
+    expect(() => flush(() => setA(1))).toThrow("boom");
+
+    setB(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seenB).toEqual([1]);
+  });
+
+  it("runs sibling effects queued after a throwing effect (#2762)", () => {
+    const [n, setN] = createSignal(0);
+    const seen: number[] = [];
+
+    createRoot(() => {
+      createEffect(n, v => {
+        if (v === 1) throw new Error("boom");
+      });
+      createEffect(n, v => {
+        seen.push(v);
+      });
+    });
+    flush();
+    seen.length = 0;
+
+    setN(1);
+    expect(() => flush()).toThrow("boom");
+    expect(seen).toEqual([1]);
+
+    setN(2);
+    flush();
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it("throws the first error and reports the rest when multiple effects throw", () => {
+    const [n, setN] = createSignal(0);
+    const seen: number[] = [];
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      createRoot(() => {
+        createEffect(n, v => {
+          if (v === 1) throw new Error("boom1");
+        });
+        createEffect(n, v => {
+          if (v === 1) throw new Error("boom2");
+        });
+        createEffect(n, v => {
+          seen.push(v);
+        });
+      });
+      flush();
+      seen.length = 0;
+
+      setN(1);
+      expect(() => flush()).toThrow("boom1");
+      expect(seen).toEqual([1]);
+      expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({ message: "boom2" }));
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("still runs user effects when a render effect throws", () => {
+    const [n, setN] = createSignal(0);
+    const seen: number[] = [];
+
+    createRoot(() => {
+      createRenderEffect(n, v => {
+        if (v === 1) throw new Error("render boom");
+      });
+      createEffect(n, v => {
+        seen.push(v);
+      });
+    });
+    flush();
+    seen.length = 0;
+
+    setN(1);
+    expect(() => flush()).toThrow("render boom");
+    expect(seen).toEqual([1]);
+  });
+
+  it("completes the drain when a render effect's compute throws during the heap phase", async () => {
+    const [n, setN] = createSignal(0);
+    const [b, setB] = createSignal(0);
+    const seen: number[] = [];
+
+    createRoot(() => {
+      createRenderEffect(
+        () => {
+          if (n() === 1) throw new Error("compute boom");
+        },
+        () => {}
+      );
+      createEffect(b, v => {
+        seen.push(v);
+      });
+    });
+    flush();
+    await Promise.resolve();
+    seen.length = 0;
+
+    expect(() =>
+      flush(() => {
+        setN(1);
+        setB(1);
+      })
+    ).toThrow("compute boom");
+    expect(seen).toEqual([1]);
+
+    setB(2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it("self-heals when the drain itself aborts", async () => {
+    const [b, setB] = createSignal(0);
+    const seen: number[] = [];
+
+    createRoot(() => {
+      createEffect(b, v => {
+        seen.push(v);
+      });
+    });
+    flush();
+    await Promise.resolve();
+    seen.length = 0;
+
+    let explode = true;
+    const badChild = {
+      _parent: null,
+      _children: [],
+      created: 0,
+      enqueue() {},
+      run() {
+        if (explode) {
+          explode = false;
+          throw new Error("internal abort");
+        }
+      },
+      addChild() {},
+      removeChild() {},
+      notify: () => false,
+      stashQueues() {},
+      restoreQueues() {}
+    };
+    globalQueue.addChild(badChild as any);
+
+    try {
+      expect(() => flush(() => setB(1))).toThrow("internal abort");
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(seen).toEqual([1]);
+
+      setB(2);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(seen).toEqual([1, 2]);
+    } finally {
+      globalQueue.removeChild(badChild as any);
+    }
   });
 });
 
