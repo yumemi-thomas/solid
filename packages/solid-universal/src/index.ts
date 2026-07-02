@@ -2,10 +2,10 @@ import {
   createRenderer as baseCreateRenderer,
   type RendererOptions,
   type Renderer
-} from "dom-expressions/src/universal.js";
+} from "@dom-expressions/runtime/src/universal.js";
 import { createRoot, flush } from "solid-js";
 
-export * from "dom-expressions/src/universal.js";
+export * from "@dom-expressions/runtime/src/universal.js";
 
 /**
  * Wraps `dom-expressions`' `createRenderer` so the returned `render` defers

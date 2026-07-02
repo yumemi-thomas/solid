@@ -1,4 +1,4 @@
-const jsxTransform = require("babel-plugin-jsx-dom-expressions");
+const jsxTransform = require("@dom-expressions/babel-plugin-jsx");
 
 module.exports = function (context, options = {}) {
   const plugins = [

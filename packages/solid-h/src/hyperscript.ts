@@ -1,1 +1,1 @@
-export * from "hyper-dom-expressions";
+export * from "@dom-expressions/hyperscript";

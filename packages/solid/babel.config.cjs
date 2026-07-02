@@ -24,7 +24,7 @@ module.exports = {
           }
         ],
         [
-          "babel-plugin-jsx-dom-expressions",
+          "@dom-expressions/babel-plugin-jsx",
           {
             moduleName: path.join(__dirname, "web/src/index"),
             contextToCustomElements: true,

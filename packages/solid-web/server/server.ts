@@ -1,1 +1,1 @@
-export * from "dom-expressions/src/server.js";
+export * from "@dom-expressions/runtime/src/server.js";

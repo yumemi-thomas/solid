@@ -7,10 +7,10 @@ allowBuilds:
   simple-git-hooks: true
 
 minimumReleaseAgeExclude:
-  - babel-plugin-jsx-dom-expressions
-  - dom-expressions
-  - hyper-dom-expressions
-  - sld-dom-expressions
+  - '@dom-expressions/babel-plugin-jsx'
+  - '@dom-expressions/hyperscript'
+  - '@dom-expressions/runtime'
+  - '@dom-expressions/tagged-jsx'
 
 overrides:
   babel-preset-solid: workspace:*

@@ -1,5 +1,5 @@
-import { createSLDRuntime } from "./sld.js";
-import type { SLDInstance } from "./sld.js";
+import { createTaggedJSXRuntime } from "./tagged-jsx.js";
+import type { TaggedJSXInstance } from "./tagged-jsx.js";
 import {
   insert,
   spread,
@@ -11,14 +11,14 @@ import {
   RawTextElements
 } from "@solidjs/web";
 
-// Annotate explicitly through the local `./sld.js` re-export so the emitted
-// `.d.ts` references `import("./sld.js").SLDInstance<{}>` instead of
-// `import("sld-dom-expressions").SLDInstance<{}>`. The upstream package only
-// ships an ESM `.d.mts`, which TS Node16 CJS resolution rejects without a
-// `with { "resolution-mode": "import" }` attribute. Routing through the
-// locally copied `./types/sld.d.ts` (and its `./types-cjs/sld.d.cts` twin)
-// avoids the issue entirely.
-const html: SLDInstance<{}> = createSLDRuntime({
+// Annotate explicitly through the local `./tagged-jsx.js` re-export so the
+// emitted `.d.ts` references `import("./tagged-jsx.js").TaggedJSXInstance<{}>`
+// instead of `import("@dom-expressions/tagged-jsx").TaggedJSXInstance<{}>`.
+// The upstream package only ships an ESM `.d.mts`, which TS Node16 CJS
+// resolution rejects without a `with { "resolution-mode": "import" }`
+// attribute. Routing through the locally copied `./types/tagged-jsx.d.ts`
+// (and its `./types-cjs/tagged-jsx.d.cts` twin) avoids the issue entirely.
+const html: TaggedJSXInstance<{}> = createTaggedJSXRuntime({
   insert,
   spread,
   createComponent,
