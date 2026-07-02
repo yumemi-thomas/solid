@@ -13,7 +13,9 @@ import {
   Repeat,
   Switch,
   Match,
-  Errored
+  Errored,
+  dynamic,
+  Dynamic
 } from "@solidjs/web";
 import {
   createEffect,
@@ -21,7 +23,8 @@ import {
   createRenderEffect,
   createSignal,
   isPending,
-  lazy
+  lazy,
+  type Component
 } from "solid-js";
 
 function delay(ms: number) {
@@ -2121,6 +2124,83 @@ describe("SSR — insert effect alignment (PR #2592)", () => {
     expect(html).toContain("42");
     expect(html).toMatch(/<p[^>]*>Visible<\/p>/);
     expect(html).toContain("click");
+  });
+});
+
+describe("SSR — dynamic() Promise component sources (#2779)", () => {
+  test("dynamic() awaits a Promise component source", async () => {
+    function Inner(props: { name: string }) {
+      return <span>Hello {props.name}</span>;
+    }
+    function App() {
+      const Comp = dynamic<Component<{ name: string }>>(() =>
+        asyncValue(Inner as Component<{ name: string }>, 10)
+      );
+      return (
+        <div>
+          <Comp name="Ada" />
+        </div>
+      );
+    }
+    const { chunks } = await collectChunks(() => <App />);
+    expect(chunks.join("")).toMatch(/Hello\s*(<!--\$-->)?Ada/);
+    // Awaited form — the shell must wait on the blocked root hole rather
+    // than completing with an unfinished render (the "" from the issue).
+    const awaited = await renderComplete(() => <App />);
+    expect(awaited).toMatch(/Hello\s*(<!--\$-->)?Ada/);
+  });
+
+  test("dynamic() awaits a Promise tag-name source", async () => {
+    function App() {
+      const Comp = dynamic(() => asyncValue("span" as const, 10));
+      return <Comp id="tag">tag content</Comp>;
+    }
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("<span");
+    expect(full).toContain("tag content");
+  });
+
+  test("Dynamic awaits a Promise component prop", async () => {
+    function Inner(props: { name: string }) {
+      return <span>Hi {props.name}</span>;
+    }
+    function App() {
+      return <Dynamic component={asyncValue(Inner, 10) as any} name="Bea" />;
+    }
+    const { chunks } = await collectChunks(() => <App />);
+    expect(chunks.join("")).toMatch(/Hi\s*(<!--\$-->)?Bea/);
+  });
+
+  test("rejected Promise source surfaces to Errored", async () => {
+    function App() {
+      const Comp = dynamic(() => Promise.reject(new Error("load failed")) as Promise<"span">);
+      return (
+        <Errored fallback={e => <div>caught: {String(e())}</div>}>
+          <Comp />
+        </Errored>
+      );
+    }
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("caught:");
+    expect(full).toContain("load failed");
+  });
+
+  test("sync sources are unchanged (function and tag)", () => {
+    function Inner(props: { name: string }) {
+      return <b>{props.name}</b>;
+    }
+    const CompFn = dynamic(() => Inner);
+    const CompTag = dynamic(() => "i" as const);
+    const html = renderToString(() => (
+      <div>
+        <CompFn name="X" />
+        <CompTag>italic</CompTag>
+      </div>
+    ));
+    expect(html).toMatch(/<b[^>]*>(<!--\$-->)?X/);
+    expect(html).toContain("italic");
   });
 });
 
