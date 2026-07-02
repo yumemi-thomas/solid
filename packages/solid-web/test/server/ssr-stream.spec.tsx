@@ -15,7 +15,14 @@ import {
   Match,
   Errored
 } from "@solidjs/web";
-import { createMemo, createSignal, isPending, lazy } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createRenderEffect,
+  createSignal,
+  isPending,
+  lazy
+} from "solid-js";
 
 function delay(ms: number) {
   return new Promise(r => setTimeout(r, ms));
@@ -620,6 +627,147 @@ describe("SSR Streaming — Error Handling", () => {
     expect(full).toContain("Error");
     expect(full).toContain("Fail");
     expect(full).toContain("$df");
+  });
+});
+
+describe("SSR Streaming — Pending reads must not loop the boundary (#2801)", () => {
+  test("Loading > Errored > nested async memo settles once", async () => {
+    let fetches = 0;
+    function Inner() {
+      const data = createMemo(async () => {
+        fetches++;
+        return asyncValue("nested-content", 20);
+      });
+      return <div>{data()}</div>;
+    }
+    function App() {
+      return (
+        <Loading fallback={<div>loading...</div>}>
+          <Errored fallback={e => <div>error: {String(e())}</div>}>
+            <Inner />
+          </Errored>
+        </Loading>
+      );
+    }
+
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("nested-content");
+    expect(fetches).toBe(1);
+  });
+
+  test("createEffect reading an async memo inside Loading settles", async () => {
+    let fetches = 0;
+    function Inner() {
+      const data = createMemo(async () => {
+        fetches++;
+        return asyncValue("effect-content", 20);
+      });
+      createEffect(
+        () => data(),
+        () => {}
+      );
+      return <div>{data()}</div>;
+    }
+    function App() {
+      return (
+        <Loading fallback={<div>loading...</div>}>
+          <Inner />
+        </Loading>
+      );
+    }
+
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("effect-content");
+    expect(fetches).toBe(1);
+  });
+
+  test("createEffect reading an async memo outside Loading settles", async () => {
+    let fetches = 0;
+    function App() {
+      const data = createMemo(async () => {
+        fetches++;
+        return asyncValue("outside-content", 20);
+      });
+      createEffect(
+        () => data(),
+        () => {}
+      );
+      return (
+        <Loading fallback={<div>loading...</div>}>
+          <div>{data()}</div>
+        </Loading>
+      );
+    }
+
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("outside-content");
+    expect(fetches).toBe(1);
+  });
+
+  test("createRenderEffect reading an async memo retries with the settled value", async () => {
+    let fetches = 0;
+    let effectRuns = 0;
+    let effectValue: any;
+    function Inner() {
+      const data = createMemo(async () => {
+        fetches++;
+        return asyncValue("render-effect-content", 20);
+      });
+      createRenderEffect(
+        () => data(),
+        v => {
+          effectRuns++;
+          effectValue = v;
+        }
+      );
+      return <div>{data()}</div>;
+    }
+    function App() {
+      return (
+        <Loading fallback={<div>loading...</div>}>
+          <Inner />
+        </Loading>
+      );
+    }
+
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    expect(full).toContain("render-effect-content");
+    expect(fetches).toBe(1);
+    expect(effectRuns).toBe(1);
+    expect(effectValue).toBe("render-effect-content");
+  });
+
+  test("top-level render effect holds shell flush until its async source settles", async () => {
+    let effectValue: any;
+    let effectRanBeforeShell = false;
+    let shellFlushed = false;
+    function App() {
+      const data = createMemo(async () => asyncValue("top-content", 20));
+      createRenderEffect(
+        () => data(),
+        v => {
+          effectValue = v;
+          effectRanBeforeShell = !shellFlushed;
+        }
+      );
+      return <div>static</div>;
+    }
+    await new Promise<void>(resolve => {
+      renderToStream(() => <App />).pipe({
+        write() {
+          shellFlushed = true;
+        },
+        end() {
+          resolve();
+        }
+      });
+    });
+    expect(effectValue).toBe("top-content");
+    expect(effectRanBeforeShell).toBe(true);
   });
 });
 

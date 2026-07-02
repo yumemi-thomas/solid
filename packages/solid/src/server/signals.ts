@@ -919,7 +919,7 @@ function serverEffect<T>(
     computed: true,
     disposed: false
   };
-  if (ssrSource) {
+  if (ssrSource || effectFn) {
     runWithOwner(owner, () =>
       onCleanup(() => {
         comp.disposed = true;
@@ -939,12 +939,45 @@ function serverEffect<T>(
     if (!options?.defer)
       effectFn?.((ssrSource ? (comp.value ?? result) : result) as any, undefined);
   } catch (err) {
-    // NotReadyError is suspense control flow — must keep propagating so the
-    // surrounding Loading boundary can react. For real errors, record on the
-    // computation and re-throw so a wrapping `createErrorBoundary` /
-    // `<Errored>` can catch instead of the error vanishing into the void
-    // (#2777).
-    if (err instanceof NotReadyError) throw err;
+    if (err instanceof NotReadyError) {
+      // A pending read must never throw through the middle of the render —
+      // that forces the surrounding Loading boundary to rebuild its whole
+      // subtree on every settle, re-creating the async work each time in an
+      // infinite discovery loop (#2801). Render effects impact boundaries
+      // (they're the client's async notification path), so register the
+      // pending source with the stream — holding flush like top-level JSX
+      // async — and retry once it settles so the effect function runs with
+      // the resolved value. Plain createEffect never impacts boundaries even
+      // on the client (it runs the reactivity but doesn't register as an
+      // async blocker), so it's swallowed outright.
+      if (effectFn && ctx?.async) {
+        const source = (err as NotReadyError).source as Promise<any>;
+        const retry = () => {
+          if (comp.disposed) return;
+          try {
+            const result = runWithOwner(owner, () =>
+              runWithObserver(comp, () => (compute as ComputeFunction<any, T>)(undefined))
+            );
+            if (!options?.defer) effectFn(result as any, undefined);
+          } catch (retryErr) {
+            if (retryErr instanceof NotReadyError) {
+              const next = (retryErr as NotReadyError).source as Promise<any>;
+              ctx.block(next.then(retry, () => {}));
+              return;
+            }
+            // Out-of-band by now — route to the boundary's error handler.
+            const handler = getContext(ErrorContext, owner);
+            if (handler) handler(retryErr);
+            else throw retryErr;
+          }
+        };
+        ctx.block(source.then(retry, () => {}));
+      }
+      return;
+    }
+    // For real errors, record on the computation and re-throw so a wrapping
+    // `createErrorBoundary` / `<Errored>` can catch instead of the error
+    // vanishing into the void (#2777).
     comp.error = err;
     throw err;
   }
