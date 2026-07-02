@@ -251,6 +251,19 @@ describe("Server createRenderEffect", () => {
     expect(effectFn).toHaveBeenCalledTimes(1);
     expect(effectFn).toHaveBeenCalledWith(42, undefined);
   });
+
+  test("defer: true skips the initial effect run but still computes (#2811)", () => {
+    const compute = vi.fn(() => 42);
+    const effectFn = vi.fn();
+    createRoot(
+      () => {
+        createRenderEffect(compute, effectFn, { defer: true });
+      },
+      { id: "test" }
+    );
+    expect(compute).toHaveBeenCalledTimes(1);
+    expect(effectFn).not.toHaveBeenCalled();
+  });
 });
 
 // === createTrackedEffect ===

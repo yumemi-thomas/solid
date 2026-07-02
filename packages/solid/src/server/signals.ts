@@ -933,7 +933,11 @@ function serverEffect<T>(
     if (ssrSource) {
       processResult(comp, result, owner, ctx, options?.deferStream, ssrSource);
     }
-    effectFn?.((ssrSource ? (comp.value ?? result) : result) as any, undefined);
+    // `defer: true` skips the initial side-effect run (client parity — the
+    // compute still runs for tracking); on the server a "next change" never
+    // comes, so the effect function simply never fires (#2811).
+    if (!options?.defer)
+      effectFn?.((ssrSource ? (comp.value ?? result) : result) as any, undefined);
   } catch (err) {
     // NotReadyError is suspense control flow — must keep propagating so the
     // surrounding Loading boundary can react. For real errors, record on the
