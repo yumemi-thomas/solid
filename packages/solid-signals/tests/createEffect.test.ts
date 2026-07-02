@@ -6,7 +6,8 @@ import {
   createSignal,
   flush,
   latest,
-  onCleanup
+  onCleanup,
+  resetErrorHalt
 } from "../src/index.js";
 
 afterEach(() => flush());
@@ -162,6 +163,7 @@ it("should throw on invalid cleanup values", () => {
   expect(() => flush()).toThrow(
     "effect callback returned an invalid cleanup value. Return a cleanup function or undefined."
   );
+  resetErrorHalt();
 });
 
 it("should run all disposals before each new run", () => {

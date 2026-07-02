@@ -1,9 +1,10 @@
-import { createEffect, createRoot, createSignal, flush } from "../src/index.js";
+import { createEffect, createRoot, createSignal, flush, resetErrorHalt } from "../src/index.js";
 
 afterEach(() => flush());
 
 describe("scheduler hygiene around throwing effects", () => {
   it("balances syncDepth when an effect throws inside flush(fn)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const [a, setA] = createSignal(0);
     const [c, setC] = createSignal(0);
     const seenC: number[] = [];
@@ -26,12 +27,15 @@ describe("scheduler hygiene around throwing effects", () => {
 
     expect(() => flush(() => setA(1))).toThrow("boom");
 
-    // A clean write must still schedule a microtask. If the throw above leaked
-    // syncDepth, `schedule()` would never queue one again and this would stall.
+    // The uncaught error halts the system by design; revive it so a leaked
+    // syncDepth is the only thing that could stop `schedule()` from queuing a
+    // microtask again.
+    resetErrorHalt();
     setC(3);
     await Promise.resolve();
     await Promise.resolve();
     expect(seenC).toEqual([3]);
+    vi.restoreAllMocks();
   });
 });
 

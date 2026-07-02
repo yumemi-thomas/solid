@@ -12,6 +12,7 @@ import {
   getOwner,
   isPending,
   markSnapshotScope,
+  resetErrorHalt,
   setSnapshotCapture,
   untrack
 } from "../src/index.js";
@@ -34,6 +35,7 @@ it("should let errors bubble up when not handled", () => {
   }
   expect(caught).toBeDefined();
   expect(caught.cause ?? caught).toBe(error);
+  resetErrorHalt();
 });
 
 it("should handle error", () => {
@@ -165,6 +167,7 @@ it("should throw error if there are no handlers left", () => {
   });
 
   expect(handler).toHaveBeenCalledTimes(2);
+  resetErrorHalt();
 });
 
 it("should handle errors when the effect is on the outside", async () => {
@@ -360,6 +363,40 @@ it("should catch errors thrown in user effect callbacks (back half)", () => {
   expect(result).toBe("errored");
 });
 
+it("should catch errors thrown in effect cleanup functions (#2813)", () => {
+  const [n, setN] = createSignal(0);
+  const handler = vi.fn();
+  let result: any;
+
+  createRoot(() => {
+    const b = createErrorBoundary(
+      () => {
+        createEffect(n, v => {
+          return () => {
+            if (v === 0) throw new Error("cleanup boom");
+          };
+        });
+        return "content";
+      },
+      err => {
+        handler(err());
+        return "errored";
+      }
+    );
+    createRenderEffect(
+      () => (result = b()),
+      () => {}
+    );
+  });
+  flush();
+
+  setN(1);
+  flush();
+  expect(handler).toHaveBeenCalledTimes(1);
+  expect(String(handler.mock.calls[0][0])).toContain("cleanup boom");
+  expect(result).toBe("errored");
+});
+
 it("should catch errors thrown in user effect callbacks with error handler (back half)", () => {
   const error = new Error("user effect bundle error");
   const handler = vi.fn();
@@ -446,6 +483,7 @@ it("should throw effect callback errors when no boundary exists", () => {
     });
     flush();
   }).toThrowError(error);
+  resetErrorHalt();
 });
 
 it("should recover when async memo errors then dependency changes and boundary resets", async () => {

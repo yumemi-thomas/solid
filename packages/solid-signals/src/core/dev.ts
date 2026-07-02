@@ -24,9 +24,10 @@ export type DiagnosticCode =
   | "ASYNC_OUTSIDE_LOADING_BOUNDARY"
   | "INVALID_REFRESH_TARGET"
   | "MISSING_EFFECT_FN"
-  | "SYNC_NODE_RECEIVED_ASYNC";
+  | "SYNC_NODE_RECEIVED_ASYNC"
+  | "REACTIVITY_HALTED";
 
-export type DiagnosticKind = "strict-read" | "async" | "write" | "lifecycle" | "owner";
+export type DiagnosticKind = "strict-read" | "async" | "write" | "lifecycle" | "owner" | "error";
 
 export interface DiagnosticEvent {
   sequence: number;

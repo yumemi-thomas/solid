@@ -12,11 +12,14 @@ import {
   onCleanup,
   onSettled,
   refresh,
+  resetErrorHalt,
   runWithOwner,
   untrack
 } from "../src/index.js";
 
+// Several diagnostics are escaping errors, which halt the reactive system.
 afterEach(() => {
+  resetErrorHalt();
   flush();
   vi.restoreAllMocks();
 });
@@ -162,9 +165,12 @@ describe("diagnostics", () => {
     expect(() => flush()).toThrow(/Cannot use onCleanup inside createTrackedEffect or onSettled/);
 
     const events = capture.stop();
-    expect(events).toHaveLength(1);
+    // The escaped error also halts the reactive system, emitting a second
+    // diagnostic on its way out.
+    expect(events).toHaveLength(2);
     expect(events[0].code).toBe("CLEANUP_IN_FORBIDDEN_SCOPE");
     expect(events[0].severity).toBe("error");
+    expect(events[1].code).toBe("REACTIVITY_HALTED");
   });
 
   it("emits a diagnostic and throws when onSettled returns a cleanup in an unowned scope", () => {

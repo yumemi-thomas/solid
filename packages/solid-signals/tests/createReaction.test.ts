@@ -1,4 +1,4 @@
-import { createReaction, createRoot, createSignal, flush } from "../src/index.js";
+import { createReaction, createRoot, createSignal, flush, resetErrorHalt } from "../src/index.js";
 
 describe("createReaction", () => {
   test("Create and trigger a Reaction", () => {
@@ -62,5 +62,6 @@ describe("createReaction", () => {
     expect(() => flush()).toThrow(
       "Reaction callback returned an invalid cleanup value. Return a cleanup function or undefined."
     );
+    resetErrorHalt();
   });
 });

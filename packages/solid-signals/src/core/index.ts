@@ -64,6 +64,7 @@ export {
   GlobalQueue,
   trackOptimisticStore,
   enforceLoadingBoundary,
+  resetErrorHalt,
   type IQueue,
   type QueueCallback
 } from "./scheduler.js";

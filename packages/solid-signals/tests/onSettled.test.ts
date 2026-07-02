@@ -5,7 +5,8 @@ import {
   createSignal,
   flush,
   onCleanup,
-  onSettled
+  onSettled,
+  resetErrorHalt
 } from "../src/index.js";
 
 afterEach(() => flush());
@@ -100,6 +101,7 @@ it("should throw when owner-backed onSettled calls flush reentrantly", () => {
   expect(log).toEqual(["outer"]);
   expect(values[0]).toBe(0);
   expect(values.at(-1)).toBe(0);
+  resetErrorHalt();
 });
 
 it("should forbid onCleanup inside owner-backed onSettled", () => {
@@ -138,6 +140,7 @@ it("should reject a returned cleanup in an unowned scope (#2766)", () => {
 
   expect(() => flush()).toThrow("[SETTLED_CLEANUP_UNOWNED]");
   expect(cleanup).toHaveBeenCalledTimes(0);
+  resetErrorHalt();
 });
 
 it("should reject a returned cleanup from a nested onSettled (#2766)", () => {
@@ -155,6 +158,7 @@ it("should reject a returned cleanup from a nested onSettled (#2766)", () => {
 
   expect(() => flush()).toThrow("[SETTLED_CLEANUP_UNOWNED]");
   expect(cleanup).toHaveBeenCalledTimes(0);
+  resetErrorHalt();
 });
 
 it("should throw on invalid cleanup values", () => {
@@ -166,6 +170,7 @@ it("should throw on invalid cleanup values", () => {
   expect(() => flush()).toThrow(
     "onSettled callback returned an invalid cleanup value. Return a cleanup function or undefined."
   );
+  resetErrorHalt();
 });
 
 it("should wait for async to settle before running", async () => {

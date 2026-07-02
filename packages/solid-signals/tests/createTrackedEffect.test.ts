@@ -5,7 +5,8 @@ import {
   createSignal,
   createTrackedEffect,
   flush,
-  onCleanup
+  onCleanup,
+  resetErrorHalt
 } from "../src/index.js";
 
 afterEach(() => flush());
@@ -250,6 +251,7 @@ it("should throw uncaught tracked effect errors during flush", () => {
   });
 
   expect(() => flush()).toThrow("tracked boom");
+  resetErrorHalt();
 });
 
 it("should throw on invalid cleanup values", () => {
@@ -260,6 +262,7 @@ it("should throw on invalid cleanup values", () => {
   expect(() => flush()).toThrow(
     "trackedEffect callback returned an invalid cleanup value. Return a cleanup function or undefined."
   );
+  resetErrorHalt();
 });
 
 it("should work with dynamic conditional tracking", () => {
