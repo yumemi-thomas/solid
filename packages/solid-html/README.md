@@ -4,7 +4,9 @@ This sub module provides a Tagged Template Literal `html` method for Solid. This
 
 `html` uses `${}` to escape into JavaScript expressions. Components are closed with `<//>`.
 
-Since Solid 2.0, `html` is backed by [`sld-dom-expressions`](https://www.npmjs.com/package/sld-dom-expressions), an AST-based tagged-template runtime. Templates are parsed at runtime (no `new Function` / `eval`, so it is CSP-safe) and reactive bindings are installed against the resulting DOM.
+Since Solid 2.0, `html` is backed by [`@dom-expressions/tagged-jsx`](https://www.npmjs.com/package/@dom-expressions/tagged-jsx), an AST-based tagged-template runtime. Templates are parsed at runtime (no `new Function` / `eval`, so it is CSP-safe) and reactive bindings are installed against the resulting DOM.
+
+For editor support, the [Tagged JSX Tools VS Code extension](https://marketplace.visualstudio.com/items?itemName=DanielRKling.tagged-jsx-vscode) provides syntax highlighting, formatting, conversion commands, and TypeScript diagnostics for JSX inside tagged template literals.
 
 ```js
 // create an element with a title attribute
@@ -42,7 +44,7 @@ render(Counter, document.getElementById("app"));
 
 ## Component registry
 
-Inline expression holes (`<${Component} />`) work without any setup, but the `sld` runtime also supports a named component registry. `html.define({ ... })` returns a new tag with the supplied components merged into the registry; capitalized tag names in the template are then looked up by name. The original `html` tag is unchanged.
+Inline expression holes (`<${Component} />`) work without any setup, but the Tagged JSX runtime also supports a named component registry. `html.define({ ... })` returns a new tag with the supplied components merged into the registry; capitalized tag names in the template are then looked up by name. The original `html` tag is unchanged.
 
 ```js
 import html from "@solidjs/html";
