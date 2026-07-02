@@ -1,6 +1,7 @@
 import { ssrElement } from "./server.js";
 import {
   createComponent,
+  merge,
   omit,
   getOwner,
   getNextChildId,
@@ -12,6 +13,17 @@ import type { JSX } from "../src/jsx.js";
 
 export * from "./server.js";
 export type { JSX } from "../src/jsx.js";
+
+/**
+ * Compiler-emitted prop-spread helper. The JSX transform (in
+ * `dom-expressions`) emits `mergeProps(...)` calls when compiling prop
+ * spreads — it is *not* a user-facing API. Re-exported here as core `merge`
+ * (shadowing the `dom-expressions/src/server.js` star export) so SSR resolves
+ * function sources exactly like the client entry does.
+ *
+ * @internal
+ */
+export const mergeProps = merge;
 
 export {
   For,
