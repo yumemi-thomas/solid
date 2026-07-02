@@ -1979,6 +1979,102 @@ describe("SSR — insert effect alignment (PR #2592)", () => {
 // --- Phase 7: Reveal Streaming Integration ---
 
 describe("SSR Streaming — Reveal", () => {
+  test("rejected boundary releases the sequential frontier (#2776)", async () => {
+    // The error path of a streamed Loading used to skip the reveal-group
+    // notification the success path sends, parking the sequential frontier on
+    // the rejected slot: later siblings streamed their HTML but never got an
+    // activation call.
+    const { promise: pA, reject: rejectA } = deferred<string>();
+    pA.catch(() => {});
+    const { promise: pB, resolve: resolveB } = deferred<string>();
+
+    function BadSlot() {
+      const data = createMemo(async () => pA);
+      return <div>{data()}</div>;
+    }
+    function GoodSlot() {
+      const data = createMemo(async () => pB);
+      return <div>{data()}</div>;
+    }
+    function App() {
+      return (
+        <Errored fallback={e => <div>outer caught: {String(e())}</div>}>
+          <Reveal>
+            <Loading fallback={<div>fallback-A</div>}>
+              <BadSlot />
+            </Loading>
+            <Loading fallback={<div>fallback-B</div>}>
+              <GoodSlot />
+            </Loading>
+          </Reveal>
+        </Errored>
+      );
+    }
+
+    const chunksPromise = collectChunks(() => <App />);
+    rejectA(new Error("A failed"));
+    await delay(20);
+    resolveB("B-content");
+
+    const { chunks } = await chunksPromise;
+    const full = chunks.join("");
+
+    expect(full).toContain("B-content");
+    // B's slot must be activated, and only after its template streamed.
+    const templateIdx = full.search(/<template id="(\d+)"><div[^>]*>B-content/);
+    expect(templateIdx).toBeGreaterThan(-1);
+    const key = full.match(/<template id="(\d+)"><div[^>]*>B-content/)![1];
+    const activationIdx = full.indexOf(`$dfj(["${key}"])`);
+    expect(activationIdx).toBeGreaterThan(templateIdx);
+    // A's rejection is serialized so the client error path takes over.
+    expect(full).toContain("A failed");
+  });
+
+  test("rejected boundary does not deadlock order=together (#2776)", async () => {
+    // Together-release waits until every direct slot is minimally ready, which
+    // for leaves is driven by the same onResolved the error path was skipping —
+    // one rejected slot froze the whole group on fallbacks forever.
+    const { promise: pA, reject: rejectA } = deferred<string>();
+    pA.catch(() => {});
+    const { promise: pB, resolve: resolveB } = deferred<string>();
+
+    function BadSlot() {
+      const data = createMemo(async () => pA);
+      return <div>{data()}</div>;
+    }
+    function GoodSlot() {
+      const data = createMemo(async () => pB);
+      return <div>{data()}</div>;
+    }
+    function App() {
+      return (
+        <Errored fallback={e => <div>outer caught: {String(e())}</div>}>
+          <Reveal order="together">
+            <Loading fallback={<div>fallback-A</div>}>
+              <BadSlot />
+            </Loading>
+            <Loading fallback={<div>fallback-B</div>}>
+              <GoodSlot />
+            </Loading>
+          </Reveal>
+        </Errored>
+      );
+    }
+
+    const chunksPromise = collectChunks(() => <App />);
+    rejectA(new Error("A failed"));
+    await delay(20);
+    resolveB("B-content");
+
+    const { chunks } = await chunksPromise;
+    const full = chunks.join("");
+
+    // The stream completes (no deadlock) with B's content and an activation.
+    expect(full).toContain("B-content");
+    expect(full).toContain("$dfj");
+    expect(full).toContain("A failed");
+  });
+
   test("sequential collapsed: shell contains first fallback, later slots deferred", async () => {
     function BoundaryA() {
       const data = createMemo(async () => asyncValue("A", 20));

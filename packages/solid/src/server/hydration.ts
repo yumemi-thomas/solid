@@ -203,9 +203,16 @@ export function createLoadingBoundary(
         }
         flushSerializeBuffer();
         done!(ret && Array.isArray(ret.t) ? ret.t[0] : ((ret && ret.t) as any));
-        if (revealGroup) revealGroup.onResolved(id);
       } catch (err) {
         finalizeError(err);
+      } finally {
+        // The slot settles either way: on error, `done(undefined, err)` wrote
+        // the fragment template and rejects `key_fr`, so the client error path
+        // takes over. Releasing after done() keeps activation behind the
+        // template write. Skipping release on error parks a sequential
+        // frontier on this boundary forever, so resolved later siblings never
+        // get their activation script (#2776).
+        if (revealGroup) revealGroup.onResolved(id);
       }
     })();
     return () => fallbackResult;
