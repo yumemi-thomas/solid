@@ -1984,7 +1984,7 @@ describe("Loading boundary: already-serialized settled ref", () => {
     delete (globalThis as any)._$HY;
   });
 
-  test("inner createMemo hydrates after microtask resume (t0 already { s: 1 })", async () => {
+  test("inner createMemo hydrates straight through (t0 already { s: 1 })", () => {
     (globalThis as any)._$HY = {
       modules: {},
       loading: {},
@@ -2016,11 +2016,9 @@ describe("Loading boundary: already-serialized settled ref", () => {
     );
     flush();
 
-    expect(result()).toBe("loading...");
-
-    await new Promise<void>(r => queueMicrotask(r));
-    flush();
-
+    // Already settled: content hydrates in the same pass — the fallback only
+    // renders when it is actually what the server left showing (#2801 bug 1).
+    expect(result()).not.toBe("loading...");
     expect(memo()).toBe(42);
   });
 
@@ -2660,7 +2658,7 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     delete (globalThis as any)._$HY;
   });
 
-  test("already-resolved _fr triggers hydration resume with inner memo", async () => {
+  test("already-resolved _fr hydrates straight through with inner memo", () => {
     (globalThis as any)._$HY = {
       modules: {},
       loading: {},
@@ -2692,11 +2690,9 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     );
     flush();
 
-    expect(result()).toBe("loading...");
-
-    await new Promise<void>(r => queueMicrotask(r));
-    flush();
-
+    // Already settled ($df ran before hydrate): content hydrates in the same
+    // pass — the fallback only renders when it is actually showing (#2801).
+    expect(result()).not.toBe("loading...");
     expect(memo()).toBe(42);
   });
 

@@ -1369,10 +1369,17 @@ export function createLoadingBoundary(
         p == null &&
         !settledSerializationResumeQueued
       ) {
-        settledSerializationResumeQueued = true;
-        const [, resume] = initBoundaryResume(o, id);
-        if (scheduleResumeAfterAssets(id, resume, assetPromise)) return undefined;
-        return fallback();
+        if (assetPromise) {
+          settledSerializationResumeQueued = true;
+          const [, resume] = initBoundaryResume(o, id);
+          scheduleResumeAfterAssets(id, resume, assetPromise);
+          return undefined;
+        }
+        // Already settled: the server rendered content and it is in the DOM.
+        // Hydrate straight through — the fallback only hydrates when it is
+        // actually showing. Rendering it here would create phantom client DOM
+        // and poison insert's node bookkeeping (#2801 bug 1).
+        return coreLoadingBoundary(fn, fallback, options);
       }
       if (p) {
         const [set, resume] = initBoundaryResume(o, id);
@@ -1397,8 +1404,19 @@ export function createLoadingBoundary(
       sharedConfig.has!(id + "_fr") &&
       !settledSerializationResumeQueued
     ) {
-      settledSerializationResumeQueued = true;
       const fr = sharedConfig.load!(id + "_fr");
+
+      if (fr && typeof fr === "object" && fr.s === 1 && !assetPromise) {
+        // Fragment already settled and swapped in ($df ran before hydration):
+        // the content is in the DOM, so hydrate straight through. The fallback
+        // only hydrates when it is actually showing — rendering it here would
+        // create phantom client DOM and poison insert's node bookkeeping
+        // (#2801 bug 1).
+        sharedConfig.gather?.(id);
+        return coreLoadingBoundary(fn, fallback, options);
+      }
+
+      settledSerializationResumeQueued = true;
       const [, resume] = initBoundaryResume(o, id);
 
       if (fr && typeof fr === "object" && (fr.s === 1 || fr.s === 2)) {
@@ -1410,8 +1428,8 @@ export function createLoadingBoundary(
           else queueMicrotask(resumeRejected);
           return undefined;
         }
-        if (scheduleResumeAfterAssets(id, resume, assetPromise)) return undefined;
-        return fallback();
+        scheduleResumeAfterAssets(id, resume, assetPromise);
+        return undefined;
       }
 
       waitAndResume(fr, resume, assetPromise, false);
