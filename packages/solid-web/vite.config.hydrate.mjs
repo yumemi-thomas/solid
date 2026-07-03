@@ -7,7 +7,10 @@ import { resolve } from "path";
 const rootDir = resolve(__dirname);
 
 export default defineConfig({
-  plugins: [solidPlugin({ solid: { dev: true, hydratable: true } })],
+  // hot: false — solid-refresh wraps top-level components (e.g. the shared
+  // parity-harness scenarios) in HMR wrappers that add owners and break
+  // hydration id parity.
+  plugins: [solidPlugin({ hot: false, solid: { dev: true, hydratable: true } })],
   test: {
     environment: "jsdom",
     pool: "threads",

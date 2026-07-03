@@ -1,0 +1,5 @@
+{
+  "name": "fragment-dynamic-entry",
+  "shell": "<div _hk=0>first</div>mid<div _hk=2>last</div>",
+  "rest": ""
+}
