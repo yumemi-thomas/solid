@@ -1,0 +1,5 @@
+{
+  "name": "signal-hole-before-siblings",
+  "shell": "<div _hk=0><p>Label: <!--$-->one<!--/--></p><!--$--><h4 _hk=30>Head</h4><!--/--><span>tail</span></div>",
+  "rest": ""
+}
