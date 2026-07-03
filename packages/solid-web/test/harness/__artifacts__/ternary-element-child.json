@@ -1,5 +1,5 @@
 {
   "name": "ternary-element-child",
-  "shell": "<div _hk=0><!--$--><b _hk=2>yes</b><!--/--><span>sib</span></div>",
+  "shell": "<div _hk=0><!--$--><b _hk=20>yes</b><!--/--><span>sib</span></div>",
   "rest": ""
 }

@@ -334,8 +334,6 @@ export const scenarios: Scenario[] = [
     expectedText: "2Titletail",
     update: () => refreshBug2(),
     expectedTextAfterUpdate: "2Titletail",
-    stableSelector: "span",
-    knownFailure:
-      "#2801 bug 2: deferred hole retries after eager siblings advanced the parent id counter — server/client _hk mismatch until hole owners land"
+    stableSelector: "span"
   }
 ];

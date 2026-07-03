@@ -100,6 +100,7 @@ export {
   sharedConfig,
   createLoadingBoundary,
   ssrHandleError,
+  ssrScope,
   NoHydration,
   Hydration,
   NoHydrateContext

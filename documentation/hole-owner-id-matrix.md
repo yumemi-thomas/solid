@@ -41,25 +41,39 @@ deferred hole to partially restore order — it cannot fix a deferred hole whose
 own content count is unknown (content may consume multiple parent slots, so
 siblings cannot know their offset).
 
-## The change
+## The change (as implemented)
 
-Give exactly the id-allocating child holes an owner on both sides, allocated at
-registration (one parent slot each; content nests under it):
+Give exactly the id-allocating *deferred* child holes their own id scope on
+both sides, with the slot reserved at registration (one parent slot each;
+content nests under it):
 
-- Predicate: `canChildSlotAllocateIds` (ssr/element.ts:788) — already exists for
-  orderedInsert; shared by both generates so marking cannot desync.
-- **Client**: dom generate marks id-allocating hole accessors (marker function à
-  la `ssrGroup`'s `.$g` tag — e.g. `_$owned(fn)` setting `fn.$o`); `insert()`
-  passes non-transparent options to its **outer** effect when marked. Owner +
-  id materialize at effect creation (registration). No id context (CSR) → no
-  cost (`createOwner` skips id when parent has none).
-- **Server**: ssr generate wraps the same holes in owner-creating
-  `ssrRunInScope(fn)` — `createOwner()` at wrapper call (ssr-arg evaluation =
-  registration), hole eval + async retries run under it, retry resets
-  `_childCount` and disposes prior children. `orderedInsert` machinery removed.
+- Predicates: `canChildSlotAllocateIds` + `isDeferredChildSlotExpression`,
+  moved to `babel-plugin-jsx/src/shared/utils.ts` and used by **both**
+  generates so marking cannot desync.
+- **Compiler**: both generates wrap qualifying hole expressions in
+  `_$scope(...)` from their respective runtimes. `orderedInsert` machinery
+  removed from the ssr generate.
+- **Client** (`runtime/src/client.js`): `scope(fn)` tags the accessor
+  (`fn.$s`, à la `ssrGroup`'s `.$g`); `insert()` passes `{ scope: true }` to
+  its **outer** effect, which `solid-web/src/core.ts#effect` maps to
+  `transparent: false`. Owner + id materialize at effect creation
+  (registration). CSR (no id context) → no behavioral cost.
+- **Server** (`solid/src/server/signals.ts#ssrScope`, re-exported through
+  rxcore as `scope`): a **virtual scope**, following mapArray's row-owner
+  elision — no owner object. `nextChildIdFor(parent)` reserves the slot at
+  wrapper creation (ssr-arg evaluation = registration); every evaluation
+  attempt swaps `parent.id = scopeId` / `parent._childCount = 0` around the
+  sync eval and restores after. Retries are deterministic because the swap
+  sets absolute values captured at registration. The wrapper also unwraps
+  function chains in-scope (mirror of the client's transparent inner effect).
+  A real per-hole owner was benched first: −8-11% on the search-results SSR
+  bench; the virtual swap is ~−2-4% (the residual is the id-slot reservation
+  itself, which is the design).
 - Fragment entries, statement-form condition memos, components, attributes,
-  spread children: **unchanged** — already symmetric per the matrix.
-- Inner unwrapping effect stays transparent — one owner level per hole
+  spread children: **unchanged** — already symmetric per the matrix. The
+  Show/Switch/mapArray/repeat server-side slot compensations
+  (`consumeClientComputedSlot`, manual `getNextChildId` bumps) also stand.
+- Inner unwrapping insert effect stays transparent — one scope level per hole
   regardless of function-unwrap depth.
 
 Consequences: hole content ids/keys gain one level (`t30` vs `t3`); serialized
@@ -69,9 +83,18 @@ sibling ids because a hole's counter is its own.
 ## Risks / follow-ups
 
 - Runtime-internal `insert` callers outside the compiler (Portal, Dynamic,
-  `@solidjs/h`, `solid-html`) receive no marker → stay transparent. Verify each
-  mirrors its server counterpart (audit in implementation phase).
+  `@solidjs/h`, `solid-html`) receive no marker → stay transparent, matching
+  their unwrapped server counterparts.
 - Arbitrary getters that lazily construct JSX are invisible to the predicate —
-  same envelope as today's `orderedInsert` approximation.
-- Retry must dispose the hole owner's children before re-entry or zombie ids
-  leak into serialization.
+  same envelope as the previous `orderedInsert` approximation.
+- Virtual scope means failed-attempt children attach to the (parent) owner and
+  are not disposed per retry — identical leak envelope to pre-change behavior;
+  ids stay deterministic because each attempt re-runs with the same
+  `(scopeId, 0)` swap. Boundary retries still dispose the whole boundary
+  subtree.
+- `setContext` inside a hole eval mutates the parent owner's context (no owner
+  isolation server-side) — pre-existing asymmetry vs the client effect owner,
+  unchanged by this design.
+- Array holes whose *items* are functions resolve outside the swap
+  (`resolveSSRNode` walks them later) — same envelope as before; the common
+  memo/component thunk chains are covered by the in-scope unwrap loop.

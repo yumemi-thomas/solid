@@ -339,6 +339,48 @@ export function createRoot<T>(
   return runWithOwner(owner, () => init(() => disposeOwner(owner)));
 }
 
+/**
+ * Id scope for a dynamic child hole ("hole owner"). One id slot is reserved
+ * from the enclosing owner at registration time — in source order — so
+ * sibling ids can't shift when the hole's evaluation is deferred by async
+ * and retried later. Every evaluation attempt runs with the reserved id and
+ * a zeroed child counter, making retries deterministic. Mirrors the client,
+ * where the outer insert effect for the same hole is non-transparent (its
+ * own id scope).
+ *
+ * Emitted by the ssr generate as `_$scope(...)` around deferred child holes
+ * that can allocate hydration ids. Hot per-row path (one per qualifying
+ * hole), so no owner object is allocated — like mapArray's row-owner
+ * elision, the scope is virtual: the parent owner's `id`/`_childCount` are
+ * swapped around the evaluation. Content created during the evaluation
+ * attaches to the parent owner, which matches the pre-scope disposal
+ * semantics (boundary retries dispose it via the boundary owner).
+ */
+export function ssrScope<T>(fn: () => T): () => unknown {
+  const parent = currentOwner;
+  // No id plumbing to protect (non-hydrating SSR / owner-less evaluation).
+  if (!parent || parent.id == null) return fn;
+  const scopeId = nextChildIdFor(parent, true);
+  return () => {
+    const prevId = parent.id;
+    const prevCount = parent._childCount;
+    parent.id = scopeId;
+    parent._childCount = 0;
+    try {
+      let v: unknown = fn();
+      // Unwrap accessor chains in-scope: reading a memo / component thunk can
+      // create owners and allocate ids, which must land under the hole scope
+      // just like the client's inner unwrapping effect (transparent, so it
+      // shares the outer insert effect's scope).
+      while (typeof v === "function") v = (v as () => unknown)();
+      return v;
+    } finally {
+      parent.id = prevId;
+      parent._childCount = prevCount;
+    }
+  };
+}
+
 // === Observer tracking (for async memo) ===
 
 interface ServerComputation<T = any> {

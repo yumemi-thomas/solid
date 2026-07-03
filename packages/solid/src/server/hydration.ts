@@ -223,6 +223,8 @@ export function createLoadingBoundary(
   return () => fallbackResult;
 }
 
+export { ssrScope } from "./signals.js";
+
 /**
  * Disables hydration for its children during SSR.
  * Elements inside will not receive hydration keys (`_hk`) and signals will not be serialized.

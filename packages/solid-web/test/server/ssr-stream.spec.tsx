@@ -112,7 +112,10 @@ describe("SSR Streaming — No Loading Boundary", () => {
       </Parent>
     ));
 
-    expect(html).toContain("<span _hk=1>child</span><!--/--><!--$--><span _hk=2>sibling</span>");
+    // The deferred `props.children` hole owns id scope "1" (hole owner), so
+    // its content ids nest under it ("10") while the eager sibling keeps the
+    // parent-counter slot ("2") regardless of when the hole evaluates.
+    expect(html).toContain("<span _hk=10>child</span><!--/--><!--$--><span _hk=2>sibling</span>");
   });
 
   test("top-level async memo blocks the shell", async () => {
