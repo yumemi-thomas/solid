@@ -47,9 +47,15 @@ Give exactly the id-allocating *deferred* child holes their own id scope on
 both sides, with the slot reserved at registration (one parent slot each;
 content nests under it):
 
-- Predicates: `canChildSlotAllocateIds` + `isDeferredChildSlotExpression`,
-  moved to `babel-plugin-jsx/src/shared/utils.ts` and used by **both**
-  generates so marking cannot desync.
+- Predicates: `canChildSlotAllocateIds` (shared in
+  `babel-plugin-jsx/src/shared/utils.ts`) + the transform's own `dynamic`
+  flag, used identically by **both** generates so marking cannot desync.
+  (An earlier `isDeferredChildSlotExpression` predicate keyed off the
+  *transformed* expression shape and desynced: the dom generate simplifies
+  `{sig()}` to the bare getter `sig`, which the predicate didn't count as
+  deferred while the ssr side's arrow was — every sibling id after such a
+  hole shifted. Caught by the streaming rendering example; the dom generate
+  now re-wraps bare getters as `() => sig()` before tagging with `scope()`.)
 - **Compiler**: both generates wrap qualifying hole expressions in
   `_$scope(...)` from their respective runtimes. `orderedInsert` machinery
   removed from the ssr generate.

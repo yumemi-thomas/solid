@@ -240,6 +240,26 @@ function DeferredBeforeSiblings() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 13. Bare signal-call text hole before id-allocating siblings. The dom
+// generate simplifies `{label()}` to the bare getter `label`, so the scope()
+// wrap decision must key off dynamism, not the transformed expression shape —
+// otherwise the ssr side scope-wraps while the dom side doesn't and every
+// sibling id after the hole shifts (caught live by the rendering example).
+let setLabel!: (v: string) => void;
+function SignalHoleBeforeSiblings() {
+  const [label, set] = createSignal("one");
+  setLabel = set;
+  const [flag] = createSignal(true);
+  return (
+    <div>
+      <p>Label: {label()}</p>
+      {flag() && <h4>Head</h4>}
+      <span>tail</span>
+    </div>
+  );
+}
+
 export const scenarios: Scenario[] = [
   {
     name: "text-hole",
@@ -335,5 +355,13 @@ export const scenarios: Scenario[] = [
     update: () => refreshBug2(),
     expectedTextAfterUpdate: "2Titletail",
     stableSelector: "span"
+  },
+  {
+    name: "signal-hole-before-siblings",
+    App: SignalHoleBeforeSiblings,
+    expectedText: "Label: oneHeadtail",
+    update: () => setLabel("two"),
+    expectedTextAfterUpdate: "Label: twoHeadtail",
+    stableSelector: "div, span, h4"
   }
 ];
