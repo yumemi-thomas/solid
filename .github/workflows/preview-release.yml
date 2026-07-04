@@ -6,6 +6,9 @@ on:
       - next-mirror
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -52,3 +55,9 @@ jobs:
             './packages/solid-h' \
             './packages/solid-html' \
             './packages/babel-preset-solid'
+
+      - name: Clean up ad-hoc branch
+        if: always() && startsWith(github.ref_name, 'preview-adhoc-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }}" || true
