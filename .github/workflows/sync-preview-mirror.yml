@@ -36,7 +36,7 @@ jobs:
             git fetch upstream next
             git fetch upstream "$TARGET" || true
             UPSTREAM_SHA=$(git rev-parse --verify "${TARGET}^{commit}")
-            BRANCH=preview-adhoc
+            BRANCH="preview-adhoc-${UPSTREAM_SHA:0:7}"
           else
             git fetch upstream next
             UPSTREAM_SHA=$(git rev-parse upstream/next)
