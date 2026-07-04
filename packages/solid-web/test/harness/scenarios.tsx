@@ -260,6 +260,32 @@ function SignalHoleBeforeSiblings() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 14. Streamed boundary with loose text, marker-bounded between siblings.
+// Exercises insert's swapped-region re-claim on the `<!--$-->…<!--/-->` walk:
+// the Loading hole shares its parent with static siblings, so after the $df
+// swap the re-claimed region must stop at the matching start marker instead
+// of swallowing the whole parent.
+let refreshBounded!: () => void;
+function BoundedStreamedText() {
+  const [version, setVersion] = createSignal(0);
+  refreshBounded = () => setVersion(v => v + 1);
+  const data = createMemo(async () => {
+    const v = version();
+    await sleep(10);
+    return 42 + v;
+  });
+  return (
+    <div>
+      <span>before </span>
+      <Loading fallback={<p>loading</p>}>
+        Count: {data()} <span>after</span>
+      </Loading>
+      <span> tail</span>
+    </div>
+  );
+}
+
 export const scenarios: Scenario[] = [
   {
     name: "text-hole",
@@ -343,9 +369,7 @@ export const scenarios: Scenario[] = [
     expectedText: "Count: 42 after",
     update: () => refreshAsyncFrag(),
     expectedTextAfterUpdate: "Count: 43 after",
-    stableSelector: "span",
-    knownFailureStreamed:
-      "#2801 bug 1 pending-stream case: loose text at fragment root cannot re-claim after the $df swap (keyed text re-claim follow-up)"
+    stableSelector: "span"
   },
   {
     name: "deferred-hole-before-siblings",
@@ -363,5 +387,14 @@ export const scenarios: Scenario[] = [
     update: () => setLabel("two"),
     expectedTextAfterUpdate: "Label: twoHeadtail",
     stableSelector: "div, span, h4"
+  },
+  {
+    name: "bounded-streamed-text",
+    App: BoundedStreamedText,
+    async: true,
+    expectedText: "before Count: 42 after tail",
+    update: () => refreshBounded(),
+    expectedTextAfterUpdate: "before Count: 43 after tail",
+    stableSelector: "div, span"
   }
 ];

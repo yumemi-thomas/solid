@@ -18,10 +18,10 @@
  * the fallback only hydrates when it is actually what the server left showing.
  *
  * The genuinely-pending stream case (fallback correctly hydrates, then $df
- * swaps and the content pass must re-claim loose text from the swapped-in
- * fragment) is still open — loose text has no re-claim path (elements recover
- * via _hk). Tracked with the hydration claiming design work for #2801 bug 2;
- * that test is marked `fails` below until it lands.
+ * swaps in the settled content) is covered by insert's swapped-region
+ * re-claim: when a hole's tracked nodes are disconnected mid-hydration, the
+ * insert re-derives them from the live DOM region so loose text can match
+ * positionally (elements recover via _hk regardless).
  */
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import { createMemo, createSignal, flush, Loading } from "solid-js";
@@ -137,29 +137,23 @@ describe("insert `current` tracking across hydration (#2801 bug 1)", () => {
     warn.mockRestore();
   });
 
-  // Loose text at fragment root cannot yet re-claim after a $df swap — the
-  // insert's node bookkeeping still points at the removed fallback. Part of
-  // the claiming design work for #2801 bug 2.
-  test.fails(
-    "refresh after late-streamed fragment hydration replaces the value in place",
-    async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      applyChunk(container, SHELL, true);
+  test("refresh after late-streamed fragment hydration replaces the value in place", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    applyChunk(container, SHELL, true);
 
-      dispose = hydrate(() => <Comp />, container);
-      await Promise.resolve();
-      flush();
-      expect(container.textContent).toBe("loading");
+    dispose = hydrate(() => <Comp />, container);
+    await Promise.resolve();
+    flush();
+    expect(container.textContent).toBe("loading");
 
-      applyChunk(container, LATE_TEMPLATE, false);
-      applyChunk(container, LATE_SCRIPT, false);
-      await sleep(50);
-      flush();
-      await sleep(50);
+    applyChunk(container, LATE_TEMPLATE, false);
+    applyChunk(container, LATE_SCRIPT, false);
+    await sleep(50);
+    flush();
+    await sleep(50);
 
-      await assertRefreshesReplaceInPlace();
-      expect(warn).not.toHaveBeenCalled();
-      warn.mockRestore();
-    }
-  );
+    await assertRefreshesReplaceInPlace();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });
