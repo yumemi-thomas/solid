@@ -1,0 +1,45 @@
+name: Preview Request
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  issues: write
+
+jobs:
+  request:
+    if: startsWith(github.event.comment.body, '/preview')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse request and dispatch publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # keep the untrusted comment body out of shell interpolation
+          BODY: ${{ github.event.comment.body }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          SHA=$(printf '%s' "$BODY" | head -1 | grep -oE '^/preview[[:space:]]+[0-9a-fA-F]{7,40}' | grep -oE '[0-9a-fA-F]{7,40}$' || true)
+
+          if [ -z "$SHA" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "Usage: \`/preview <commit sha>\` — a 7-40 char sha from [solidjs/solid](https://github.com/solidjs/solid/commits/next)."
+            exit 0
+          fi
+
+          gh workflow run sync-preview-mirror.yml --repo "$REPO" -f commit="$SHA"
+
+          SHORT=$(printf '%s' "$SHA" | cut -c1-7 | tr 'A-F' 'a-f')
+          gh issue comment "$ISSUE" --repo "$REPO" --body "🚀 Building preview packages for \`$SHA\`… (~3 min, [progress](https://github.com/$REPO/actions))
+
+Once the **Preview Release** run is green:
+
+\`\`\`
+npm i https://pkg.pr.new/$REPO/solid-js@$SHORT
+npm i https://pkg.pr.new/$REPO/@solidjs/web@$SHORT
+\`\`\`
+
+Same pattern for \`@solidjs/signals\`, \`@solidjs/h\`, \`@solidjs/html\`, \`@solidjs/element\`, \`@solidjs/universal\`, \`babel-preset-solid\`.
+
+If the run fails, check that the sha exists on [solidjs/solid](https://github.com/solidjs/solid)."
