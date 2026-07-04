@@ -31,15 +31,18 @@ jobs:
           gh workflow run sync-preview-mirror.yml --repo "$REPO" -f commit="$SHA"
 
           SHORT=$(printf '%s' "$SHA" | cut -c1-7 | tr 'A-F' 'a-f')
-          gh issue comment "$ISSUE" --repo "$REPO" --body "🚀 Building preview packages for \`$SHA\`… (~3 min, [progress](https://github.com/$REPO/actions))
-
-Once the **Preview Release** run is green:
-
-\`\`\`
-npm i https://pkg.pr.new/$REPO/solid-js@$SHORT
-npm i https://pkg.pr.new/$REPO/@solidjs/web@$SHORT
-\`\`\`
-
-Same pattern for \`@solidjs/signals\`, \`@solidjs/h\`, \`@solidjs/html\`, \`@solidjs/element\`, \`@solidjs/universal\`, \`babel-preset-solid\`.
-
-If the run fails, check that the sha exists on [solidjs/solid](https://github.com/solidjs/solid)."
+          {
+            echo "🚀 Building preview packages for \`$SHA\`… (~3 min, [progress](https://github.com/$REPO/actions))"
+            echo
+            echo "Once the **Preview Release** run is green:"
+            echo
+            echo '```'
+            echo "npm i https://pkg.pr.new/$REPO/solid-js@$SHORT"
+            echo "npm i https://pkg.pr.new/$REPO/@solidjs/web@$SHORT"
+            echo '```'
+            echo
+            echo "Same pattern for \`@solidjs/signals\`, \`@solidjs/h\`, \`@solidjs/html\`, \`@solidjs/element\`, \`@solidjs/universal\`, \`babel-preset-solid\`."
+            echo
+            echo "If the run fails, check that the sha exists on [solidjs/solid](https://github.com/solidjs/solid)."
+          } > /tmp/preview-comment.md
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/preview-comment.md
