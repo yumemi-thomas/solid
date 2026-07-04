@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # need the parent commit available for the HEAD re-point below
+          fetch-depth: 2
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -28,6 +31,14 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # pkg-pr-new keys preview URLs off `git rev-parse HEAD` (for non-PR
+      # events). The mirror head is upstream/next + our workflow commit, so
+      # detach HEAD to the parent — the exact upstream solidjs/solid commit —
+      # to publish under Ryan's real sha. Build outputs are untracked and
+      # survive the checkout.
+      - name: Re-point HEAD at the upstream commit for the URL sha
+        run: git checkout --detach HEAD^
 
       - name: Publish preview packages
         run: |
