@@ -1,0 +1,37 @@
+name: Preview Release (pkg.pr.new)
+
+on:
+  push:
+    branches:
+      - next-mirror
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      - name: Install deps
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Publish preview packages
+        run: |
+          pnpm -w add -D pkg-pr-new
+          pnpm exec pkg-pr-new publish --no-compact \
+            './packages/solid' \
+            './packages/solid-web' \
+            './packages/solid-signals' \
+            './packages/solid-universal' \
+            './packages/solid-element' \
+            './packages/solid-h' \
+            './packages/solid-html' \
+            './packages/babel-preset-solid'
