@@ -1,0 +1,54 @@
+name: Preview Release (pkg.pr.new)
+
+on:
+  push:
+    branches:
+      - next-mirror
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # need the parent commit available for the HEAD re-point below
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      - name: Install deps
+        run: pnpm install
+
+      # Upstream's turbo graph has a race: @solidjs/h#types (and web's) compile
+      # self-imports that resolve through a symlink created by the `link` task,
+      # but `types` doesn't depend on `link`. Create the symlinks up front.
+      - name: Pre-link self-referencing packages
+        run: pnpm --filter @solidjs/web --filter @solidjs/h run link
+
+      - name: Build
+        run: pnpm run build
+
+      # pkg-pr-new keys preview URLs off `git rev-parse HEAD` (for non-PR
+      # events). The mirror head is upstream/next + our workflow commit, so
+      # detach HEAD to the parent — the exact upstream solidjs/solid commit —
+      # to publish under Ryan's real sha. Build outputs are untracked and
+      # survive the checkout.
+      - name: Re-point HEAD at the upstream commit for the URL sha
+        run: git checkout --detach HEAD^
+
+      - name: Publish preview packages
+        run: |
+          pnpm -w add -D pkg-pr-new
+          pnpm exec pkg-pr-new publish --no-compact \
+            './packages/solid' \
+            './packages/solid-web' \
+            './packages/solid-signals' \
+            './packages/solid-universal' \
+            './packages/solid-element' \
+            './packages/solid-h' \
+            './packages/solid-html' \
+            './packages/babel-preset-solid'
