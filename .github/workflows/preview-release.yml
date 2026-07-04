@@ -20,6 +20,12 @@ jobs:
       - name: Install deps
         run: pnpm install
 
+      # Upstream's turbo graph has a race: @solidjs/h#types (and web's) compile
+      # self-imports that resolve through a symlink created by the `link` task,
+      # but `types` doesn't depend on `link`. Create the symlinks up front.
+      - name: Pre-link self-referencing packages
+        run: pnpm --filter @solidjs/web --filter @solidjs/h run link
+
       - name: Build
         run: pnpm run build
 
