@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      commit:
+        description: "Upstream commit sha (or ref) to publish. Leave empty for the latest next."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -17,28 +22,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Mirror upstream/next plus publish workflow
+      - name: Mirror upstream commit plus publish workflow
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.commit }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/solidjs/solid.git
-          git fetch upstream next
 
-          UPSTREAM_SHA=$(git rev-parse upstream/next)
-          LAST_SYNCED=$(git rev-parse origin/next-mirror^ 2>/dev/null || echo none)
-          if [ "$UPSTREAM_SHA" = "$LAST_SYNCED" ]; then
-            echo "next-mirror already mirrors upstream ${UPSTREAM_SHA}"
-            exit 0
+          if [ -n "$TARGET" ]; then
+            # ad-hoc publish of a selected upstream commit
+            git fetch upstream next
+            git fetch upstream "$TARGET" || true
+            UPSTREAM_SHA=$(git rev-parse --verify "${TARGET}^{commit}")
+            BRANCH=preview-adhoc
+          else
+            git fetch upstream next
+            UPSTREAM_SHA=$(git rev-parse upstream/next)
+            BRANCH=next-mirror
+            LAST_SYNCED=$(git rev-parse origin/next-mirror^ 2>/dev/null || echo none)
+            if [ "$UPSTREAM_SHA" = "$LAST_SYNCED" ]; then
+              echo "next-mirror already mirrors upstream ${UPSTREAM_SHA}"
+              exit 0
+            fi
           fi
 
-          git checkout -B next-mirror "$UPSTREAM_SHA"
+          git checkout -B "$BRANCH" "$UPSTREAM_SHA"
           git checkout "${{ github.sha }}" -- .github/workflows/preview-release.yml
           git add .github/workflows/preview-release.yml
           git commit -m "ci: preview release workflow (upstream ${UPSTREAM_SHA})"
-          git push --force origin next-mirror
+          git push --force origin "$BRANCH"
 
           # Pushes made with GITHUB_TOKEN never trigger push workflows,
           # so dispatch the publish run explicitly.
-          gh workflow run preview-release.yml --repo "${{ github.repository }}" --ref next-mirror
+          gh workflow run preview-release.yml --repo "${{ github.repository }}" --ref "$BRANCH"
