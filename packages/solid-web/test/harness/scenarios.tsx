@@ -261,6 +261,28 @@ function SignalHoleBeforeSiblings() {
 }
 
 // ---------------------------------------------------------------------------
+// 13b. Async && condition before a <For> (#2801 bug 2 / PR #2827 shape): the
+// compiler-emitted condition memo reads a pending async memo, so the server
+// pulls it multiple times (eager create → discovery → resolved) before the
+// successful render. Failed pulls must not skew hydration ids — neither the
+// h4's own nor the For rows' — relative to the client's single compute.
+let setForRows!: (v: string[]) => void;
+function AsyncCondBeforeFor() {
+  const data = createMemo(async () => {
+    await sleep(10);
+    return { value: "shown" };
+  });
+  const [rows, set] = createSignal(["a", "b"]);
+  setForRows = set;
+  return (
+    <Loading fallback={<div>loading</div>}>
+      {data().value && <h4>{data().value}</h4>}
+      <For each={rows()}>{x => <div>{x}</div>}</For>
+    </Loading>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 14. Streamed boundary with loose text, marker-bounded between siblings.
 // Exercises insert's swapped-region re-claim on the `<!--$-->…<!--/-->` walk:
 // the Loading hole shares its parent with static siblings, so after the $df
@@ -387,6 +409,19 @@ export const scenarios: Scenario[] = [
     update: () => setLabel("two"),
     expectedTextAfterUpdate: "Label: twoHeadtail",
     stableSelector: "div, span, h4"
+  },
+  {
+    name: "async-cond-before-for",
+    App: AsyncCondBeforeFor,
+    async: true,
+    expectedText: "shownab",
+    update: () => setForRows(["a", "b", "c"]),
+    expectedTextAfterUpdate: "shownabc",
+    stableSelector: "h4",
+    knownFailure:
+      "server sync-memo re-pulls leak child-id slots INSIDE the hole's own scope " +
+      "(h4 emits _hk=10003, client claims 10001) — hole scopes protect siblings " +
+      "but not within-hole retries; fixed by PR #2827's owner reset on pull"
   },
   {
     name: "bounded-streamed-text",
