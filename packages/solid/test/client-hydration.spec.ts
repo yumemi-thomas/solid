@@ -1976,6 +1976,111 @@ describe("Loading + asset waiting during hydration", () => {
     expect(result()).not.toBeUndefined();
     expect(result()).not.toBe("loading...");
   });
+
+  // solidjs/solid#2817 layer 3: a rejected chunk preload must never hang
+  // hydration silently — the boundary reports the error and resumes with a
+  // fresh client render so lazy()'s own import() retries through normal
+  // channels.
+  test("rejected preload resumes a settled boundary instead of hanging", async () => {
+    let rejectAssets!: (e: any) => void;
+    const assetLoadPromise = new Promise<void>((_, rej) => (rejectAssets = rej));
+
+    (globalThis as any)._$HY = {
+      modules: {},
+      loading: { "./Comp": assetLoadPromise },
+      r: {
+        t0: { s: 1, v: true },
+        t0_assets: { "./Comp": "/assets/comp.js" }
+      },
+      events: [],
+      completed: new WeakSet()
+    };
+    startHydration({
+      t0: { s: 1, v: true },
+      t0_assets: { "./Comp": "/assets/comp.js" }
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    let result: any;
+    createRoot(
+      () => {
+        result = Loading({
+          fallback: "loading...",
+          get children() {
+            return "content";
+          }
+        });
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(result()).toBeUndefined(); // waiting on assets
+
+    rejectAssets(new Error("chunk 404"));
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+
+    // resumed with a fresh client render: inner value is the boundary memo
+    const inner = result();
+    expect(typeof inner).toBe("function");
+    expect(inner()).toBe("content");
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  test("rejected preload with pending server data still resumes", async () => {
+    let resolveData!: () => void;
+    const dataPromise = new Promise<boolean>(r => (resolveData = () => r(true)));
+    let rejectAssets!: (e: any) => void;
+    const assetLoadPromise = new Promise<void>((_, rej) => (rejectAssets = rej));
+
+    (globalThis as any)._$HY = {
+      modules: {},
+      loading: { "./Comp": assetLoadPromise },
+      r: {
+        t0: dataPromise,
+        t0_assets: { "./Comp": "/assets/comp.js" }
+      },
+      events: [],
+      completed: new WeakSet()
+    };
+    startHydration({
+      t0: dataPromise,
+      t0_assets: { "./Comp": "/assets/comp.js" }
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    let result: any;
+    createRoot(
+      () => {
+        result = Loading({
+          fallback: "loading...",
+          get children() {
+            return "content";
+          }
+        });
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(result()).toBe("loading...");
+
+    rejectAssets(new Error("network"));
+    resolveData();
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+
+    // resumed with a fresh client render: inner value is the boundary memo
+    const inner = result();
+    expect(typeof inner).toBe("function");
+    expect(inner()).toBe("content");
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
 });
 
 describe("Loading boundary: already-serialized settled ref", () => {
