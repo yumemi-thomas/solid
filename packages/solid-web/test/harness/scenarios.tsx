@@ -308,6 +308,44 @@ function BoundedStreamedText() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 15. Falsy `&&` child hole (dom-expressions #532 family). `{count() && <b/>}`
+// with count 0 must render "0" on BOTH sides — the server evaluates the raw
+// JS expression, so the client's condition-memo wrap has to preserve value
+// semantics (`memo(!!left)() ? right : left`, not `memo(!!left)() && right`
+// which collapses the falsy left to `false`). The falsy→falsy update is the
+// detector: the old collapse never re-renders (memo swallows it, DOM keeps
+// the stale adopted "0"), the value-preserving form tracks the raw left in
+// the alternate and rewrites the text.
+let setZero!: (v: number | string) => void;
+function ZeroAndChild() {
+  const [count, set] = createSignal<number | string>(0);
+  setZero = set;
+  return (
+    <div>
+      {count() && <b>pos</b>}
+      <span>tail</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Falsy `&&` in a component prop (dom-expressions #532 repro shape). The
+// consumer branches STRUCTURALLY on `props.value == null`: with the old
+// boolean collapse the client sees `false` (not null!), takes the element
+// branch, and tries to claim a <p> the server never rendered — client-created
+// DOM during hydration. Value-preserving wrap hands through the real
+// `undefined` and both sides render the text branch.
+function ValueCard(props: { value: any }) {
+  return <div>{props.value == null ? "none" : <p>set:{props.value}</p>}</div>;
+}
+let setVal!: (v: string | undefined) => void;
+function FalsyAndProp() {
+  const [val, set] = createSignal<string | undefined>(undefined);
+  setVal = set;
+  return <ValueCard value={val() && val()!.toUpperCase()} />;
+}
+
 export const scenarios: Scenario[] = [
   {
     name: "text-hole",
@@ -431,5 +469,22 @@ export const scenarios: Scenario[] = [
     update: () => refreshBounded(),
     expectedTextAfterUpdate: "before Count: 43 after tail",
     stableSelector: "div, span"
+  },
+  {
+    name: "zero-and-child-hole",
+    App: ZeroAndChild,
+    expectedText: "0tail",
+    // falsy→falsy: truthiness doesn't change, the VALUE must still update
+    update: () => setZero(""),
+    expectedTextAfterUpdate: "tail",
+    stableSelector: "div, span"
+  },
+  {
+    name: "falsy-and-prop",
+    App: FalsyAndProp,
+    expectedText: "none",
+    update: () => setVal("hi"),
+    expectedTextAfterUpdate: "set:HI",
+    stableSelector: "div"
   }
 ];

@@ -1,0 +1,5 @@
+{
+  "name": "zero-and-child-hole",
+  "shell": "<div _hk=0><!--$-->0<!--/--><span>tail</span></div>",
+  "rest": ""
+}
