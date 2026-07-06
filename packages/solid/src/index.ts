@@ -107,6 +107,10 @@ export {
 // satisfies the export surface so isomorphic builds don't break.
 /** @internal */
 export function ssrHandleError() {}
+/** @internal */
+export function ssrScope<T>(fn: () => T): () => T {
+  return fn;
+}
 
 // dev
 import { IS_DEV } from "./client/core.js";

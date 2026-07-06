@@ -213,8 +213,10 @@ describe("Basic element attributes", () => {
         </div>
       ) as unknown as HTMLDivElement;
     });
+    // Each component slot carries its own `<!>` ownership marker (multi-slot
+    // parent, solidjs/solid#2830).
     expect(res.innerHTML).toBe(
-      "<div><span>Hello</span></div><div><span>Hello</span></div><div><span>Jake</span></div>"
+      "<div><span>Hello</span></div><!----><div><span>Hello</span></div><div><span>Jake</span></div><!----><!---->"
     );
   });
 });
@@ -241,19 +243,19 @@ describe("Insert caching (issue #2610)", () => {
     flush();
 
     expect(siblingRenderCount).toBe(1);
-    expect(div.innerHTML).toBe("visible<span>sibling</span>");
+    expect(div.innerHTML).toBe("visible<!----><span>sibling</span><!---->");
 
     setShow(false);
     flush();
 
     expect(siblingRenderCount).toBe(1);
-    expect(div.innerHTML).toBe("<span>sibling</span>");
+    expect(div.innerHTML).toBe("<!----><span>sibling</span><!---->");
 
     setShow(true);
     flush();
 
     expect(siblingRenderCount).toBe(1);
-    expect(div.innerHTML).toBe("visible<span>sibling</span>");
+    expect(div.innerHTML).toBe("visible<!----><span>sibling</span><!---->");
   });
 
   test("multiple Show toggles do not re-render siblings", () => {
@@ -279,18 +281,18 @@ describe("Insert caching (issue #2610)", () => {
     flush();
 
     expect(siblingRenderCount).toBe(1);
-    expect(div.innerHTML).toBe("<span>sibling</span>");
+    expect(div.innerHTML).toBe("<!----><span>sibling</span><!---->");
 
     for (let i = 0; i < 5; i++) {
       setShow(true);
       flush();
       expect(siblingRenderCount).toBe(1);
-      expect(div.innerHTML).toBe("<span>content</span><span>sibling</span>");
+      expect(div.innerHTML).toBe("<span>content</span><!----><span>sibling</span><!---->");
 
       setShow(false);
       flush();
       expect(siblingRenderCount).toBe(1);
-      expect(div.innerHTML).toBe("<span>sibling</span>");
+      expect(div.innerHTML).toBe("<!----><span>sibling</span><!---->");
     }
   });
 });

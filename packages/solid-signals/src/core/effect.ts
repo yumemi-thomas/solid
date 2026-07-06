@@ -22,6 +22,7 @@ import { cleanup } from "./owner.js";
 import {
   _hitUnhandledAsync,
   GlobalQueue,
+  haltReactivity,
   resetUnhandledAsync,
   setTrackedQueueCallback
 } from "./scheduler.js";
@@ -89,15 +90,19 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
       try {
         return this._errorFn
           ? this._errorFn(err, () => {
-              this._cleanup?.();
+              const prevCleanup = this._cleanup;
               this._cleanup = undefined;
+              prevCleanup?.();
             })
           : console.error(err);
       } catch (e) {
         err = e;
       }
     }
-    if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) throw err;
+    if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) {
+      haltReactivity();
+      throw err;
+    }
   } else if (this._type === EFFECT_RENDER) {
     this._queue.notify(this, STATUS_PENDING | STATUS_ERROR, actualStatus, actualError);
     if (__DEV__ && _hitUnhandledAsync) {
@@ -125,9 +130,10 @@ function runEffect(node: Effect<any>): void {
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
   }
-  node._cleanup?.();
+  const prevCleanup = node._cleanup;
   node._cleanup = undefined;
   try {
+    prevCleanup?.();
     const nextCleanup = node._effectFn(node._value, node._prevValue);
     if (__DEV__ && nextCleanup !== undefined && typeof nextCleanup !== "function") {
       throw new Error(
@@ -142,7 +148,10 @@ function runEffect(node: Effect<any>): void {
   } catch (error) {
     node._error = new StatusError(node, error);
     node._statusFlags |= STATUS_ERROR;
-    if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) throw error;
+    if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
+      haltReactivity();
+      throw error;
+    }
   } finally {
     if (__DEV__) setStrictRead(prevStrictRead);
     node._prevValue = node._value;
@@ -178,8 +187,9 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
 
   const node = computed<void>(
     () => {
-      node._cleanup?.();
+      const prevCleanup = node._cleanup;
       node._cleanup = undefined;
+      prevCleanup?.();
       const cleanup = staleValues(fn);
       if (__DEV__ && cleanup !== undefined && typeof cleanup !== "function") {
         throw new Error(
@@ -200,7 +210,10 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
     if (actualStatus & STATUS_ERROR) {
       node._queue.notify(node, STATUS_PENDING, 0);
       const err = error !== undefined ? error : node._error;
-      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) throw err;
+      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
+        haltReactivity();
+        throw err;
+      }
     }
   };
   node._run = run;

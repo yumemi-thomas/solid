@@ -1,0 +1,5 @@
+{
+  "name": "logical-and-before-sibling",
+  "shell": "<div _hk=0><!--$--><h4 _hk=20>title</h4><!--/--><span>after</span></div>",
+  "rest": ""
+}

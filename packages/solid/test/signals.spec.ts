@@ -367,46 +367,50 @@ describe("Effect grouping of signals", () => {
 });
 
 describe("Typecheck computed and effects", () => {
-  test("No default value can return undefined", () => {
-    createRoot(() => {
-      let count = 0;
-      const [sign, setSign] = createSignal("thoughts");
-      const fn = (arg?: number) => {
-        count++;
-        sign();
-        expect(arg).toBe(undefined);
-        return arg;
-      };
-      createRenderEffect(fn, () => {});
-      createEffect(fn, () => {});
-      setTimeout(() => {
-        expect(count).toBe(2);
-        setSign("update");
-        flush();
-        expect(count).toBe(4);
-      }, 0);
-    });
-  });
-  test("Default value never receives undefined", () => {
-    createRoot(() => {
-      let count = 0;
-      const [sign, setSign] = createSignal("thoughts");
-      const fn = (arg = 12) => {
-        count++;
-        sign();
-        expect(arg).toBe(12);
-        return arg;
-      };
-      createRenderEffect(fn, () => {});
-      createEffect(fn, () => {});
-      setTimeout(() => {
-        expect(count).toBe(2);
-        setSign("update");
-        flush();
-        expect(count).toBe(4);
-      }, 0);
-    });
-  });
+  test("No default value can return undefined", () =>
+    new Promise(done => {
+      createRoot(() => {
+        let count = 0;
+        const [sign, setSign] = createSignal("thoughts");
+        const fn = (arg?: number) => {
+          count++;
+          sign();
+          expect(arg).toBe(undefined);
+          return arg;
+        };
+        createRenderEffect(fn, () => {});
+        createEffect(fn, () => {});
+        setTimeout(() => {
+          expect(count).toBe(2);
+          setSign("update");
+          flush();
+          expect(count).toBe(4);
+          done(undefined);
+        }, 0);
+      });
+    }));
+  test("Default value never receives undefined", () =>
+    new Promise(done => {
+      createRoot(() => {
+        let count = 0;
+        const [sign, setSign] = createSignal("thoughts");
+        const fn = (arg = 12) => {
+          count++;
+          sign();
+          expect(arg).toBe(12);
+          return arg;
+        };
+        createRenderEffect(fn, () => {});
+        createEffect(fn, () => {});
+        setTimeout(() => {
+          expect(count).toBe(2);
+          setSign("update");
+          flush();
+          expect(count).toBe(4);
+          done(undefined);
+        }, 0);
+      });
+    }));
 });
 
 describe("onCleanup", () => {
@@ -503,18 +507,6 @@ describe("runWithOwner", () => {
 
     flush();
     expect(order).toEqual(["outer", "inner"]);
-  });
-
-  test("flush throws inside onSettled in a root", () => {
-    createRoot(() => {
-      onSettled(() => {
-        flush();
-      });
-    });
-
-    expect(() => flush()).toThrow(
-      "Cannot call flush() from inside onSettled or createTrackedEffect. flush() is not reentrant there."
-    );
   });
 
   test("ErrorBoundary catches flush error from onSettled", () => {

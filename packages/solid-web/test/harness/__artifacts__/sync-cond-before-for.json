@@ -1,0 +1,5 @@
+{
+  "name": "sync-cond-before-for",
+  "shell": "<div _hk=0><!--$--><h4 _hk=20>shown</h4><!--/--><!--$--><div _hk=300>a</div><div _hk=310>b</div><!--/--></div>",
+  "rest": ""
+}

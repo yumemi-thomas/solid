@@ -27,7 +27,8 @@ export {
   releaseSnapshotScope,
   clearSnapshots,
   enforceLoadingBoundary,
-  enableExternalSource
+  enableExternalSource,
+  resetErrorHalt
 } from "./core/index.js";
 import { DEV as _DEV, type Dev } from "./core/index.js";
 export const DEV: Dev | undefined = __DEV__ ? _DEV : undefined;

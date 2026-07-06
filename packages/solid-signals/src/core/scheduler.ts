@@ -14,7 +14,7 @@ import {
   STATUS_UNINITIALIZED
 } from "./constants.js";
 import { currentOptimisticLane } from "./core.js";
-import { DEV } from "./dev.js";
+import { DEV, emitDiagnostic } from "./dev.js";
 import { NotReadyError } from "./error.js";
 import { insertIntoHeap, runHeap, type Heap } from "./heap.js";
 import {
@@ -46,6 +46,8 @@ export const zombieQueue: Heap = {
 export let clock = 0;
 export let activeTransition: Transition | null = null;
 let scheduled = false;
+let halted = false;
+let haltNotified = false;
 let syncDepth = 0;
 export let projectionWriteActive = false;
 let inTrackedQueueCallback = false;
@@ -219,9 +221,52 @@ function cleanupCompletedLanes(completingTransition: Transition | null): void {
 }
 
 export function schedule() {
+  if (halted) {
+    notifyHalted();
+    return;
+  }
   if (scheduled) return;
   scheduled = true;
   if (!syncDepth && !globalQueue._running && !projectionWriteActive) queueMicrotask(flush);
+}
+
+/**
+ * Permanently halts the reactive system. Called when a user error escapes
+ * every boundary — app state is undefined at that point, so scheduling stops
+ * entirely rather than limping along with a half-applied update.
+ */
+export function haltReactivity(): void {
+  if (halted) return;
+  halted = true;
+  let message = "[REACTIVITY_HALTED] An uncaught error halted the reactive system.";
+  if (__DEV__) {
+    message +=
+      " No further updates will be processed. Handle errors with createErrorBoundary/<Errored> or treat this as a crash.";
+    emitDiagnostic({
+      code: "REACTIVITY_HALTED",
+      kind: "error",
+      severity: "error",
+      message
+    });
+  }
+  console.error(message);
+}
+
+// Logs on the first write after a halt so a frozen interaction is traceable.
+function notifyHalted(): void {
+  if (haltNotified) return;
+  haltNotified = true;
+  console.error(
+    __DEV__
+      ? "[REACTIVITY_HALTED] Update ignored: the reactive system was halted by an earlier uncaught error."
+      : "[REACTIVITY_HALTED] Update ignored."
+  );
+}
+
+/** @internal Test/dev-reload hook. Revives scheduling after a halt. */
+export function resetErrorHalt(): void {
+  halted = false;
+  haltNotified = false;
 }
 
 export interface IQueue {
@@ -675,6 +720,7 @@ export function flush<T>(fn?: () => T): T | void {
     }
     return;
   }
+  if (halted) return;
   let count = 0;
   // `flush()` is an explicit drain point, so it must also process an active
   // transition even if no microtask was scheduled for it yet.

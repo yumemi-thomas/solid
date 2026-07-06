@@ -420,6 +420,122 @@ describe("setState with reconcile", () => {
     expect(last).toBe(undefined);
     expect(state[3]).toBe(undefined);
   });
+  test("Reconcile swaps a property whose value is another store's proxy", () => {
+    type Row = { id: number; name: string };
+    const [rowA] = createStore<Row>({ id: 1, name: "a" });
+    const [rowB] = createStore<Row>({ id: 2, name: "b" });
+
+    // rows rendered somewhere -> live tracked nodes
+    let effA: Row | undefined;
+    let effB: Row | undefined;
+    createRoot(() => {
+      createEffect(
+        () => ({ id: rowA.id, name: rowA.name }),
+        v => {
+          effA = v;
+        }
+      );
+      createEffect(
+        () => ({ id: rowB.id, name: rowB.name }),
+        v => {
+          effB = v;
+        }
+      );
+    });
+    flush();
+    expect(effA).toEqual({ id: 1, name: "a" });
+    expect(effB).toEqual({ id: 2, name: "b" });
+
+    const [state, setState] = createStore<{ selected: Row }>({ selected: rowA });
+    let selectedName: string | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state.selected.name,
+        v => {
+          selectedName = v;
+        }
+      );
+    });
+    flush();
+    expect(selectedName).toBe("a");
+
+    setState(reconcile({ selected: rowB }, "id"));
+    flush();
+
+    expect(state.selected.id).toBe(2);
+    expect(state.selected.name).toBe("b");
+    expect(selectedName).toBe("b");
+  });
+
+  test("Reconcile reorders an array whose items are store proxies", () => {
+    type Row = { id: number; name: string };
+    const [rowA] = createStore<Row>({ id: 1, name: "a" });
+    const [rowB] = createStore<Row>({ id: 2, name: "b" });
+    let names: string | undefined;
+    createRoot(() => {
+      // rows rendered somewhere -> live tracked nodes
+      createEffect(
+        () => rowA.name + rowB.name,
+        () => {}
+      );
+    });
+    flush();
+
+    const [list, setList] = createStore<Row[]>([rowA, rowB]);
+    createRoot(() => {
+      createEffect(
+        () => list.map(r => r?.name).join(","),
+        v => {
+          names = v;
+        }
+      );
+    });
+    flush();
+    expect(names).toBe("a,b");
+
+    setList(reconcile([rowB, rowA], "id"));
+    flush();
+
+    expect(names).toBe("b,a");
+    expect(list[0].id).toBe(2);
+    expect(list[1].id).toBe(1);
+    expect(snapshot(list)).toEqual([
+      { id: 2, name: "b" },
+      { id: 1, name: "a" }
+    ]);
+  });
+
+  test("Reconcile swaps keyless store-proxy property values", () => {
+    type Row = { name: string };
+    const [rowA] = createStore<Row>({ name: "a" });
+    const [rowB] = createStore<Row>({ name: "b" });
+    createRoot(() => {
+      createEffect(
+        () => rowA.name + rowB.name,
+        () => {}
+      );
+    });
+    flush();
+
+    const [state, setState] = createStore<{ selected: Row }>({ selected: rowA });
+    let selectedName: string | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state.selected.name,
+        v => {
+          selectedName = v;
+        }
+      );
+    });
+    flush();
+    expect(selectedName).toBe("a");
+
+    setState(reconcile({ selected: rowB }, "id"));
+    flush();
+
+    expect(state.selected.name).toBe("b");
+    expect(selectedName).toBe("b");
+  });
 });
 // type tests
 

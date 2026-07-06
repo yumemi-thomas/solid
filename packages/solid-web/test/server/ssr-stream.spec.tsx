@@ -112,7 +112,10 @@ describe("SSR Streaming — No Loading Boundary", () => {
       </Parent>
     ));
 
-    expect(html).toContain("<span _hk=1>child</span><!--/--><!--$--><span _hk=2>sibling</span>");
+    // The deferred `props.children` hole owns id scope "1" (hole owner), so
+    // its content ids nest under it ("10") while the eager sibling keeps the
+    // parent-counter slot ("2") regardless of when the hole evaluates.
+    expect(html).toContain("<span _hk=10>child</span><!--/--><!--$--><span _hk=2>sibling</span>");
   });
 
   test("top-level async memo blocks the shell", async () => {
@@ -742,6 +745,27 @@ describe("SSR Streaming — Pending reads must not loop the boundary (#2801)", (
     expect(fetches).toBe(1);
     expect(effectRuns).toBe(1);
     expect(effectValue).toBe("render-effect-content");
+  });
+
+  test("failed pulls do not leak hydration key slots (async && before <For>)", async () => {
+    function App() {
+      const data = createMemo(async () => asyncValue({ value: "shown" }, 20));
+      const [items] = createSignal(["a", "b"]);
+      return (
+        <Loading fallback={<div>loading</div>}>
+          {data().value && <h4>{data().value}</h4>}
+          <For each={items()}>{x => <div>{x}</div>}</For>
+        </Loading>
+      );
+    }
+    const { chunks } = await collectChunks(() => <App />);
+    const full = chunks.join("");
+    // Each NotReadyError pull of the compiler-emitted condition memo must not
+    // consume a child-id slot, or the h4's key drifts ahead of the client's
+    // single successful compute (was _hk=10003) and the node goes unclaimed.
+    expect(full).toContain("<h4 _hk=10001>shown</h4>");
+    expect(full).toContain("<div _hk=100100>a</div>");
+    expect(full).toContain("<div _hk=100110>b</div>");
   });
 
   test("top-level render effect holds shell flush until its async source settles", async () => {

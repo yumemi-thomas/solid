@@ -1,0 +1,5 @@
+{
+  "name": "component-children-before-sibling",
+  "shell": "<section _hk=0><!--$--><span _hk=10>child</span><!--/--><!--$--><span _hk=2>sibling</span><!--/--></section>",
+  "rest": ""
+}

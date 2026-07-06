@@ -1292,31 +1292,60 @@ function waitAndResume(
   assetPromise?: Promise<void>,
   hydrateRejected = true
 ) {
-  const waitFor = assetPromise ? Promise.all([p, assetPromise]) : p;
-  waitFor.then(
+  // Settle data and assets independently: an asset error must not be written
+  // into the data ref's rejected state, and a data rejection must still keep
+  // its own hydrate semantics. (`p` may be an exotic thenable — coerce first.)
+  const data: Promise<boolean> = Promise.resolve(p).then(
     () => {
       if (p && typeof p === "object") p.s = 1;
-      resume();
+      return true;
     },
     (err: any) => {
       if (p && typeof p === "object") {
         p.s = 2;
         p.v = err;
       }
-      resume(hydrateRejected);
+      return hydrateRejected;
     }
   );
+  if (!assetPromise) {
+    data.then(shouldHydrate => resume(shouldHydrate));
+    return;
+  }
+  const assets = assetPromise.then(
+    () => true,
+    (err: any) => {
+      reportAssetFailure(err);
+      return false;
+    }
+  );
+  Promise.all([data, assets]).then(([dataHydrate, assetsOk]) =>
+    // Without its preloaded module the boundary can't claim server DOM —
+    // render fresh so lazy's own import() retries through normal channels.
+    resume(assetsOk ? dataHydrate : false)
+  );
+}
+
+// A rejected module preload means the boundary's code can't hydrate the
+// server DOM (lazy() has no module). Surface the error and resume with
+// shouldHydrate=false: the boundary renders fresh client DOM and lazy's own
+// import() retries through normal channels — never hang hydration silently.
+function reportAssetFailure(err: any) {
+  console.error("Hydration module preload failed; rendering boundary content on the client:", err);
 }
 
 function scheduleResumeAfterAssets(
   id: string,
-  resume: () => void,
+  resume: (shouldHydrate?: boolean) => void,
   assetPromise?: Promise<void>
 ): boolean {
   sharedConfig.gather?.(id);
   const doResume = () => queueMicrotask(resume);
   if (assetPromise) {
-    assetPromise.then(doResume);
+    assetPromise.then(doResume, err => {
+      reportAssetFailure(err);
+      queueMicrotask(() => resume(false));
+    });
     return true;
   }
   doResume();
@@ -1369,10 +1398,17 @@ export function createLoadingBoundary(
         p == null &&
         !settledSerializationResumeQueued
       ) {
-        settledSerializationResumeQueued = true;
-        const [, resume] = initBoundaryResume(o, id);
-        if (scheduleResumeAfterAssets(id, resume, assetPromise)) return undefined;
-        return fallback();
+        if (assetPromise) {
+          settledSerializationResumeQueued = true;
+          const [, resume] = initBoundaryResume(o, id);
+          scheduleResumeAfterAssets(id, resume, assetPromise);
+          return undefined;
+        }
+        // Already settled: the server rendered content and it is in the DOM.
+        // Hydrate straight through — the fallback only hydrates when it is
+        // actually showing. Rendering it here would create phantom client DOM
+        // and poison insert's node bookkeeping (#2801 bug 1).
+        return coreLoadingBoundary(fn, fallback, options);
       }
       if (p) {
         const [set, resume] = initBoundaryResume(o, id);
@@ -1384,7 +1420,17 @@ export function createLoadingBoundary(
             set();
             checkHydrationComplete();
           };
-          if (assetPromise) assetPromise.then(() => queueMicrotask(afterAssets));
+          if (assetPromise)
+            // Server showed the fallback, so content is always fresh client
+            // DOM; on preload failure proceed anyway and let lazy's own
+            // import() retry/fail through normal channels.
+            assetPromise.then(
+              () => queueMicrotask(afterAssets),
+              err => {
+                reportAssetFailure(err);
+                queueMicrotask(afterAssets);
+              }
+            );
           else queueMicrotask(afterAssets);
         }
         return fallback();
@@ -1397,8 +1443,19 @@ export function createLoadingBoundary(
       sharedConfig.has!(id + "_fr") &&
       !settledSerializationResumeQueued
     ) {
-      settledSerializationResumeQueued = true;
       const fr = sharedConfig.load!(id + "_fr");
+
+      if (fr && typeof fr === "object" && fr.s === 1 && !assetPromise) {
+        // Fragment already settled and swapped in ($df ran before hydration):
+        // the content is in the DOM, so hydrate straight through. The fallback
+        // only hydrates when it is actually showing — rendering it here would
+        // create phantom client DOM and poison insert's node bookkeeping
+        // (#2801 bug 1).
+        sharedConfig.gather?.(id);
+        return coreLoadingBoundary(fn, fallback, options);
+      }
+
+      settledSerializationResumeQueued = true;
       const [, resume] = initBoundaryResume(o, id);
 
       if (fr && typeof fr === "object" && (fr.s === 1 || fr.s === 2)) {
@@ -1406,12 +1463,19 @@ export function createLoadingBoundary(
           // Rejected stream fragments swap to an empty template; any outer error fallback
           // has to be created as fresh client DOM, not claimed from server markup.
           const resumeRejected = () => resume(false);
-          if (assetPromise) assetPromise.then(() => queueMicrotask(resumeRejected));
+          if (assetPromise)
+            assetPromise.then(
+              () => queueMicrotask(resumeRejected),
+              err => {
+                reportAssetFailure(err);
+                queueMicrotask(resumeRejected);
+              }
+            );
           else queueMicrotask(resumeRejected);
           return undefined;
         }
-        if (scheduleResumeAfterAssets(id, resume, assetPromise)) return undefined;
-        return fallback();
+        scheduleResumeAfterAssets(id, resume, assetPromise);
+        return undefined;
       }
 
       waitAndResume(fr, resume, assetPromise, false);
@@ -1420,7 +1484,13 @@ export function createLoadingBoundary(
 
     if (assetPromise && !sharedConfig.has!(id)) {
       const [, resume] = initBoundaryResume(o, id);
-      assetPromise.then(() => resume());
+      assetPromise.then(
+        () => resume(),
+        err => {
+          reportAssetFailure(err);
+          resume(false);
+        }
+      );
       return undefined;
     }
     return coreLoadingBoundary(fn, fallback, options);
