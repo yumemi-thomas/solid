@@ -90,6 +90,10 @@ export let latestReadActive = false;
 export let context: Owner | null = null;
 export let currentOptimisticLane: OptimisticLane | null = null;
 let pendingCheckSources: Set<Signal<any> | Computed<any>> | null = null;
+// Sources whose value the current isPending() probe observed as the fresh
+// transition-held `_pendingValue` (not the stale committed value) — see the
+// pair-consistency rule in `isPending` (#2831).
+let pendingCheckFreshReads: Set<Signal<any> | Computed<any>> | null = null;
 
 export let snapshotCaptureActive = false;
 export let snapshotSources: Set<any> | null = null;
@@ -297,7 +301,18 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
           el._overrideValue = value;
           el._pendingValue = value;
         }
-      } else el._pendingValue = value;
+      } else {
+        el._pendingValue = value;
+        // Transition-held sync recompute is a write path like setSignal/asyncWrite:
+        // maintain the isPending()/latest() companion nodes so sync derivations of
+        // held sources are visible to them (#2831). Both writes are transition-
+        // scoped (optimistic) and auto-revert/re-derive at commit. Skipped for
+        // plain flushes where the pending value commits before effects run.
+        if (activeTransition || el._transition) {
+          if (el._pendingSignal) updatePendingSignal(el);
+          if (el._latestValueComputed) setSignal(el._latestValueComputed, value);
+        }
+      }
 
       // Correct override for async resolution (non-lane path) unless user wrote since lane creation
       if (hasOverride && !isOptimisticDirty && wasPending && !(el as any)._overrideSinceLane)
@@ -902,6 +917,15 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     (stale && el._transition && activeTransition !== el._transition)
       ? el._value
       : (el._pendingValue as T);
+  // Record that this isPending() probe observed the fresh pending value, so
+  // the probe doesn't pair "pending" with the new value (#2831).
+  if (
+    pendingCheckActive &&
+    pendingCheckFreshReads !== null &&
+    el._pendingValue !== NOT_PENDING &&
+    value === el._pendingValue
+  )
+    pendingCheckFreshReads.add(el);
   if (
     !c &&
     owner === el &&
@@ -1107,7 +1131,11 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   const comp = el as Computed<any>;
   const firewall = (el as FirewallSignal<any>)._firewall;
   if (el._parentSource) {
-    const parent = el._parentSource as Computed<any>;
+    // A store leaf's async status lives on its firewall, not the leaf signal
+    // itself — consult it so `isPending(() => latest(() => store.value))`
+    // reports the firewall refetch like any async memo (#2831).
+    const parentNode = el._parentSource as FirewallSignal<any>;
+    const parent = (parentNode._firewall || parentNode) as Computed<any>;
     if (parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED))
       return true;
     return el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED);
@@ -1256,16 +1284,25 @@ export function isPending(fn: () => any): boolean {
   const prevPendingCheck = pendingCheckActive;
   const prevFoundPending = foundPending;
   const prevPendingCheckSources = pendingCheckSources;
+  const prevPendingCheckFreshReads = pendingCheckFreshReads;
   pendingCheckActive = true;
   foundPending = false;
   pendingCheckSources = new Set();
+  pendingCheckFreshReads = new Set();
   const collectPending = () => {
     pendingCheckActive = false;
     const prevStrictRead = __DEV__ ? strictRead : false;
     if (__DEV__) strictRead = false;
     try {
       pendingCheckSources!.forEach(source => {
-        if (read(getPendingSignal(source))) foundPending = true;
+        // Pair consistency: if the probe's read of this source observed the
+        // fresh transition-held `_pendingValue` (non-stale readers such as
+        // user effects do), the value is not stale to this reader and must
+        // not be reported as pending — otherwise [isPending(x), x()] pairs
+        // pending with the new value (#2831). Readers that observed the
+        // committed (stale) value keep the signal's verdict.
+        if (read(getPendingSignal(source)) && !pendingCheckFreshReads!.has(source))
+          foundPending = true;
       });
     } finally {
       if (__DEV__) strictRead = prevStrictRead;
@@ -1290,6 +1327,7 @@ export function isPending(fn: () => any): boolean {
     pendingCheckActive = prevPendingCheck;
     foundPending = prevFoundPending;
     pendingCheckSources = prevPendingCheckSources;
+    pendingCheckFreshReads = prevPendingCheckFreshReads;
   }
 }
 

@@ -1998,7 +1998,7 @@ describe("isPending and latest with async upstream and downstream", () => {
   });
 
   // Test 1: latest(signal) with sync consumer - no phase 1
-  it("latest(signal) with sync consumer - isPending(() => latest(x)) is false, contrasts with isPending(x)", async () => {
+  it("latest(signal) with sync consumer - isPending(() => latest(x)) tracks the transition like isPending(x)", async () => {
     const [$x, setX] = createSignal(1);
     let asyncMemo: () => number;
     const pendingPairs: [boolean, number][] = [];
