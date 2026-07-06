@@ -652,7 +652,15 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     try {
       value = read(pendingComputed);
     } catch (e) {
-      if (!context && e instanceof NotReadyError) return visibleValue;
+      // latest() falls back to the stale committed value while new async is in
+      // flight — it must not suspend the reader (#2829). The only time it
+      // suspends is when the source has never produced a value (initial load):
+      // there is no stale value to show, so let Loading handle it.
+      if (
+        e instanceof NotReadyError &&
+        (!context || !((el as Computed<T>)._statusFlags & STATUS_UNINITIALIZED))
+      )
+        return visibleValue;
       throw e;
     } finally {
       latestReadActive = prevPending;
@@ -880,12 +888,15 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
   // effects) see _pendingValue so that latest() and direct reads stay consistent.
   // Exception: resolved projection store properties (firewall, owner !== el) whose
   // STATUS_PENDING has been cleared always return _pendingValue.
+  // The latest() shadow computed (`c._parentSource === el`) always wants the
+  // in-flight value: it may recompute under a stale/lane context inherited from
+  // whichever flush ran it, and must not cache the committed value there (#2829).
   const value =
     !c ||
     (currentOptimisticLane !== null &&
       (el._overrideValue !== undefined ||
         (el as any)._optimisticLane ||
-        (owner === el && stale) ||
+        (owner === el && stale && (c as Computed<any>)._parentSource !== el) ||
         !!(owner._statusFlags & STATUS_PENDING))) ||
     el._pendingValue === NOT_PENDING ||
     (stale && el._transition && activeTransition !== el._transition)

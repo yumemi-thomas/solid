@@ -192,6 +192,14 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
     if (node._pendingValue !== NOT_PENDING) {
       node._value = node._pendingValue as any;
       node._pendingValue = NOT_PENDING;
+      // Mirror commitPendingNode: the node now has a committed visible value.
+      // Without this, a node first initialized under an optimistic override
+      // (e.g. the latest() shadow computed during an initial-load transition)
+      // stays UNINITIALIZED forever, so later pending phases mis-classify it
+      // as an initial load and readers suspend instead of observing the
+      // stale-value/pending pair (#2829).
+      if (!((node as any)._statusFlags & STATUS_PENDING))
+        (node as any)._statusFlags &= ~STATUS_UNINITIALIZED;
     }
     const prevOverride = node._overrideValue;
     node._overrideValue = NOT_PENDING;

@@ -2224,11 +2224,13 @@ describe("isPending and latest with async upstream and downstream", () => {
     });
 
     flush();
-    // Initial load
+    // Initial load: once resolved, latest() reports the freshly committed value
+    // (previously pinned `undefined` — the shadow computed cached the committed
+    // value mid-transition, #2829).
     resolveAsync!();
     await Promise.resolve();
     flush();
-    expect(pairs.at(-1)).toEqual([false, undefined]);
+    expect(pairs.at(-1)).toEqual([false, 10]);
 
     // Change signal - async in flight
     setX(2);
@@ -2373,8 +2375,8 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveB!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, undefined]);
-    expect(pairsB.at(-1)).toEqual([false, undefined]);
+    expect(pairsA.at(-1)).toEqual([false, 10]);
+    expect(pairsB.at(-1)).toEqual([false, 11]);
 
     // Change signal - both re-fire
     setX(2);
@@ -2547,9 +2549,9 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveC!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([false, undefined]);
-    expect(pairsB.at(-1)).toEqual([false, undefined]);
-    expect(pairsC.at(-1)).toEqual([false, undefined]);
+    expect(pairsA.at(-1)).toEqual([false, 10]);
+    expect(pairsB.at(-1)).toEqual([false, 100]);
+    expect(pairsC.at(-1)).toEqual([false, 1000]);
 
     // Change signal - all three re-fire
     setX(2);
