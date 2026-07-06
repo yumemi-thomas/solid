@@ -283,6 +283,24 @@ function AsyncCondBeforeFor() {
 }
 
 // ---------------------------------------------------------------------------
+// 13c. Sync && condition before a <For> — control for 13b (PR #2827): the
+// condition memo resolves on its first pull, so no retry-leak is possible.
+// Guards that the single-pull path claims the server h4 in place and the For
+// rows' ids stay aligned.
+let setSyncForRows!: (v: string[]) => void;
+function SyncCondBeforeFor() {
+  const [show] = createSignal(true);
+  const [rows, set] = createSignal(["a", "b"]);
+  setSyncForRows = set;
+  return (
+    <div>
+      {show() && <h4>shown</h4>}
+      <For each={rows()}>{x => <div>{x}</div>}</For>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 14. Streamed boundary with loose text, marker-bounded between siblings.
 // Exercises insert's swapped-region re-claim on the `<!--$-->…<!--/-->` walk:
 // the Loading hole shares its parent with static siblings, so after the $df
@@ -455,11 +473,15 @@ export const scenarios: Scenario[] = [
     expectedText: "shownab",
     update: () => setForRows(["a", "b", "c"]),
     expectedTextAfterUpdate: "shownabc",
-    stableSelector: "h4",
-    knownFailure:
-      "server sync-memo re-pulls leak child-id slots INSIDE the hole's own scope " +
-      "(h4 emits _hk=10003, client claims 10001) — hole scopes protect siblings " +
-      "but not within-hole retries; fixed by PR #2827's owner reset on pull"
+    stableSelector: "h4"
+  },
+  {
+    name: "sync-cond-before-for",
+    App: SyncCondBeforeFor,
+    expectedText: "shownab",
+    update: () => setSyncForRows(["a", "b", "c"]),
+    expectedTextAfterUpdate: "shownabc",
+    stableSelector: "h4"
   },
   {
     name: "bounded-streamed-text",
