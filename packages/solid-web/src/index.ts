@@ -236,10 +236,13 @@ export function Portal<T extends boolean = false, S extends boolean = false>(pro
       );
       return () => {
         dispose!();
+        // remove [startMarker, endMarker] inclusive — endMarker was appended
+        // by this same effect run and must not survive the cleanup
         let c: Node | null = startMarker;
-        while (c && c !== endMarker) {
+        while (c) {
           const n: Node | null = c.nextSibling;
           m.removeChild(c);
+          if (c === endMarker) break;
           c = n;
         }
       };
