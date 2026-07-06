@@ -106,20 +106,23 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
   } else if (this._type === EFFECT_RENDER) {
     this._queue.notify(this, STATUS_PENDING | STATUS_ERROR, actualStatus, actualError);
     if (__DEV__ && _hitUnhandledAsync) {
+      // Async without a `Loading` ancestor is legal (the mount defers), so this
+      // is a consistent FYI — an `Errored` above must not swallow it. The old
+      // STATUS_ERROR re-notify here dated from when enforcement routed the
+      // pending to the error boundary; that both suppressed the warning and
+      // showed the error fallback in dev only (#2822).
       resetUnhandledAsync();
-      if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) {
-        const message =
-          "[ASYNC_OUTSIDE_LOADING_BOUNDARY] An async value was read outside a Loading boundary. The root mount will be deferred until all pending async settles.";
-        emitDiagnostic({
-          code: "ASYNC_OUTSIDE_LOADING_BOUNDARY",
-          kind: "async",
-          severity: "warn",
-          message,
-          ownerId: this.id,
-          ownerName: this._name
-        });
-        console.warn(message);
-      }
+      const message =
+        "[ASYNC_OUTSIDE_LOADING_BOUNDARY] An async value was read outside a Loading boundary. The root mount will be deferred until all pending async settles.";
+      emitDiagnostic({
+        code: "ASYNC_OUTSIDE_LOADING_BOUNDARY",
+        kind: "async",
+        severity: "warn",
+        message,
+        ownerId: this.id,
+        ownerName: this._name
+      });
+      console.warn(message);
     }
   }
 }

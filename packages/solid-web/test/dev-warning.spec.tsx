@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test, vi, afterEach } from "vitest";
-import { createMemo, Loading, flush } from "solid-js";
+import { createMemo, Errored, Loading, flush } from "solid-js";
 import { render } from "../src/index.js";
 
 describe("Dev-mode async warning", () => {
@@ -32,6 +32,41 @@ describe("Dev-mode async warning", () => {
     }).not.toThrow();
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Loading boundary"));
+    warnSpy.mockRestore();
+  });
+
+  test("warns through a wrapping Errored — pending is not an error (#2822)", async () => {
+    div = document.createElement("div");
+    document.body.appendChild(div);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    let resolveFn!: (v: string) => void;
+    const promise = new Promise<string>(r => {
+      resolveFn = r;
+    });
+
+    expect(() => {
+      disposer = render(() => {
+        const value = createMemo(() => promise);
+        return (
+          <Errored fallback={<div>error</div>}>
+            <div>{value()}</div>
+          </Errored>
+        );
+      }, div);
+    }).not.toThrow();
+
+    // the Errored must not swallow the diagnostic...
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Loading boundary"));
+
+    // ...nor catch the pending as an error: the mount defers, then commits.
+    expect(div.textContent).not.toContain("error");
+    resolveFn("ready");
+    await promise;
+    flush();
+    await Promise.resolve();
+    flush();
+    expect(div.textContent).toBe("ready");
     warnSpy.mockRestore();
   });
 

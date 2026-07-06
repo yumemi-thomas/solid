@@ -48,7 +48,12 @@ describe("enforceLoadingBoundary", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it("error is caught by createErrorBoundary when no load boundary", () => {
+  it("warns through createErrorBoundary — pending is not an error (#2822)", () => {
+    // A pending async read without a `Loading` ancestor defers the mount; it is
+    // not an error, so an `Errored` above must neither catch it nor suppress
+    // the diagnostic. (Enforcement used to route the pending to the error
+    // boundary, which showed the error fallback in dev only — a dev/prod
+    // divergence — and hid the warning.)
     enforceLoadingBoundary(true);
     let caughtError: unknown;
 
@@ -66,8 +71,8 @@ describe("enforceLoadingBoundary", () => {
       });
     }).not.toThrow();
 
-    expect(caughtError).toBeDefined();
-    expect(warnSpy).not.toHaveBeenCalled();
+    expect(caughtError).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Loading boundary"));
   });
 
   it("does not warn when disabled", () => {
