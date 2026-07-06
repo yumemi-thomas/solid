@@ -1354,6 +1354,129 @@ describe("Proxy invariant correctness", () => {
     expect(2 in list).toBe(false);
     expect(Object.keys(list).filter(k => k !== "length")).not.toContain("2");
   });
+
+  test("getOwnPropertyDescriptor reports the written value, not the stale base value", () => {
+    const [state, setState] = createStore({ count: 1 });
+    setState(s => {
+      s.count++;
+    });
+    flush();
+    expect(state.count).toBe(2);
+    expect(Object.getOwnPropertyDescriptor(state, "count")?.value).toBe(2);
+
+    // and it must keep agreeing on later writes, not just the first
+    setState(s => {
+      s.count++;
+    });
+    flush();
+    expect(state.count).toBe(3);
+    expect(Object.getOwnPropertyDescriptor(state, "count")?.value).toBe(3);
+  });
+
+  test("getOwnPropertyDescriptors agrees with reads for string and symbol keys", () => {
+    const sym = Symbol("count");
+    const [state, setState] = createStore({ a: "old", b: 1, [sym]: 1 });
+    setState(s => {
+      s.a = "new";
+      s[sym] = 2;
+    });
+    flush();
+    const descs = Object.getOwnPropertyDescriptors(state);
+    expect(state[sym]).toBe(2);
+    expect(descs.a.value).toBe("new");
+    expect(descs.a.enumerable).toBe(true);
+    expect(descs.b.value).toBe(1);
+    expect(Object.getOwnPropertyDescriptor(state, sym)?.value).toBe(2);
+    expect(descs[sym].value).toBe(2);
+  });
+
+  test("descriptor behavior for added and deleted keys is unchanged", () => {
+    const [state, setState] = createStore<Record<string, number>>({ kept: 1, dropped: 2 });
+    setState(s => {
+      s.added = 3;
+      delete s.dropped;
+    });
+    flush();
+    expect(Object.getOwnPropertyDescriptor(state, "added")?.value).toBe(3);
+    expect(Object.getOwnPropertyDescriptor(state, "dropped")).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(state, "kept")?.value).toBe(1);
+  });
+
+  test("written non-configurable properties keep satisfying the proxy invariant", () => {
+    // The proxy target is the internal node object, not the source object.
+    const source = {};
+    Object.defineProperty(source, "locked", {
+      value: 1,
+      enumerable: true,
+      writable: false,
+      configurable: false
+    });
+    const [state, setState] = createStore<{ locked: number }>(source);
+    setState(s => {
+      s.locked = 2;
+    });
+    flush();
+    expect(state.locked).toBe(2);
+    expect(() => Object.keys(state)).not.toThrow();
+    expect(() => ({ ...state })).not.toThrow();
+    const desc = Object.getOwnPropertyDescriptor(state, "locked");
+    expect(desc?.value).toBe(2);
+    expect(desc?.configurable).toBe(true);
+  });
+
+  test("writes preserve the base descriptor's structure, matching plain assignment semantics", () => {
+    const source = { visible: 1 };
+    Object.defineProperty(source, "hidden", {
+      value: 10,
+      enumerable: false,
+      writable: true,
+      configurable: true
+    });
+    const [state, setState] = createStore<{ visible: number; hidden: number }>(source);
+    setState(s => {
+      s.hidden = 20;
+    });
+    flush();
+    expect(state.hidden).toBe(20);
+    const desc = Object.getOwnPropertyDescriptor(state, "hidden");
+    expect(desc?.value).toBe(20);
+    expect(desc?.enumerable).toBe(false);
+    expect(Object.keys(state)).toEqual(["visible"]);
+  });
+
+  test("written accessor properties keep accessor descriptors", () => {
+    const source = {
+      _count: 1,
+      get count() {
+        return this._count;
+      },
+      set count(value: number) {
+        this._count = value;
+      }
+    };
+    const [state, setState] = createStore(source);
+    setState(s => {
+      s.count = 2;
+    });
+    flush();
+    const desc = Object.getOwnPropertyDescriptor(state, "count");
+    expect(desc?.get).toBe(Object.getOwnPropertyDescriptor(source, "count")?.get);
+    expect(desc?.set).toBe(Object.getOwnPropertyDescriptor(source, "count")?.set);
+    expect("value" in desc!).toBe(false);
+  });
+
+  test("writing over an inherited property yields an own data descriptor and a safe snapshot", () => {
+    // This used to return no descriptor, which also crashed snapshot().
+    const proto = { label: "proto" };
+    const [state, setState] = createStore<{ label: string }>(Object.create(proto));
+    setState(s => {
+      s.label = "own";
+    });
+    flush();
+    expect(state.label).toBe("own");
+    expect(Object.getOwnPropertyDescriptor(state, "label")?.value).toBe("own");
+    expect(snapshot(state).label).toBe("own");
+  });
 });
 
 describe("Store key handling and tracked truncation", () => {

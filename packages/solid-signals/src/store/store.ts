@@ -305,7 +305,18 @@ export function getPropertyDescriptor(
   if (override && property in override) {
     if (override[property] === $DELETED) return void 0;
     const overrideDesc = Reflect.getOwnPropertyDescriptor(override, property);
-    if (overrideDesc?.get || overrideDesc?.set || !(property in source)) return overrideDesc;
+    if (overrideDesc?.get || overrideDesc?.set) return overrideDesc;
+    // Plain writes live in the override while the source keeps its old value.
+    // Preserve the source descriptor flags, but report the current override
+    // value. Source accessors cannot be patched with a value, and inherited
+    // properties have no source own descriptor, so those keep their descriptor.
+    const baseDesc = Reflect.getOwnPropertyDescriptor(source, property);
+    if (!baseDesc) return overrideDesc;
+    if (baseDesc.get || baseDesc.set) return baseDesc;
+    // Reflect returns a fresh descriptor, so patching in place is safe and
+    // avoids an allocation on Object.keys/spread over written stores.
+    baseDesc.value = override[property];
+    return baseDesc;
   }
   return Reflect.getOwnPropertyDescriptor(source, property);
 }
