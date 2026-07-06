@@ -85,15 +85,26 @@ export const REACTIVE_WRITE_IN_OWNED_SCOPE_REFRESH_MESSAGE =
 export let tracking = false;
 export let stale = false;
 export let pendingCheckActive = false;
-export let foundPending = false;
 export let latestReadActive = false;
 export let context: Owner | null = null;
 export let currentOptimisticLane: OptimisticLane | null = null;
-let pendingCheckSources: Set<Signal<any> | Computed<any>> | null = null;
-// Sources whose value the current isPending() probe observed as the fresh
-// transition-held `_pendingValue` (not the stale committed value) — see the
-// pair-consistency rule in `isPending` (#2831).
-let pendingCheckFreshReads: Set<Signal<any> | Computed<any>> | null = null;
+
+/**
+ * Per-probe state for an active isPending() call. `pendingCheckActive` stays a
+ * separate boolean because it doubles as the hot-path "intercept reads" toggle
+ * (flipped off during nested reads); the probe object holds everything scoped
+ * to one isPending() invocation. Invariant: `pendingCheckActive === true`
+ * implies `pendingProbe !== null`.
+ */
+interface PendingProbe {
+  found: boolean;
+  sources: Set<Signal<any> | Computed<any>>;
+  // Sources whose value this probe observed as the fresh transition-held
+  // `_pendingValue` (not the stale committed value) — see the pair-consistency
+  // rule in `isPending` (#2831).
+  freshReads: Set<Signal<any> | Computed<any>>;
+}
+let pendingProbe: PendingProbe | null = null;
 
 export let snapshotCaptureActive = false;
 export let snapshotSources: Set<any> | null = null;
@@ -303,15 +314,12 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         }
       } else {
         el._pendingValue = value;
-        // Transition-held sync recompute is a write path like setSignal/asyncWrite:
-        // maintain the isPending()/latest() companion nodes so sync derivations of
-        // held sources are visible to them (#2831). Both writes are transition-
-        // scoped (optimistic) and auto-revert/re-derive at commit. Skipped for
-        // plain flushes where the pending value commits before effects run.
-        if (activeTransition || el._transition) {
-          if (el._pendingSignal) updatePendingSignal(el);
-          if (el._latestValueComputed) setSignal(el._latestValueComputed, value);
-        }
+        // Transition-held sync recompute is a write path like setSignal/asyncWrite,
+        // so sync derivations of held sources stay visible to isPending()/latest()
+        // (#2831). Both companion writes are transition-scoped (optimistic) and
+        // auto-revert/re-derive at commit. Skipped for plain flushes where the
+        // pending value commits before effects run.
+        if (activeTransition || el._transition) syncCompanions(el, value);
       }
 
       // Correct override for async resolution (non-lane path) unless user wrote since lane creation
@@ -649,6 +657,22 @@ export function untrack<T>(fn: () => T, strictReadLabel?: string | false): T {
   }
 }
 
+/**
+ * Bring a computed to a readable state: lazy/disposed nodes are (re)computed;
+ * an isPending() probe (`refresh`) additionally pulls the node fully up to
+ * date so its status flags reflect the current graph.
+ */
+function prepareComputed(comp: Computed<unknown>, refresh: boolean): void {
+  if (comp._flags & REACTIVE_LAZY) {
+    comp._flags &= ~REACTIVE_LAZY;
+    recompute(comp as Computed<any>, true);
+  } else if (comp._flags & REACTIVE_DISPOSED) {
+    recompute(comp as Computed<any>, true);
+  } else if (refresh) {
+    updateIfNecessary(comp);
+  }
+}
+
 export function read<T>(el: Signal<T> | Computed<T>): T {
   // Handle latest() mode: read from _latestValueComputed
   // Checked before isPending so that isPending(() => latest(x)) checks
@@ -693,37 +717,29 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     return value as T;
   }
 
+  let c = context;
+  if ((c as Root)?._root) c = (c as Root)._parentComputed;
+  const computed = el as Partial<Computed<unknown>>;
+  const firewall = (el as FirewallSignal<any>)._firewall;
+  const owner = firewall || el;
+
   // Handle isPending() mode: collect pending state while preserving normal read semantics.
+  // Probe mode is suspended while preparing the node so nested reads during a
+  // recompute don't collect into the probe.
   if (pendingCheckActive) {
-    const firewall = (el as FirewallSignal<any>)._firewall;
-    const prevCheck = pendingCheckActive;
     pendingCheckActive = false;
-    let c = context;
-    if ((c as Root)?._root) c = (c as Root)._parentComputed;
-    const owner = firewall || (el as Computed<any>);
-    const pendingComputed = el as Partial<Computed<unknown>>;
-    if (typeof pendingComputed._fn === "function") {
-      const comp = el as Computed<unknown>;
-      if (comp._flags & REACTIVE_LAZY) {
-        comp._flags &= ~REACTIVE_LAZY;
-        recompute(comp as Computed<any>, true);
-      } else if (comp._flags & REACTIVE_DISPOSED) {
-        recompute(comp as Computed<any>, true);
-      } else {
-        updateIfNecessary(comp);
-      }
-    }
-    if (c && owner._statusFlags & STATUS_PENDING && owner._statusFlags & STATUS_UNINITIALIZED) {
+    if (typeof computed._fn === "function") prepareComputed(el as Computed<unknown>, true);
+    if (c && owner._statusFlags! & STATUS_PENDING && owner._statusFlags! & STATUS_UNINITIALIZED) {
       if (tracking && el !== c) link(el, c as Computed<any>);
-      pendingCheckActive = prevCheck;
-      throw owner._error;
+      pendingCheckActive = true;
+      throw (owner as Computed<any>)._error;
     }
     if (firewall && el._overrideValue !== undefined) {
       if (
         el._overrideValue !== NOT_PENDING &&
         (firewall._inFlight || !!(firewall._statusFlags & STATUS_PENDING))
       ) {
-        foundPending = true;
+        pendingProbe!.found = true;
       }
       collectPendingSources(el);
       collectPendingSources(firewall);
@@ -732,22 +748,10 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
       collectPendingSources(el);
       if (firewall) collectPendingSources(firewall);
     }
-    pendingCheckActive = prevCheck;
+    pendingCheckActive = true;
+  } else if (typeof computed._fn === "function") {
+    prepareComputed(el as Computed<unknown>, false);
   }
-
-  let c = context;
-  if ((c as Root)?._root) c = (c as Root)._parentComputed;
-  const computed = el as Partial<Computed<unknown>>;
-  if (typeof computed._fn === "function") {
-    const comp = el as Computed<unknown>;
-    if (comp._flags & REACTIVE_LAZY) {
-      comp._flags &= ~REACTIVE_LAZY;
-      recompute(comp as Computed<any>, true);
-    } else if (comp._flags & REACTIVE_DISPOSED) {
-      recompute(comp as Computed<any>, true);
-    }
-  }
-  const owner = (el as FirewallSignal<any>)._firewall || el;
 
   if (
     !computed._fn &&
@@ -921,11 +925,11 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
   // the probe doesn't pair "pending" with the new value (#2831).
   if (
     pendingCheckActive &&
-    pendingCheckFreshReads !== null &&
+    pendingProbe !== null &&
     el._pendingValue !== NOT_PENDING &&
     value === el._pendingValue
   )
-    pendingCheckFreshReads.add(el);
+    pendingProbe.freshReads.add(el);
   if (
     !c &&
     owner === el &&
@@ -1012,13 +1016,7 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     el._pendingValue = v;
   }
 
-  // Update pending signal if it exists (for isPending reactivity)
-  if (el._pendingSignal) updatePendingSignal(el);
-
-  // Also write to latest value computed if it exists (for latest())
-  if (el._latestValueComputed) {
-    setSignal(el._latestValueComputed, v);
-  }
+  syncCompanions(el, v);
 
   el._time = clock;
   insertSubs(el, isOptimistic);
@@ -1117,9 +1115,10 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
 }
 
 function collectPendingSources(el: Signal<any> | Computed<any>): void {
-  pendingCheckSources?.add(el);
+  if (!pendingProbe) return;
+  pendingProbe.sources.add(el);
   const owner = (el as FirewallSignal<any>)._firewall || el;
-  if (owner !== el) pendingCheckSources?.add(owner);
+  if (owner !== el) pendingProbe.sources.add(owner);
 }
 
 /**
@@ -1146,16 +1145,10 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
       (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING))
     );
   }
-  // Optimistic nodes with active override:
+  // Optimistic nodes with active override stay pending while the override is
+  // active (internal pending/latest helpers carry `_parentSource` and returned
+  // in the first branch above).
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
-    if (comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED))
-      return true;
-    // Internal pending/latest helpers carry `_parentSource`; user-created
-    // optimistic nodes just stay pending while the override is active.
-    if (el._parentSource) {
-      const lane = el._optimisticLane ? findLane(el._optimisticLane) : null;
-      return !!(lane && lane._pendingAsync.size > 0);
-    }
     return true;
   }
   // Upstream: value held in transition (not during initial load). Excluded for a
@@ -1173,6 +1166,17 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
   return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+}
+
+/**
+ * Keep the lazily-created isPending()/latest() companion nodes in sync with a
+ * new value. Every path that produces a value for `el` — direct set, async
+ * resolution, transition-held sync recompute — must route through here so a
+ * new write path can't silently skip the companions (#2831).
+ */
+export function syncCompanions<T>(el: Signal<T> | Computed<T>, value: T): void {
+  if (el._pendingSignal) updatePendingSignal(el);
+  if (el._latestValueComputed) setSignal(el._latestValueComputed, value);
 }
 
 /**
@@ -1282,27 +1286,26 @@ export function latest<T>(fn: () => T): T {
  */
 export function isPending(fn: () => any): boolean {
   const prevPendingCheck = pendingCheckActive;
-  const prevFoundPending = foundPending;
-  const prevPendingCheckSources = pendingCheckSources;
-  const prevPendingCheckFreshReads = pendingCheckFreshReads;
+  const prevProbe = pendingProbe;
   pendingCheckActive = true;
-  foundPending = false;
-  pendingCheckSources = new Set();
-  pendingCheckFreshReads = new Set();
+  const probe: PendingProbe = (pendingProbe = {
+    found: false,
+    sources: new Set(),
+    freshReads: new Set()
+  });
   const collectPending = () => {
     pendingCheckActive = false;
     const prevStrictRead = __DEV__ ? strictRead : false;
     if (__DEV__) strictRead = false;
     try {
-      pendingCheckSources!.forEach(source => {
+      probe.sources.forEach(source => {
         // Pair consistency: if the probe's read of this source observed the
         // fresh transition-held `_pendingValue` (non-stale readers such as
         // user effects do), the value is not stale to this reader and must
         // not be reported as pending — otherwise [isPending(x), x()] pairs
         // pending with the new value (#2831). Readers that observed the
         // committed (stale) value keep the signal's verdict.
-        if (read(getPendingSignal(source)) && !pendingCheckFreshReads!.has(source))
-          foundPending = true;
+        if (read(getPendingSignal(source)) && !probe.freshReads.has(source)) probe.found = true;
       });
     } finally {
       if (__DEV__) strictRead = prevStrictRead;
@@ -1312,22 +1315,20 @@ export function isPending(fn: () => any): boolean {
   try {
     fn();
     collectPending();
-    return foundPending;
+    return probe.found;
   } catch (e) {
     collectPending();
     if (e instanceof NotReadyError) {
-      if (foundPending && !(e.source?._statusFlags & STATUS_UNINITIALIZED)) return true;
+      if (probe.found && !(e.source?._statusFlags & STATUS_UNINITIALIZED)) return true;
       if (context) throw e;
     }
     // When a thunk throws during pending check (e.g., accessing undefined values
-    // from uninitialized async memos), return foundPending. The error indicates
+    // from uninitialized async memos), return probe.found. The error indicates
     // we're reading from something not yet ready.
-    return foundPending;
+    return probe.found;
   } finally {
     pendingCheckActive = prevPendingCheck;
-    foundPending = prevFoundPending;
-    pendingCheckSources = prevPendingCheckSources;
-    pendingCheckFreshReads = prevPendingCheckFreshReads;
+    pendingProbe = prevProbe;
   }
 }
 

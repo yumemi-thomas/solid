@@ -10,7 +10,7 @@ import {
   STATUS_PENDING,
   STATUS_UNINITIALIZED
 } from "./constants.js";
-import { context, setSignal, untrack, updatePendingSignal } from "./core.js";
+import { context, setSignal, syncCompanions, untrack, updatePendingSignal } from "./core.js";
 import { emitDiagnostic } from "./dev.js";
 import { NotReadyError, StatusError } from "./error.js";
 import { trimStaleDeps } from "./graph.js";
@@ -237,10 +237,10 @@ export function handleAsync<T>(
       if ((!isEffect && wasUninitialized) || !equals || !equals(value, prevValue)) {
         el._value = value;
         el._time = clock;
-        // Write to _latestValueComputed so latest() effects get independent lanes
-        if (el._latestValueComputed) {
-          setSignal(el._latestValueComputed, value);
-        }
+        // The latest() shadow write gives latest() effects independent lanes; the
+        // _pendingSignal update is a no-op repeat of the clearStatus() call above
+        // (computePendingState doesn't read _value).
+        syncCompanions(el, value);
         insertSubs(el, true);
       }
     } else {
