@@ -457,6 +457,80 @@ describe("Testing Portal insert effect ownership (#2758)", () => {
   });
 });
 
+describe("Testing Portal marker cleanup", () => {
+  // empty text markers don't serialize, so these assert on childNodes.length —
+  // innerHTML checks stay green even when markers are stranded
+  test("disposing a Portal removes its markers from the mount", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+
+    const disposer = render(
+      () => (
+        <Portal mount={mount}>
+          <span>content</span>
+        </Portal>
+      ),
+      div
+    );
+    expect(mount.querySelector("span")).toBeTruthy();
+
+    disposer();
+    expect(mount.childNodes.length).toBe(0);
+  });
+
+  test("toggling a Portal does not accumulate markers in the mount", () => {
+    const div = document.createElement("div");
+    const mount = document.createElement("div");
+    const [open, setOpen] = createSignal(false);
+
+    const disposer = render(
+      () => (
+        <Show when={open()}>
+          <Portal mount={mount}>
+            <span>modal</span>
+          </Portal>
+        </Show>
+      ),
+      div
+    );
+
+    for (let i = 0; i < 5; i++) {
+      setOpen(true);
+      flush();
+      expect(mount.querySelector("span")).toBeTruthy();
+      setOpen(false);
+      flush();
+      expect(mount.childNodes.length).toBe(0);
+    }
+    disposer();
+  });
+
+  test("switching mounts leaves no markers behind in either mount", () => {
+    const div = document.createElement("div");
+    const mountA = document.createElement("div");
+    const mountB = document.createElement("div");
+    const [mount, setMount] = createSignal(mountA);
+
+    const disposer = render(
+      () => (
+        <Portal mount={mount()}>
+          <span>content</span>
+        </Portal>
+      ),
+      div
+    );
+    expect(mountA.querySelector("span")).toBeTruthy();
+
+    setMount(mountB);
+    flush();
+    expect(mountA.childNodes.length).toBe(0);
+    expect(mountB.querySelector("span")).toBeTruthy();
+
+    disposer();
+    expect(mountB.childNodes.length).toBe(0);
+  });
+});
+
 describe("Testing a Portal with direct reactive children", () => {
   let div = document.createElement("div"),
     disposer: () => void,
