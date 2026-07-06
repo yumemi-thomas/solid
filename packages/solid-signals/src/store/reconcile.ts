@@ -1,4 +1,4 @@
-import { read, setSignal } from "../core/index.js";
+import { setSignal } from "../core/index.js";
 import {
   $PROXY,
   $TARGET,
@@ -44,6 +44,29 @@ function itemKey(item: any, keyFn: (item: NonNullable<any>) => any) {
 
 function keyedMatch(a: any, b: any, keyFn: (item: NonNullable<any>) => any) {
   return a === b || (isWrappable(a) && isWrappable(b) && keyFn(a) === keyFn(b));
+}
+
+// Array reconciliation updates the slots it visits, then swaps STORE_VALUE.
+// Previously tracked keys that are absent from `next` still need invalidating,
+// and `in` dependencies should follow the new value's membership. Use
+// membership rather than length arithmetic so sparse arrays and named array
+// props behave like normal property reads.
+function syncArrayNodeMembership(target: any, next: any) {
+  let nodes = target[STORE_NODE];
+  if (nodes) {
+    const keys = Object.keys(nodes);
+    for (let i = 0, len = keys.length; i < len; i++) {
+      const key = keys[i];
+      key in next || setSignal(nodes[key], undefined);
+    }
+  }
+  if ((nodes = target[STORE_HAS])) {
+    const keys = Object.keys(nodes);
+    for (let i = 0, len = keys.length; i < len; i++) {
+      const key = keys[i];
+      setSignal(nodes[key], key in next);
+    }
+  }
 }
 
 // Reconcile a single array slot: recurse into a wrappable pair, otherwise replace
@@ -128,6 +151,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
           applyArrayItem(next[j], temp[j], target, arrayNodes?.[j], keyFn);
         }
 
+        syncArrayNodeMembership(target, next);
         (changed || prevLength !== next.length) && notifySelf(target);
         prevLength !== next.length &&
           arrayNodes?.length &&
@@ -175,6 +199,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       }
     }
 
+    syncArrayNodeMembership(target, next);
     if (prevLength !== next.length) {
       changed = true;
       arrayNodes?.length && setSignal(arrayNodes.length, next.length);
@@ -279,6 +304,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
         }
 
         const nextLength = next.length;
+        syncArrayNodeMembership(target, next);
         (changed || prevLength !== nextLength) && notifySelf(target);
         prevLength !== nextLength && nodes?.length && setSignal(nodes.length, nextLength);
         return;
@@ -326,6 +352,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
     const nextLength = next.length;
 
+    syncArrayNodeMembership(target, next);
     if (prevLength !== nextLength) {
       changed = true;
       nodes?.length && setSignal(nodes.length, nextLength);

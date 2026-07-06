@@ -227,6 +227,199 @@ describe("setState with reconcile", () => {
     setState(reconcile([5], "id"));
     expect(snapshot(state)).toEqual([5]);
   });
+
+  test("Reconcile keyed array shrink notifies tracked index reads and clears stale values", () => {
+    const [state, setState] = createStore<{ id: number }[]>([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    let last: { id: number } | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state[2],
+        v => {
+          last = v;
+        }
+      );
+    });
+    flush();
+    expect(last).toEqual({ id: 3 });
+
+    setState(reconcile([{ id: 1 }], "id"));
+    flush();
+
+    expect(state.length).toBe(1);
+    expect(last).toBe(undefined);
+    // untracked reads must agree with length, not the stale node cache
+    expect(state[2]).toBe(undefined);
+  });
+
+  test("Reconcile non-keyed array shrink notifies tracked index reads", () => {
+    const [state, setState] = createStore<string[]>(["a", "b", "c"]);
+    let last: string | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state[1],
+        v => {
+          last = v;
+        }
+      );
+    });
+    flush();
+    expect(last).toBe("b");
+
+    setState(reconcile(["a"], "id"));
+    flush();
+
+    expect(state.length).toBe(1);
+    expect(last).toBe(undefined);
+    expect(state[1]).toBe(undefined);
+  });
+
+  test("Reconcile to empty array clears tracked index reads", () => {
+    const [state, setState] = createStore<{ id: number }[]>([{ id: 1 }, { id: 2 }]);
+    let last: { id: number } | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state[0],
+        v => {
+          last = v;
+        }
+      );
+    });
+    flush();
+    expect(last).toEqual({ id: 1 });
+
+    const empty: { id: number }[] = [];
+    setState(reconcile(empty, "id"));
+    flush();
+
+    expect(state.length).toBe(0);
+    expect(last).toBe(undefined);
+    expect(state[0]).toBe(undefined);
+  });
+
+  test("Reconcile array resize updates tracked `in` checks in both directions", () => {
+    const [state, setState] = createStore<{ id: number }[]>([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    let has2: boolean | undefined;
+    let has5: boolean | undefined;
+    createRoot(() => {
+      createEffect(
+        () => 2 in state,
+        v => {
+          has2 = v;
+        }
+      );
+      createEffect(
+        () => 5 in state,
+        v => {
+          has5 = v;
+        }
+      );
+    });
+    flush();
+    expect(has2).toBe(true);
+    expect(has5).toBe(false);
+
+    setState(reconcile([{ id: 1 }], "id"));
+    flush();
+    expect(has2).toBe(false);
+    expect(2 in state).toBe(false);
+
+    setState(reconcile([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }], "id"));
+    flush();
+    expect(has2).toBe(true);
+    expect(has5).toBe(true);
+    expect(5 in state).toBe(true);
+  });
+
+  test("Reconcile array growth notifies tracked reads of previously missing indices", () => {
+    const [state, setState] = createStore<{ id: number }[]>([{ id: 1 }]);
+    let last: { id: number } | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state[2],
+        v => {
+          last = v;
+        }
+      );
+    });
+    flush();
+    expect(last).toBe(undefined);
+
+    setState(reconcile([{ id: 1 }, { id: 2 }, { id: 3 }], "id"));
+    flush();
+
+    expect(last).toEqual({ id: 3 });
+  });
+
+  test("Reconcile array shrink preserves tracked named array props that remain present", () => {
+    // numeric-coercible names ("1e3" -> 1000, "1.5") are properties, not indices;
+    // node sync is membership-based so they must survive a resize that keeps them
+    type RowsWithProps = { id: number }[] & { "1e3"?: string; "1.5"?: string };
+    const prev: RowsWithProps = Object.assign([{ id: 1 }, { id: 2 }, { id: 3 }], {
+      "1e3": "kept",
+      "1.5": "decimal"
+    });
+    const [state, setState] = createStore(prev);
+    let exponential: string | undefined;
+    let decimal: string | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state["1e3"],
+        v => {
+          exponential = v;
+        }
+      );
+      createEffect(
+        () => state["1.5"],
+        v => {
+          decimal = v;
+        }
+      );
+    });
+    flush();
+    expect(exponential).toBe("kept");
+    expect(decimal).toBe("decimal");
+
+    const next: RowsWithProps = Object.assign([{ id: 1 }], {
+      "1e3": "kept",
+      "1.5": "decimal"
+    });
+    setState(reconcile(next, "id"));
+    flush();
+
+    expect(state["1e3"]).toBe("kept");
+    expect(state["1.5"]).toBe("decimal");
+    expect(exponential).toBe("kept");
+    expect(decimal).toBe("decimal");
+    expect(state.length).toBe(1);
+  });
+
+  test("Reconcile array shrink clears tracked indices on the override path", () => {
+    // a prior setter write installs STORE_OVERRIDE, routing reconcile through
+    // applyStateSlow — shrink must clear removed indices there too
+    const [state, setState] = createStore<{ id: number }[]>([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    setState(s => {
+      s[3] = { id: 4 };
+    });
+    flush();
+    let last: { id: number } | undefined;
+    createRoot(() => {
+      createEffect(
+        () => state[3],
+        v => {
+          last = v;
+        }
+      );
+    });
+    flush();
+    expect(last).toEqual({ id: 4 });
+
+    setState(reconcile([{ id: 1 }], "id"));
+    flush();
+
+    expect(state.length).toBe(1);
+    expect(last).toBe(undefined);
+    expect(state[3]).toBe(undefined);
+  });
   test("Reconcile swaps a property whose value is another store's proxy", () => {
     type Row = { id: number; name: string };
     const [rowA] = createStore<Row>({ id: 1, name: "a" });
