@@ -1331,10 +1331,7 @@ function waitAndResume(
 // shouldHydrate=false: the boundary renders fresh client DOM and lazy's own
 // import() retries through normal channels — never hang hydration silently.
 function reportAssetFailure(err: any) {
-  console.error(
-    "Hydration module preload failed; rendering boundary content on the client:",
-    err
-  );
+  console.error("Hydration module preload failed; rendering boundary content on the client:", err);
 }
 
 function scheduleResumeAfterAssets(
