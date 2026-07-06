@@ -17,7 +17,7 @@ import {
 } from "./store.js";
 
 function unwrap(value: any) {
-  return value?.[$TARGET]?.[STORE_NODE] ?? value;
+  return value?.[$TARGET]?.[STORE_VALUE] ?? value;
 }
 
 function getOverrideValue(value: any, override: any, key: string, optOverride?: any) {
@@ -68,6 +68,9 @@ function applyArrayItem(
 // branches on a `fastPath` boolean, so V8 sees a tighter, more inlinable
 // shape for the overwhelmingly common case of plain stores.
 function applyState(next: any, state: any, keyFn: (item: NonNullable<any>) => any) {
+  // Array items and root calls can pass a store proxy as `next`; normalize to
+  // its raw value or the swap would set a store's STORE_VALUE to its own proxy.
+  next = unwrap(next);
   const target = state?.[$TARGET];
   if (!target) return;
   if (target[STORE_OVERRIDE] || target[STORE_OPTIMISTIC_OVERRIDE]) {
