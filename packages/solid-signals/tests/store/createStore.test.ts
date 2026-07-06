@@ -1344,7 +1344,7 @@ describe("Proxy invariant correctness", () => {
   test("Truncating array length clears stale indices from the store proxy", () => {
     // Writing store.length = N must mark indices >= N as deleted so that `has`,
     // index reads, and Object.keys all reflect the shorter array.
-    const [list, setList] = createStore([1, 2, 3]);
+    const [list, setList] = createStore<number[]>([1, 2, 3]);
     setList(s => {
       s.length = 2;
     });
@@ -1404,14 +1404,15 @@ describe("Proxy invariant correctness", () => {
 
   test("written non-configurable properties keep satisfying the proxy invariant", () => {
     // The proxy target is the internal node object, not the source object.
-    const source = {};
+    // `locked` is added via defineProperty, so widen the literal's type by hand.
+    const source = {} as { locked: number };
     Object.defineProperty(source, "locked", {
       value: 1,
       enumerable: true,
       writable: false,
       configurable: false
     });
-    const [state, setState] = createStore<{ locked: number }>(source);
+    const [state, setState] = createStore(source);
     setState(s => {
       s.locked = 2;
     });
@@ -1425,14 +1426,15 @@ describe("Proxy invariant correctness", () => {
   });
 
   test("writes preserve the base descriptor's structure, matching plain assignment semantics", () => {
-    const source = { visible: 1 };
+    // `hidden` is added via defineProperty, so widen the literal's type by hand
+    const source = { visible: 1 } as { visible: number; hidden: number };
     Object.defineProperty(source, "hidden", {
       value: 10,
       enumerable: false,
       writable: true,
       configurable: true
     });
-    const [state, setState] = createStore<{ visible: number; hidden: number }>(source);
+    const [state, setState] = createStore(source);
     setState(s => {
       s.hidden = 20;
     });
