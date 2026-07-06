@@ -234,17 +234,31 @@ export function handleAsync<T>(
       const isEffect = (el as any)._type;
       const prevValue = el._value;
       const equals = el._equals;
-      if ((!isEffect && wasUninitialized) || !equals || !equals(value, prevValue)) {
-        el._value = value;
-        el._time = clock;
-        // The latest() shadow write gives latest() effects independent lanes; the
-        // _pendingSignal update is a no-op repeat of the clearStatus() call above
-        // (computePendingState doesn't read _value).
-        syncCompanions(el, value);
-        insertSubs(el, true);
+      try {
+        if ((!isEffect && wasUninitialized) || !equals || !equals(value, prevValue)) {
+          el._value = value;
+          el._time = clock;
+          // The latest() shadow write gives latest() effects independent lanes; the
+          // _pendingSignal update is a no-op repeat of the clearStatus() call above
+          // (computePendingState doesn't read _value).
+          syncCompanions(el, value);
+          insertSubs(el, true);
+        }
+      } catch (e) {
+        // A user comparator throwing during async resolution has no caller to
+        // surface to (we're in promise machinery) — route it through the node's
+        // error status so boundaries contain it instead of an unhandled
+        // rejection (#2837).
+        notifyStatus(el, STATUS_ERROR, e);
       }
     } else {
-      setSignal(el, () => value);
+      try {
+        setSignal(el, () => value);
+      } catch (e) {
+        // Same containment as above: setSignal's comparator throw is the only
+        // pre-commit failure here, and there is no user callsite to throw to.
+        notifyStatus(el, STATUS_ERROR, e);
+      }
     }
     settlePendingSource(el);
     schedule();

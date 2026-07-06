@@ -289,8 +289,17 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
       : el._pendingValue === NOT_PENDING
         ? el._value
         : el._pendingValue;
-    const valueChanged =
-      (!isEffect && wasUninitialized) || !el._equals || !el._equals(compareValue, value);
+    let valueChanged = false;
+    try {
+      valueChanged =
+        (!isEffect && wasUninitialized) || !el._equals || !el._equals(compareValue, value);
+    } catch (e) {
+      // A throwing user comparator is an error of this node's computation.
+      // Route it through the same status path as a compute-phase throw so
+      // error boundaries contain it; otherwise it unwinds the scheduler
+      // flush, bypassing every boundary and wedging the queue (#2837).
+      notifyStatus(el, STATUS_ERROR, e);
+    }
 
     // Effects use `_equals: false` (no per-effect closure). The side effects that
     // the equals closure used to perform — flagging the effect dirty and enqueueing
@@ -302,7 +311,10 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
       if (!create) el._queue.enqueue(isEffect, GlobalQueue._runEffect.bind(null, el));
     }
 
-    if (valueChanged) {
+    if (el._error) {
+      // Comparator threw: skip the commit — the node is now errored and the
+      // status propagation above owns downstream notification.
+    } else if (valueChanged) {
       const prevVisible = hasOverride ? el._overrideValue : undefined;
 
       if (create || (isEffect && activeTransition !== el._transition) || isOptimisticDirty) {
@@ -979,10 +991,12 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
 
   if (typeof v === "function") v = (v as (prev: T) => T)(currentValue);
 
+  // Uninitialized check first: the first commit has no previous value, so the
+  // user comparator must not run against `undefined` (matches recompute).
   const valueChanged =
+    !!((el as Computed<T>)._statusFlags & STATUS_UNINITIALIZED) ||
     !el._equals ||
-    !el._equals(currentValue, v) ||
-    !!((el as Computed<T>)._statusFlags & STATUS_UNINITIALIZED);
+    !el._equals(currentValue, v);
   if (!valueChanged) {
     // Re-propagate for optimistic computeds with active override — downstream
     // nodes may have stale _inFlight based on old upstream data.

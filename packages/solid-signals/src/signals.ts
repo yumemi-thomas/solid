@@ -139,6 +139,11 @@ export type EffectFunction<Prev, Next extends Prev = Prev> = (
 ) => (() => void) | void;
 export type EffectBundle<Prev, Next extends Prev = Prev> = {
   effect: EffectFunction<Prev, Next>;
+  /**
+   * Intercepts compute-phase errors (thrown by the compute function or arriving
+   * from upstream sources). Effect-phase throws are NOT routed here — they are
+   * your own imperative code and escalate to the nearest error boundary.
+   */
   error: (err: unknown, cleanup: () => void) => void;
 };
 
@@ -352,7 +357,18 @@ export function createMemo<T>(
  * `createTrackedEffect` (with the tradeoffs noted there).
  *
  * Pass an `EffectBundle` (`{ effect, error }`) instead of a plain function to
- * intercept errors thrown from the compute or effect phases.
+ * intercept **compute-phase** errors — errors thrown by `compute` or arriving
+ * from upstream reactive sources (including async rejections), which your own
+ * code has no frame to `try/catch`. Without an `error` handler a compute-phase
+ * error is logged and the effect simply skips that run — a non-render effect's
+ * reactivity failing does not crash the app. Rethrowing from `error` escalates
+ * it to the nearest error boundary (halting the system if none exists).
+ *
+ * The **effect phase is different**: it is your own imperative code, so handle
+ * failures with `try/catch` where they occur. An uncaught effect-phase throw
+ * is treated as an unhandled application error — caught by the nearest
+ * `createErrorBoundary`/`<Errored>`, and permanently halting the reactive
+ * system if there is none. It is *not* routed to the bundle's `error` handler.
  *
  * ```typescript
  * createEffect<T>(compute, effectFn | { effect, error }, options?: EffectOptions);
