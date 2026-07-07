@@ -56,6 +56,8 @@ function snapshotImpl<T>(
         result[i] = unwrapped;
       }
     }
+    // Deleted trailing slots are skipped above, so restore length to preserve holes.
+    if (result) result.length = len;
   } else {
     const keys = getKeys(item, override);
     for (let i = 0, l = keys.length; i < l; i++) {
