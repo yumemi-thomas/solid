@@ -115,6 +115,7 @@ let pendingProbe: PendingProbe | null = null;
 
 if (__DEV__) {
   InvariantHooks.pendingProbeActive = () => pendingProbe !== null;
+  InvariantHooks.computePendingState = computePendingState;
 }
 
 export let snapshotCaptureActive = false;

@@ -152,6 +152,47 @@ two findings — one real defect, one wrong assumption of mine:
   an optimistic node with an active override and *any* in-flight async
   (its own fetch included) is not complete. Ruled as A17.
 
+## 5c. Companion-vs-oracle census (2026-07-07, #2838 pre-work)
+
+A non-asserting diff logger (`devCensusCompanions`, enabled via the
+`COMPANION_CENSUS` env var) compared every live companion against a fresh
+oracle at the end of every flush across the whole suite. Nine distinct
+divergence fingerprints; the taxonomy:
+
+**Pending companions (6 fingerprints, ~most-hit first):**
+
+| owner state at flush end | companion | oracle |
+| --- | --- | --- |
+| plain node, own async in flight (`sp=1`) | false | true |
+| ACTIVE override, revert target held | false | true |
+| plain node, transition-held `_pendingValue` | false | true |
+| store leaf (uninit) behind refetching firewall | false | true |
+| resting optimistic, refetch in flight | false | true |
+| active override + own fetch in flight | false | true |
+
+**Latest shadows (3 fingerprints, all on settled-or-override owners):**
+
+- shadow holds a stale previous value while the owner is fully settled;
+- shadow reads `undefined` while the owner has a committed value (the V2
+  `[false, undefined]` family);
+- shadow reads `undefined` while an override is ACTIVE (A17 violation via
+  `latest()`: the shadow never mirrored the override).
+
+**The headline finding: every pending divergence is one-directional.**
+Companions only ever *under-report* (`false` when the oracle says `true`) —
+no fingerprint showed a companion stuck `true` against a `false` oracle at a
+flush boundary (the V4 stuck-true case exists but arises past settle, caught
+by INV-4). The probe-driven design misses *activations*: nothing refreshes a
+companion when (1) status flags change (async starts), (2) an override is
+written, (3) a `_pendingValue` hold is written. Shadows additionally
+initialize to `undefined` and never mirror overrides.
+
+**Redesign requirement derived from the census:** the write-driven companion
+must be updated at exactly four transition points — status-flag transitions
+(notifyStatus/clearStatus), override set/clear, pendingValue hold/commit,
+and (for shadows) initialization from the committed value + override
+mirroring. Those four cover all nine fingerprints plus V1–V4.
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose

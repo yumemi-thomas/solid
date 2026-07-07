@@ -3,7 +3,8 @@ import {
   REACTIVE_CHECK,
   REACTIVE_DIRTY,
   REACTIVE_DISPOSED,
-  STATUS_PENDING
+  STATUS_PENDING,
+  STATUS_UNINITIALIZED
 } from "./constants.js";
 import { assertInvariant } from "./dev.js";
 import type { OptimisticLane } from "./lanes.js";
@@ -36,7 +37,9 @@ function isDisposed(node: AnyNode): boolean {
 /** Wired by core.ts at module init to avoid import cycles. */
 export const InvariantHooks: {
   pendingProbeActive: (() => boolean) | null;
-} = { pendingProbeActive: null };
+  /** Fresh oracle for what an isPending companion SHOULD read right now. */
+  computePendingState: ((node: AnyNode) => boolean) | null;
+} = { pendingProbeActive: null, computePendingState: null };
 
 // INV-7: nodes that received a transition-held `_pendingValue`. A node still
 // holding one at quiescence with no queued commit is a leak (#2827 class).
@@ -174,6 +177,77 @@ export function devCheckMergedLaneEmpty(lane: OptimisticLane): void {
     "INV-5",
     "a merged (non-root) lane accumulated pendingAsync/effects — work was routed past findLane()"
   );
+}
+
+/**
+ * Companion-vs-oracle census (#2838 pre-work). A NON-ASSERTING diff logger:
+ * at the end of every flush it compares each live companion's cached state
+ * against a fresh oracle and logs every distinct divergence fingerprint once
+ * (console, `[census]` prefix). Legit lane-scoped windows will show up too —
+ * the census exists to enumerate the full taxonomy of mid-flight divergence
+ * so the write-driven redesign knows every case it must produce, not to
+ * judge them. Enabled only when the COMPANION_CENSUS env var is set (in
+ * addition to `__TEST__`), so normal test runs pay one boolean check.
+ */
+const censusEnabled =
+  typeof globalThis !== "undefined" &&
+  !!(globalThis as any).process?.env?.COMPANION_CENSUS;
+const censusSeen = new Map<string, number>();
+
+export function devCensusCompanions(): void {
+  if (!__TEST__ || !censusEnabled) return;
+  const oracle = InvariantHooks.computePendingState;
+  if (!oracle) return;
+  for (const node of companionOwners) {
+    if (isDisposed(node)) continue;
+    const comp = node as Computed<any>;
+    const hasOverride = node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING;
+    const resting = node._overrideValue === NOT_PENDING;
+    const held = node._pendingValue !== NOT_PENDING;
+    const sp = !!(comp._statusFlags & STATUS_PENDING);
+    const su = !!(comp._statusFlags & STATUS_UNINITIALIZED);
+    const stateKey =
+      `ov=${hasOverride ? "act" : resting ? "rest" : "none"}` +
+      ` held=${+held} sp=${+sp} su=${+su}`;
+
+    const pendingSignal = node._pendingSignal;
+    if (pendingSignal) {
+      const cached = pendingSignal._value;
+      const fresh = oracle(node);
+      if (cached !== fresh) {
+        censusRecord(`pending companion=${cached} oracle=${fresh} ${stateKey}`);
+      }
+    }
+    const shadow = node._latestValueComputed;
+    if (shadow && !(shadow._flags & (REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_DISPOSED))) {
+      // Latest-view oracle: override if active, else the held in-flight
+      // value, else the committed value (A17/A20 read order).
+      const expected = hasOverride
+        ? node._overrideValue
+        : held
+          ? node._pendingValue
+          : node._value;
+      const shadowHeld = shadow._pendingValue !== NOT_PENDING;
+      const effective = shadowHeld ? shadow._pendingValue : shadow._value;
+      if (!Object.is(effective, expected)) {
+        const label =
+          effective === undefined
+            ? "undefined"
+            : Object.is(effective, node._value)
+              ? "committed"
+              : "other-stale";
+        censusRecord(`latest shadow=${label} (held=${+shadowHeld}) oracle-src=${hasOverride ? "override" : held ? "pendingValue" : "value"} ${stateKey}`);
+      }
+    }
+  }
+}
+
+function censusRecord(key: string): void {
+  const n = (censusSeen.get(key) || 0) + 1;
+  censusSeen.set(key, n);
+  // Log first occurrence and powers of two so hot fingerprints are visible
+  // without flooding the output.
+  if ((n & (n - 1)) === 0) console.log(`[census] x${n} ${key}`);
 }
 
 /**

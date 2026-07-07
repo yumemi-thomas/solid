@@ -27,6 +27,7 @@ import {
 import {
   beginAsyncReporterWrites,
   createAsyncReporters,
+  devCensusCompanions,
   devCheckActiveOverrides,
   devCheckFlushStart,
   devCheckMergedLaneEmpty,
@@ -458,6 +459,7 @@ export class GlobalQueue extends Queue {
             if (t._optimisticNodes.includes(n as OptimisticNode)) return true;
           return false;
         });
+        devCensusCompanions();
       }
       if (
         __DEV__ &&
