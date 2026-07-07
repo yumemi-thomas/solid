@@ -62,9 +62,7 @@ describe("equals comparator errors (#2837)", () => {
       setUsers([]);
       flush();
     }).not.toThrow();
-    expect(log).toEqual([
-      "fallback:TypeError: Cannot read properties of undefined (reading 'id')"
-    ]);
+    expect(log).toEqual(["fallback:TypeError: Cannot read properties of undefined (reading 'id')"]);
     log.length = 0;
 
     // The scheduler is not wedged: unrelated updates still flush

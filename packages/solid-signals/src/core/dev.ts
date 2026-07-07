@@ -25,7 +25,8 @@ export type DiagnosticCode =
   | "INVALID_REFRESH_TARGET"
   | "MISSING_EFFECT_FN"
   | "SYNC_NODE_RECEIVED_ASYNC"
-  | "REACTIVITY_HALTED";
+  | "REACTIVITY_HALTED"
+  | "INVARIANT_VIOLATION";
 
 export type DiagnosticKind = "strict-read" | "async" | "write" | "lifecycle" | "owner" | "error";
 
@@ -103,6 +104,27 @@ export const DEV: Dev = __DEV__
       getObservers
     }
   : (undefined as unknown as Dev);
+
+/**
+ * Dev-mode internal consistency check. A failure means the reactive system
+ * contradicted itself (not that user code misbehaved) — see
+ * INTERNALS-ASYNC-STATE.md for the invariant catalog. Throws under __TEST__
+ * so the suite (and fuzzing) treats any violation as a hard failure; logs in
+ * dev builds so user apps degrade instead of crashing.
+ */
+export function assertInvariant(condition: boolean, name: string, message: string): void {
+  if (!__DEV__ || condition) return;
+  const full = `[INVARIANT_VIOLATION] ${name}: ${message}`;
+  emitDiagnostic({
+    code: "INVARIANT_VIOLATION",
+    kind: "error",
+    severity: "error",
+    message: full,
+    data: { invariant: name }
+  });
+  if (typeof __TEST__ !== "undefined" && __TEST__) throw new Error(full);
+  console.error(full);
+}
 
 export function emitDiagnostic(event: Omit<DiagnosticEvent, "sequence">): DiagnosticEvent {
   const entry: DiagnosticEvent = {

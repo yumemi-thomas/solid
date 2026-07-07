@@ -52,6 +52,12 @@ import {
   type OptimisticLane
 } from "./lanes.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
+import {
+  devTrackCompanionOwner,
+  devTrackHeldPending,
+  devTrackOptimistic,
+  InvariantHooks
+} from "./invariants.js";
 import { cleanup, disposeChildren, getNextChildId, markDisposal } from "./owner.js";
 import {
   activeTransition,
@@ -105,6 +111,10 @@ interface PendingProbe {
   freshReads: Set<Signal<any> | Computed<any>>;
 }
 let pendingProbe: PendingProbe | null = null;
+
+if (__DEV__) {
+  InvariantHooks.pendingProbeActive = () => pendingProbe !== null;
+}
 
 export let snapshotCaptureActive = false;
 export let snapshotSources: Set<any> | null = null;
@@ -326,6 +336,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         }
       } else {
         el._pendingValue = value;
+        if (__DEV__) devTrackHeldPending(el);
         // Transition-held sync recompute is a write path like setSignal/asyncWrite,
         // so sync derivations of held sources stay visible to isPending()/latest()
         // (#2831). Both companion writes are transition-scoped (optimistic) and
@@ -342,6 +353,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         insertSubs(el, isOptimisticDirty || hasOverride);
     } else if (hasOverride) {
       el._pendingValue = value;
+      if (__DEV__) devTrackHeldPending(el);
     } else if (el._height != oldHeight) {
       for (let s = el._subs; s !== null; s = s._nextSub) {
         insertIntoHeapHeight(s._sub, s._sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
@@ -1016,6 +1028,7 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     if (!firstOverride) globalQueue.initTransition(resolveTransition(el as any));
     if (firstOverride) {
       el._pendingValue = el._value;
+      if (__DEV__) devTrackHeldPending(el);
       globalQueue._optimisticNodes.push(el);
     }
 
@@ -1025,9 +1038,11 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     el._optimisticLane = lane;
 
     el._overrideValue = v;
+    if (__DEV__) devTrackOptimistic(el);
   } else {
     if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
     el._pendingValue = v;
+    if (__DEV__) devTrackHeldPending(el);
   }
 
   syncCompanions(el, v);
@@ -1124,6 +1139,7 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
       el._pendingSignal._parentSource = el;
     }
     if (computePendingState(el)) setSignal(el._pendingSignal, true);
+    if (__DEV__) devTrackCompanionOwner(el);
   }
   return el._pendingSignal;
 }
@@ -1235,6 +1251,7 @@ function getLatestValueComputed<T>(el: Signal<T> | Computed<T>): Computed<T> {
     context = null; // Detach from owner so it isn't disposed with effects
     el._latestValueComputed = optimisticComputed(() => read(el));
     el._latestValueComputed._parentSource = el; // Parent-child lane relationship
+    if (__DEV__) devTrackCompanionOwner(el);
     context = prevContext;
     pendingCheckActive = prevCheck;
     latestReadActive = prevPending;
