@@ -44,6 +44,9 @@ Tier A.
   async resolution must not clobber the override (`_overrideSinceLane`).
   The fresh value becomes the revert target instead. *Inferred from the
   `_overrideSinceLane` machinery.* — **VERDICT: undecided (2026-07-06), revisit.**
+  Current behavior characterized in `tests/spec-async-open-questions.test.ts`:
+  in the simple graph the override stays visible until its transition
+  completes, then the node reverts to the *fresh* async value.
 
 ## Tier C (open — needs decision)
 
@@ -53,7 +56,8 @@ Tier A.
   report `true` (data is refetching) or `false` (no stale view is held)?
   Current behavior: the companion keeps its lane-scoped verdict — `false`
   after revert — while a fresh `computePendingState` would say `true`.
-  (Surfaced by narrowing INV-4; see INTERNALS-ASYNC-STATE.md §5a.)
+  (Surfaced by narrowing INV-4; see INTERNALS-ASYNC-STATE.md §5a.
+  Characterized in `tests/spec-async-open-questions.test.ts`.)
 - [ ] **C2 — Subscriber lane loss on revert.** `resolveOptimisticNodes` clears
   subscriber lanes when a reverted value propagates ("reversion" branch of
   `insertSubs`). A subscriber belonging to a different, still-live lane loses
@@ -64,6 +68,34 @@ Tier A.
   render-effect notification. In pure-signals graphs a memo that re-blocks on
   the same source after pruning never re-registers — is the transition allowed
   to complete "early" there (ties into C1)?
+- [ ] **C4 — Ambient override visibility depends on entanglement (found
+  2026-07-06).** An untracked/ambient read of an *active* override returns
+  the override in a simple graph, but the **committed** value when the node's
+  transition is entangled (merged) with another async source — while tracked
+  lane-routed readers see the override in both cases. Which read is right?
+  Both halves characterized in `tests/spec-async-open-questions.test.ts`.
+
+## Known violations (expected failures, found 2026-07-06)
+
+Two ruled Tier A propositions are violated in the **blocked-merged window**
+(a node's own fetch resolved, but a shared reader entangles it with another
+still-pending async source, so nothing commits). Reproduced as `it.fails`
+cases in `tests/spec-async-open-questions.test.ts` — when one starts passing,
+its bug is fixed and the test should move to the spec file:
+
+- **V1 (violates A13).** A *resting* optimistic node reports
+  `isPending === false` in the window while still showing the stale value;
+  the plain-memo control reports `true` at the same checkpoint. Root cause:
+  `computePendingState`'s #2799 carve-out skips the held `_pendingValue` for
+  every resting optimistic node, but here the held value comes from an
+  entangled refetch, not a reverting optimistic write. A fix must
+  distinguish those two reasons for holding a value.
+- **V2 (violates A7/A13).** `latest()`'s verdict in the window is
+  *read-order dependent*: a probe made while both fetches are in flight
+  freezes the shadow at the stale value for the entire window, and override
+  interleavings surface `[isPending, latest] === [false, undefined]` — the
+  pair A7 rules out. Root cause: the probe-driven shadow design (#2838);
+  verdicts must not depend on when a consumer happened to read.
 
 ## Process
 
