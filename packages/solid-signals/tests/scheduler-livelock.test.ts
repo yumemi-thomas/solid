@@ -141,16 +141,20 @@ it("disposing a subtree with a stale height-adjust entry does not corrupt the di
  * @see https://github.com/solidjs/solid/issues/2843
  */
 it("isPending(() => latest(x)) in a user effect does not loop on refetch (#2843)", async () => {
-  const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+  // Deferred fetch (not wall-clock timers): the revalidating window must stay
+  // open until the test closes it, or a loaded event loop lets the refetch
+  // settle before the assertion samples and the pin flakes.
+  const settle = () => new Promise(r => setTimeout(r, 0));
   const [version, setVersion] = createSignal(0);
   const states: boolean[] = [];
+  let resolveFetch!: () => void;
   let dispose!: () => void;
 
   createRoot(d => {
     dispose = d;
     const data = createMemo(async () => {
       const v = version();
-      await delay(20);
+      await new Promise<void>(r => (resolveFetch = r));
       return `payload v${v}`;
     });
     // `data` deliberately not read by any render effect
@@ -163,18 +167,20 @@ it("isPending(() => latest(x)) in a user effect does not loop on refetch (#2843)
   });
 
   flush();
-  await delay(40);
+  resolveFetch();
+  await settle();
   flush();
   expect(states.at(-1)).toBe(false); // settled -> idle
 
   // the post-settle write that triggered the unbounded spin
   setVersion(v => v + 1);
   flush(); // threw "Potential Infinite Loop Detected." when broken
-  await delay(5);
+  await settle();
   flush();
-  expect(states.at(-1)).toBe(true); // revalidating
+  expect(states.at(-1)).toBe(true); // revalidating (fetch still deferred)
 
-  await delay(40);
+  resolveFetch();
+  await settle();
   flush();
   expect(states.at(-1)).toBe(false); // back to idle
 
