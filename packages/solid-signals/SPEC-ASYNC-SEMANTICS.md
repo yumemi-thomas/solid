@@ -45,10 +45,11 @@ Tier A.
 
 - [x] **B4 — RULED, promoted to A18 (2026-07-07).** The original inferred
   statement ("async resolution must not clobber a user override") was
-  rejected: overrides clear when **their own async source** resolves. The
-  `_overrideSinceLane` machinery only prevents a *stale* in-flight resolution
-  (initiated before the user's write) from clobbering mid-lane; it does not
-  extend the override past its source's fresh resolution.
+  rejected: overrides clear when **their own async source** resolves. Stale
+  in-flight resolutions (initiated before the user's write) are dropped by the
+  dirty-flag check in `asyncWrite`; they never clobber mid-lane. (The old
+  `_overrideSinceLane` flag that also guarded this was removed 2026-07-07 —
+  the re-ruled A18 hold model made its correction path unreachable.)
 
 ## Tier C (open — needs decision)
 

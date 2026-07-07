@@ -49,7 +49,6 @@ export function getOrCreateLane(signal: Signal<any>): OptimisticLane {
   };
   signalLanes.set(signal, lane);
   activeLanes.add(lane);
-  (signal as any)._overrideSinceLane = false;
   return lane;
 }
 

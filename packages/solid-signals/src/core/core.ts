@@ -349,10 +349,6 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         if (activeTransition || el._transition) syncCompanions(el, value);
       }
 
-      // Correct override for async resolution (non-lane path) unless user wrote since lane creation
-      if (hasOverride && !isOptimisticDirty && wasPending && !(el as any)._overrideSinceLane)
-        el._overrideValue = value;
-
       if (!hasOverride || isOptimisticDirty || el._overrideValue !== prevVisible)
         insertSubs(el, isOptimisticDirty || hasOverride);
     } else if (hasOverride) {
@@ -1021,15 +1017,11 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     !el._equals ||
     !el._equals(currentValue, v);
   if (!valueChanged) {
-    // Re-propagate for optimistic computeds with active override — downstream
-    // nodes may have stale _inFlight based on old upstream data.
+    // Same-value write with an active override still entangles the current
+    // action's transition — the hold must outlast all overlapping actions.
     if (isOptimistic && hasOverride) {
       const transition = resolveTransition(el as any);
       if (transition && activeTransition !== transition) globalQueue.initTransition(transition);
-      if ((el as Computed<T>)._fn) {
-        insertSubs(el, true);
-        schedule();
-      }
     }
     return v;
   }
@@ -1041,8 +1033,6 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     // sees it (A17), so authoritative arrivals commit silently into _value and
     // reverting is just dropping the override — _value is already correct.
     if (firstOverride) globalQueue._optimisticNodes.push(el);
-
-    (el as any)._overrideSinceLane = true;
 
     const lane = getOrCreateLane(el);
     el._optimisticLane = lane;

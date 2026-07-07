@@ -25,13 +25,15 @@ A `Signal`/`Computed` participating in async/transitions carries:
 | `_parentSource` | Companion → owner backlink (also store leaf → firewall chains) | companion creation |
 | `_optimisticLane` | Lane this node currently belongs to | `assignOrMergeLane`, cleared by `resolveLane` (stale), `resolveOptimisticNodes`, `cleanupCompletedLanes` |
 | `_transition` | Transition holding this node's pending state | `initTransition`, `reassignPendingTransition`, cleared by `resolveOptimisticNodes` |
-| `_overrideSinceLane` | User wrote to the override after lane creation (async correction must not clobber) | `setSignal` optimistic branch (true), `getOrCreateLane` (false) |
 
-Semantics of the `(_pendingValue, _overrideValue)` pair for an optimistic node:
+Semantics of the `(_pendingValue, _overrideValue)` pair for an optimistic node
+(see §5e — revert targets were eliminated 2026-07-07):
 
 - `(NOT_PENDING, NOT_PENDING)` — resting optimistic node, behaves like a plain node.
-- `(revert target, active value)` — active override; `_pendingValue` holds the value to revert to; the override is what readers see.
-- After async resolution with active override: `_pendingValue` holds the *fresh* value (new revert target) — the override stays visible.
+- `(NOT_PENDING, active value)` — active override; readers see the override, `_value` is untouched.
+- `(held value, active value)` — fresh authoritative value arrived under the mask; it holds in
+  `_pendingValue` and elevates to `_value` on its own transition's commit. Reverting is a pure
+  drop of the override — `_value` is already correct.
 
 ## 2. Lanes (`lanes.ts`)
 

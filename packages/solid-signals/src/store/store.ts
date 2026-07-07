@@ -193,21 +193,40 @@ export function ownEnumerableKeys(o: object): (string | symbol)[] {
   return Reflect.ownKeys(o).filter(k => Object.prototype.propertyIsEnumerable.call(o, k));
 }
 
-function hasOwnStoreProperty(target: StoreNode, property: PropertyKey) {
-  const optimisticOverride = target[STORE_OPTIMISTIC_OVERRIDE];
-  if (
-    optimisticOverride &&
-    Object.prototype.hasOwnProperty.call(optimisticOverride, property) &&
-    optimisticOverride[property] !== $DELETED
-  )
-    return true;
+/**
+ * Single chokepoint for the store's layered value resolution: returns the
+ * override layer (optimistic first, then regular) that shadows `property`, or
+ * `undefined` when the base `STORE_VALUE` is authoritative. Every trap must
+ * resolve through this — hand-inlining the layer order is how the optimistic
+ * layer gets missed (#2850).
+ */
+export function getOverlayLayer(
+  target: StoreNode,
+  property: PropertyKey
+): Record<PropertyKey, any> | undefined {
+  const opt = target[STORE_OPTIMISTIC_OVERRIDE];
+  if (opt && property in opt) return opt;
   const override = target[STORE_OVERRIDE];
-  if (
-    override &&
-    Object.prototype.hasOwnProperty.call(override, property) &&
-    override[property] !== $DELETED
-  )
-    return true;
+  if (override && property in override) return override;
+  return undefined;
+}
+
+/**
+ * The value a store leaf's backing signal currently shows to readers: active
+ * override, else held pending value, else committed value.
+ */
+export function visibleNodeValue(node: DataNode): any {
+  return node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING
+    ? node._overrideValue
+    : node._pendingValue !== NOT_PENDING
+      ? node._pendingValue
+      : node._value;
+}
+
+function hasOwnStoreProperty(target: StoreNode, property: PropertyKey) {
+  // Override layers are null-prototype objects, so `in` is an own check.
+  const layer = getOverlayLayer(target, property);
+  if (layer) return layer[property] !== $DELETED;
   return Object.prototype.hasOwnProperty.call(unwrapStoreValue(target[STORE_VALUE]), property);
 }
 
@@ -445,17 +464,10 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     ) {
       return read(getNode(nodes, property, undefined, target[STORE_FIREWALL]));
     }
-    // Check optimistic override first, then regular override, then base value
-    const optOverridden =
-      target[STORE_OPTIMISTIC_OVERRIDE] && property in target[STORE_OPTIMISTIC_OVERRIDE];
-    const overridden =
-      optOverridden || (target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]);
+    const overlay = getOverlayLayer(target, property);
+    const overridden = !!overlay;
     const proxySource = !!target[STORE_VALUE][$TARGET];
-    const storeValue = optOverridden
-      ? target[STORE_OPTIMISTIC_OVERRIDE]!
-      : target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]
-        ? target[STORE_OVERRIDE]!
-        : target[STORE_VALUE];
+    const storeValue = overlay ?? target[STORE_VALUE];
     if (!tracked) {
       const desc = Object.getOwnPropertyDescriptor(storeValue, property);
       if (desc && desc.get) return desc.get.call(receiver);
@@ -470,13 +482,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       if (isPrototypePollutionKey(property) && !hasOwnStoreProperty(target, property))
         return undefined;
       let value =
-        tracked && (overridden || !proxySource)
-          ? tracked._overrideValue !== undefined && tracked._overrideValue !== NOT_PENDING
-            ? tracked._overrideValue
-            : tracked._pendingValue !== NOT_PENDING
-              ? tracked._pendingValue
-              : tracked._value
-          : storeValue[property];
+        tracked && (overridden || !proxySource) ? visibleNodeValue(tracked) : storeValue[property];
       value === $DELETED && (value = undefined);
       if (!isWrappable(value)) return value;
       const wrapped = wrap(value, target);
@@ -534,13 +540,8 @@ export const storeTraps: ProxyHandler<StoreNode> = {
 
   has(target, property) {
     if (property === $PROXY || property === $TRACK || property === "__proto__") return true;
-    // Check optimistic override first
-    const has =
-      target[STORE_OPTIMISTIC_OVERRIDE] && property in target[STORE_OPTIMISTIC_OVERRIDE]
-        ? target[STORE_OPTIMISTIC_OVERRIDE][property] !== $DELETED
-        : target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]
-          ? target[STORE_OVERRIDE][property] !== $DELETED
-          : property in target[STORE_VALUE];
+    const hasLayer = getOverlayLayer(target, property);
+    const has = hasLayer ? hasLayer[property] !== $DELETED : property in target[STORE_VALUE];
 
     if (writeOnly(target[$PROXY]) || getObserver() === target[STORE_FIREWALL]) return has;
     const nodes = getNodes(target, STORE_HAS);
@@ -565,19 +566,11 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (writeOnly(store)) {
       untrack(() => {
         const { base, overrideKey, state } = prepareStoreWrite(target, store, property);
-        // Get prev from optimistic -> regular -> base
-        const prev =
-          target[STORE_OPTIMISTIC_OVERRIDE] && property in target[STORE_OPTIMISTIC_OVERRIDE]
-            ? target[STORE_OPTIMISTIC_OVERRIDE][property]
-            : target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]
-              ? target[STORE_OVERRIDE][property]
-              : base;
-        const prevHas =
-          target[STORE_OPTIMISTIC_OVERRIDE] && property in target[STORE_OPTIMISTIC_OVERRIDE]
-            ? target[STORE_OPTIMISTIC_OVERRIDE][property] !== $DELETED
-            : target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]
-              ? target[STORE_OVERRIDE][property] !== $DELETED
-              : property in target[STORE_VALUE];
+        const prevLayer = getOverlayLayer(target, property);
+        const prev = prevLayer ? prevLayer[property] : base;
+        const prevHas = prevLayer
+          ? prevLayer[property] !== $DELETED
+          : property in target[STORE_VALUE];
         const value = unwrapStoreValue(rawValue);
         // Symbol-keyed writes on arrays are metadata, not index writes — never run
         // them through the numeric index/length machinery (`parseInt` on a symbol
@@ -585,13 +578,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         const isArrayIndexWrite =
           Array.isArray(state) && property !== "length" && typeof property !== "symbol";
         const nextIndex = isArrayIndexWrite ? parseInt(property as string) + 1 : 0;
-        const len =
-          isArrayIndexWrite &&
-          (target[STORE_OPTIMISTIC_OVERRIDE] && "length" in target[STORE_OPTIMISTIC_OVERRIDE]
-            ? target[STORE_OPTIMISTIC_OVERRIDE].length
-            : target[STORE_OVERRIDE] && "length" in target[STORE_OVERRIDE]
-              ? target[STORE_OVERRIDE].length
-              : state.length);
+        const len = isArrayIndexWrite && (getOverlayLayer(target, "length") ?? state).length;
         const nextLength = isArrayIndexWrite && nextIndex > len ? nextIndex : undefined;
 
         if (prev === value && nextLength === undefined) return true;
@@ -688,12 +675,8 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         const overrideKey = useOptimistic ? STORE_OPTIMISTIC_OVERRIDE : STORE_OVERRIDE;
         // Track store for reversion when writing optimistically
         if (useOptimistic) trackOptimisticStore(target[$PROXY]);
-        const prev =
-          target[STORE_OPTIMISTIC_OVERRIDE] && property in target[STORE_OPTIMISTIC_OVERRIDE]
-            ? target[STORE_OPTIMISTIC_OVERRIDE][property]
-            : target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE]
-              ? target[STORE_OVERRIDE][property]
-              : target[STORE_VALUE][property];
+        const prevLayer = getOverlayLayer(target, property);
+        const prev = prevLayer ? prevLayer[property] : target[STORE_VALUE][property];
         if (
           property in target[STORE_VALUE] ||
           (target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE])

@@ -2,7 +2,6 @@ import {
   computed,
   CONFIG_AUTO_DISPOSE,
   NOT_PENDING,
-  setSignal,
   type Computed,
   type Refreshable
 } from "../core/index.js";
@@ -19,18 +18,19 @@ import {
   $TARGET,
   $TRACK,
   createStoreProxy,
+  getOverlayLayer,
   isWrappable,
   STORE_FIREWALL,
   STORE_LOOKUP,
   STORE_NODE,
   STORE_OPTIMISTIC,
   STORE_OPTIMISTIC_OVERRIDE,
-  STORE_OVERRIDE,
   STORE_VALUE,
   STORE_WRAP,
   notifySelf,
   storeSetter,
   storeTraps,
+  visibleNodeValue,
   wrap,
   type NoFn,
   type ProjectionOptions,
@@ -133,19 +133,13 @@ function clearOptimisticOverride(target: StoreNode): void {
           const node = nodes[key];
           // Clear lane association so effects go to regular queue
           node._optimisticLane = undefined;
-          // Re-read from base (STORE_OVERRIDE or STORE_VALUE)
-          const baseValue =
-            target[STORE_OVERRIDE] && key in target[STORE_OVERRIDE]
-              ? target[STORE_OVERRIDE][key]
-              : target[STORE_VALUE][key];
+          // Re-read from base — the optimistic layer was deleted above, so the
+          // overlay resolves to STORE_OVERRIDE or STORE_VALUE.
+          const layer = getOverlayLayer(target, key);
+          const baseValue = layer ? layer[key] : target[STORE_VALUE][key];
           const value = baseValue === $DELETED ? undefined : baseValue;
           const next = isWrappable(value) ? wrap(value, target) : value;
-          const prev =
-            node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING
-              ? node._overrideValue
-              : node._pendingValue !== NOT_PENDING
-                ? node._pendingValue
-                : node._value;
+          const prev = visibleNodeValue(node);
           node._overrideValue = NOT_PENDING;
           node._pendingValue = NOT_PENDING;
           node._value = next;
