@@ -190,8 +190,7 @@ export function devCheckMergedLaneEmpty(lane: OptimisticLane): void {
  * addition to `__TEST__`), so normal test runs pay one boolean check.
  */
 const censusEnabled =
-  typeof globalThis !== "undefined" &&
-  !!(globalThis as any).process?.env?.COMPANION_CENSUS;
+  typeof globalThis !== "undefined" && !!(globalThis as any).process?.env?.COMPANION_CENSUS;
 const censusSeen = new Map<string, number>();
 
 export function devCensusCompanions(): void {
@@ -222,11 +221,7 @@ export function devCensusCompanions(): void {
     if (shadow && !(shadow._flags & (REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_DISPOSED))) {
       // Latest-view oracle: override if active, else the held in-flight
       // value, else the committed value (A17/A20 read order).
-      const expected = hasOverride
-        ? node._overrideValue
-        : held
-          ? node._pendingValue
-          : node._value;
+      const expected = hasOverride ? node._overrideValue : held ? node._pendingValue : node._value;
       const shadowHeld = shadow._pendingValue !== NOT_PENDING;
       const effective = shadowHeld ? shadow._pendingValue : shadow._value;
       if (!Object.is(effective, expected)) {
@@ -236,7 +231,9 @@ export function devCensusCompanions(): void {
             : Object.is(effective, node._value)
               ? "committed"
               : "other-stale";
-        censusRecord(`latest shadow=${label} (held=${+shadowHeld}) oracle-src=${hasOverride ? "override" : held ? "pendingValue" : "value"} ${stateKey}`);
+        censusRecord(
+          `latest shadow=${label} (held=${+shadowHeld}) oracle-src=${hasOverride ? "override" : held ? "pendingValue" : "value"} ${stateKey}`
+        );
       }
     }
   }
