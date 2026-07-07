@@ -46,6 +46,7 @@ export interface RawSignal<T> {
   _overrideValue?: T | typeof NOT_PENDING;
   _optimisticLane?: OptimisticLane;
   _pendingSignal?: Signal<boolean>; // Lazy signal for isPending()
+  _deferRevert?: () => boolean; // Active override blocks transition completion while true
   _latestValueComputed?: Computed<T>; // Lazy computed for latest()
   _parentSource?: Signal<any> | Computed<any>; // Back-reference for parent-child lane relationship
 }

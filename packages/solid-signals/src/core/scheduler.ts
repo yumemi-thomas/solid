@@ -383,6 +383,14 @@ export class GlobalQueue extends Queue {
     try {
       if (__DEV__) devCheckFlushStart();
       runHeap(dirtyQueue, GlobalQueue._update);
+      if (!activeTransition && transitions.size) {
+        for (const transition of transitions) {
+          if (transitionComplete(transition)) {
+            activeTransition = transition;
+            break;
+          }
+        }
+      }
       if (activeTransition) {
         const isComplete = transitionComplete(activeTransition);
         if (!isComplete) {
@@ -801,6 +809,10 @@ function transitionComplete(transition: Transition): boolean {
   if (transition._actions.length) return false;
   let done = true;
   for (const [source, reporters] of transition._asyncReporters) {
+    if (source._flags & REACTIVE_DISPOSED) {
+      transition._asyncReporters.delete(source);
+      continue;
+    }
     let hasLive = false;
     for (const reporter of reporters) {
       if (reporterBlocksSource(reporter, source)) {
@@ -821,6 +833,10 @@ function transitionComplete(transition: Transition): boolean {
   if (done) {
     for (let i = 0; i < transition._optimisticNodes.length; i++) {
       const node = transition._optimisticNodes[i];
+      if (hasActiveOverride(node) && node._deferRevert?.()) {
+        done = false;
+        break;
+      }
       if (
         hasActiveOverride(node) &&
         "_statusFlags" in node &&

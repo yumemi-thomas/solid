@@ -1137,6 +1137,14 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
     // Propagate parent-child lane relationship for isPending(() => latest(x))
     if (el._parentSource) {
       el._pendingSignal._parentSource = el;
+      el._pendingSignal._deferRevert = () => {
+        const source = getCompanionPendingSource(el) as Computed<any>;
+        return (
+          !(source._flags & REACTIVE_DISPOSED) &&
+          !!(source._statusFlags & STATUS_PENDING) &&
+          !(source._statusFlags & STATUS_UNINITIALIZED)
+        );
+      };
     }
     if (computePendingState(el)) setSignal(el._pendingSignal, true);
     if (__DEV__) devTrackCompanionOwner(el);
@@ -1196,6 +1204,14 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
   return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+}
+
+function getCompanionPendingSource(el: Signal<any> | Computed<any>): Signal<any> | Computed<any> {
+  if (el._parentSource) {
+    const parentNode = el._parentSource as FirewallSignal<any>;
+    return parentNode._firewall || parentNode;
+  }
+  return (el as FirewallSignal<any>)._firewall || el;
 }
 
 /**
