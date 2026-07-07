@@ -53,6 +53,7 @@ import {
 } from "./lanes.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
 import {
+  devCheckRestingCarveOut,
   devTrackCompanionOwner,
   devTrackHeldPending,
   devTrackOptimistic,
@@ -333,6 +334,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         if (hasOverride && isOptimisticDirty) {
           el._overrideValue = value;
           el._pendingValue = value;
+          if (__DEV__) devTrackHeldPending(el, "revert");
         }
       } else {
         el._pendingValue = value;
@@ -352,8 +354,10 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
       if (!hasOverride || isOptimisticDirty || el._overrideValue !== prevVisible)
         insertSubs(el, isOptimisticDirty || hasOverride);
     } else if (hasOverride) {
+      // Unchanged value recomputed while an override is active: refresh the
+      // revert target.
       el._pendingValue = value;
-      if (__DEV__) devTrackHeldPending(el);
+      if (__DEV__) devTrackHeldPending(el, "revert");
     } else if (el._height != oldHeight) {
       for (let s = el._subs; s !== null; s = s._nextSub) {
         insertIntoHeapHeight(s._sub, s._sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
@@ -1028,7 +1032,7 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     if (!firstOverride) globalQueue.initTransition(resolveTransition(el as any));
     if (firstOverride) {
       el._pendingValue = el._value;
-      if (__DEV__) devTrackHeldPending(el);
+      if (__DEV__) devTrackHeldPending(el, "revert");
       globalQueue._optimisticNodes.push(el);
     }
 
@@ -1175,9 +1179,16 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
       (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING))
     );
   }
-  // Optimistic nodes with active override stay pending while the override is
-  // active (internal pending/latest helpers carry `_parentSource` and returned
-  // in the first branch above).
+  // An active override splits by what it can promise (A20). On an optimistic
+  // COMPUTED the override predicts the authoritative source's next value —
+  // assume the guess is correct and it IS the final value, so the override
+  // itself contributes not-pending; it reads pending only while actually held
+  // by in-flight async (its own fetch confirming/correcting, or async spawned
+  // by observers of the override — its lane). On an optimistic SIGNAL there
+  // is no source that can land on the guess: reversion is certain, the shown
+  // value is never final, so an active override is pending for its whole
+  // lifetime. (Internal pending/latest helpers carry `_parentSource` and
+  // returned in the first branch above.)
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
     return true;
   }
@@ -1195,7 +1206,18 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
     return true;
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
-  return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+  const pending = !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+  if (
+    __DEV__ &&
+    !pending &&
+    el._overrideValue === NOT_PENDING &&
+    el._pendingValue !== NOT_PENDING &&
+    !(comp._statusFlags & STATUS_UNINITIALIZED)
+  )
+    // The carve-out muted a held value AND nothing else reports pending: only
+    // sound for revert-target holds — a refetch hold here is the V1 lie.
+    devCheckRestingCarveOut(el);
+  return pending;
 }
 
 /**

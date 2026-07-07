@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMemo,
   createOptimistic,
+  createOptimisticStore,
   createRenderEffect,
   createRoot,
   createSignal,
@@ -28,6 +29,7 @@ import {
   latest,
   type SourceAccessor
 } from "../src/index.js";
+import { restingCarveOutMutedHeldCount } from "../src/core/invariants.js";
 
 function deferredFetcher<T>(compute: (arg: number) => T) {
   const resolvers: Array<(v: T) => void> = [];
@@ -188,6 +190,26 @@ describe("known violations in the blocked-merged window (expected failures)", ()
     }
   );
 
+  // Provenance counterpart of the A13/V1 violation above (passing): INV-8
+  // tracking tags every held `_pendingValue` as either a "revert" target
+  // (optimistic override bookkeeping — the #2799 carve-out exists for these)
+  // or a transition/refetch "held" value. This pins the ROOT CAUSE: in the
+  // window, computePendingState's carve-out mutes a *held* value — exactly
+  // the case it must not skip. When the redesign lands, this counter must
+  // stop incrementing and the check can become a hard assertion.
+  it("V1 root cause: the resting carve-out mutes a 'held' (refetch) value, not a revert target", async () => {
+    const before = restingCarveOutMutedHeldCount;
+    // Unprimed: the companion is created IN the window, forcing a fresh
+    // computePendingState against the held refetch value. (The primed variant
+    // lies one step earlier — clearStatus refreshes the verdict before the
+    // held value is written — but a correct verdict recomputation would still
+    // land in this same carve-out, so this is the shared root cause.)
+    const w = await enterBlockedWindow("optimistic", false);
+    expect(isPending(w.data)).toBe(false); // the V1 lie
+    expect(restingCarveOutMutedHeldCount).toBeGreaterThan(before);
+    await w.finish();
+  });
+
   // VIOLATION of A7/A13: latest()'s verdict in the window is READ-ORDER
   // dependent. If the first in-window probe happens after the flush, it
   // reports the fresh 20; but a probe in the microtask gap between the
@@ -236,6 +258,54 @@ describe("known violations in the blocked-merged window (expected failures)", ()
       otherFetch.resolveAll();
       await settle();
       expect(latest(data)).toBe(20);
+    }
+  );
+
+  // V4 — VIOLATION of A20's three-form algebra (ruled 2026-07-07): `latest`
+  // strips COORDINATION. A firewall refetch seen from an untouched store leaf
+  // is coordination-shaped (broad inheritance — the leaf's own value is not
+  // in flight and holds no unconfirmed edit), so
+  // `isPending(() => latest(() => leaf))` must read FALSE during a pure
+  // refresh — that filter is the community "refresh-noise" idiom. Currently
+  // it reads TRUE, and once the refresh settles the leaf's companion is STUCK
+  // true forever (the INV-4 quiescence assertion catches the stuck state —
+  // "companion reports pending for a fully settled node"). Root cause: the
+  // probe-driven companion design again (#2838 family, with V1–V3).
+  //
+  // NOTE: deliberately LAST in this file and the fetch is never resolved —
+  // letting the scenario settle leaves the stuck companion to trip INV-4 as
+  // an unhandled error inside promise machinery on every later flush.
+  it.fails(
+    "A20/V4 violation: latest-form on an untouched store leaf must not fire during a pure firewall refresh (currently true, then stuck)",
+    async () => {
+      let resolveFetch!: (n: number) => void;
+      const [tick, setTick] = createSignal(0);
+      let state!: { title: string };
+      createRoot(() => {
+        [state] = createOptimisticStore(
+          async (s: { title: string }) => {
+            tick();
+            const n = await new Promise<number>(r => (resolveFetch = r));
+            s.title = "server" + n;
+          },
+          { title: "init" }
+        );
+        createRenderEffect(
+          () => state.title,
+          () => {}
+        );
+      });
+      flush();
+      resolveFetch(1);
+      await settle();
+      expect(state.title).toBe("server1");
+
+      // Pure refresh: no optimistic edit anywhere. The plain form correctly
+      // reports the broad refetch; the latest form must filter it.
+      setTick(1);
+      flush();
+      expect(isPending(() => state.title)).toBe(true);
+      expect(isPending(() => latest(() => state.title))).toBe(false); // currently true
     }
   );
 });

@@ -42,6 +42,19 @@ export const InvariantHooks: {
 // holding one at quiescence with no queued commit is a leak (#2827 class).
 const heldPendingNodes = new Set<AnyNode>();
 
+/**
+ * INV-8 (pre-redesign, V1 class): why a node's `_pendingValue` is held.
+ * - "revert" — revert target for an optimistic override: set on first
+ *   override, updated by corrections while the override is active.
+ * - "held" — a transition/refetch hold awaiting commit: plain held writes,
+ *   transition-held sync recomputes, resting-node async resolutions.
+ * `computePendingState`'s resting-optimistic carve-out (#2799) exists to mute
+ * *revert* holds only; a "held" hold reaching that carve-out while the
+ * downstream async check reports false means isPending lies (V1).
+ */
+export type PendingHoldKind = "revert" | "held";
+const pendingHoldProvenance = new WeakMap<AnyNode, PendingHoldKind>();
+
 // INV-4: nodes that own isPending()/latest() companions, checked for
 // companion coherence at quiescence (#2831 class).
 const companionOwners = new Set<AnyNode>();
@@ -50,9 +63,24 @@ const companionOwners = new Set<AnyNode>();
 // override must have reverted (overrides never outlive their transition).
 const optimisticNodes = new Set<AnyNode>();
 
-export function devTrackHeldPending(node: AnyNode): void {
+export function devTrackHeldPending(node: AnyNode, kind: PendingHoldKind = "held"): void {
   if (!__TEST__) return;
   heldPendingNodes.add(node);
+  pendingHoldProvenance.set(node, kind);
+}
+
+/**
+ * INV-8 probe: called from computePendingState when the resting-optimistic
+ * carve-out (#2799) is about to skip a held `_pendingValue`. Skipping is only
+ * sound for revert-target holds; muting a refetch/transition hold makes
+ * isPending lie (V1). Non-asserting for now — the V1 `it.fails` test pins the
+ * user-visible symptom; this reports every internal occurrence so the
+ * redesign can verify the carve-out never fires for "held" provenance.
+ */
+export let restingCarveOutMutedHeldCount = 0;
+export function devCheckRestingCarveOut(node: AnyNode): void {
+  if (!__TEST__) return;
+  if (pendingHoldProvenance.get(node) === "held") restingCarveOutMutedHeldCount++;
 }
 
 export function devTrackCompanionOwner(node: AnyNode): void {
@@ -183,6 +211,15 @@ export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean)
 
   for (const node of companionOwners) {
     if (isDisposed(node)) {
+      // Companions are created detached (context = null) so effect disposal
+      // can't take them down; they die by GC with their owner. What must NOT
+      // survive the owner is a phantom verdict: an isPending companion stuck
+      // `true` for a disposed source would hold a spinner forever.
+      assertInvariant(
+        !node._pendingSignal || node._pendingSignal._value === false,
+        "INV-9",
+        "isPending companion reports true for a DISPOSED owner at quiescence — a stale verdict outlived its source"
+      );
       companionOwners.delete(node);
       continue;
     }

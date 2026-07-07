@@ -178,6 +178,35 @@ two findings — one real defect, one wrong assumption of mine:
 
 ## 7. Decision log
 
+- 2026-07-07: A20 — overrides are unsettled; pending scope is a property of
+  the read. (1) An active override reads `isPending === true` uniformly (every
+  node kind): overrides mask stale *content* (A17), not *settlement* — the
+  community no-extra-boolean idioms depend on it. Non-derived optimistic
+  signals/stores are transaction-scoped values, not predictions (no source can
+  confirm them; reversion is certain), so they are pending for the override's
+  whole lifetime. (2) An optimistic write pends exactly the leaves it touched
+  (known change set); a refetch pends every read of the store (unbounded
+  change set) — broadness is what unbounded uncertainty looks like, not a
+  store rule. (3) Three-form algebra: `latest` strips *coordination*
+  (transition holds, broad firewall inheritance) and nothing strips
+  *confirmation* (own async in flight, active override) — so the latest form
+  is the "unconfirmed edit?" discriminator on store leaves, and is identical
+  to the plain form on standalone self-async nodes (A8): `latest`
+  discriminates *whose* unsettledness you read, never *why*. An alternative
+  ("override = settled latest view → latest form as pure reload detector")
+  was considered and set aside: it makes the unconfirmed-edit question
+  inexpressible in any form and breaks the published community idioms, while
+  its reload-only question is already answered by scoping reads at
+  triggers/sources. NOTE the no-contradiction result that settled the ruling:
+  the "optimism guards against pending" pattern (News/Finance) is downstream
+  value-shielding — the override stops *invalidation* from cascading, so a
+  downstream memo stays clean and its own verdict stays false; pending
+  propagates through async status flags, not through cached values, so the
+  optimistic node's own `pending === true` never "reads through" a clean
+  memo. Both halves are pinned by the News/Finance action tests.
+  Latest-form leaf filtering is currently broken (fires during pure refresh,
+  then the companion is STUCK true at settle — INV-4 catches the stuck
+  state): pinned as V4 for the #2838 redesign.
 - 2026-07-07: C2 ruled — reverts do not trump other live lanes; a revert
   releases only members of the reverting node's own lane. Fix + INV-8-style
   assertion ("live lane members are only released by their own lane's

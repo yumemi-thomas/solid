@@ -10,9 +10,11 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  action,
   createLoadingBoundary,
   createMemo,
   createOptimistic,
+  createOptimisticStore,
   createRenderEffect,
   createRoot,
   createSignal,
@@ -652,5 +654,128 @@ describe("A19 (was C1): isPending(x) = the observable value of x is not final", 
     expect(rendered).toBe("page2:20");
     expect(location()).toBe(2);
     expect(isPending(location)).toBe(false);
+  });
+});
+
+describe("A20: overrides are unsettled; pending scope is a property of the read", () => {
+  // Ruling (2026-07-07): an ACTIVE optimistic override reads pending —
+  // uniformly, on every node kind. Overrides mask stale content (A17: the
+  // override is the value every read sees), not settlement: until its own
+  // source confirms it (A18) or the transition reverts it, the shown value is
+  // unconfirmed, and `isPending` reports unsettledness, never what UI to show.
+  // "Optimistic state is often the loading state" — the community
+  // no-extra-boolean idioms (isPending(() => books.length) as the "Adding…"
+  // label) are built on this.
+  //
+  // Scope falls out of the read-performs principle: isPending(fn) reports
+  // unsettledness of what fn TOUCHED. A refetch pends every read of a store
+  // because the authority is recomputing (unbounded change set); an
+  // optimistic write pends exactly the leaves it wrote (known change set) —
+  // untouched siblings stay settled. Broad-on-demand stays available by
+  // reading broadly.
+  //
+  // The three forms — `latest` strips COORDINATION, nothing strips
+  // CONFIRMATION: transition holds and broad firewall inheritance are
+  // coordination (the future value is known; the wait is atomicity) and the
+  // latest view absorbs them. A node's own async in flight and an active
+  // override are confirmation-uncertainty (the future value is unknown) and
+  // read pending under BOTH forms. Pair the form with what you render:
+  // committed view x() → isPending(x); optimistic visual latest(x) →
+  // isPending(() => latest(x)).
+
+  it("optimistic computed: override + own fetch reads pending under all three forms, all clear when the fetch lands", async () => {
+    const fetcher = deferredFetcher((t: number) => t * 10);
+    const [id, setId] = createSignal(1);
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => fetcher.fetch(id()));
+      createRenderEffect(data, () => {});
+    });
+    flush();
+    fetcher.resolveAll();
+    await settle();
+    expect(isPending(data)).toBe(false);
+
+    setId(2);
+    setData(999); // prediction for id=2
+    flush();
+    expect(data()).toBe(999); // A17: the override is the value
+    expect(isPending(id)).toBe(true); // held write (coordination)
+    expect(isPending(data)).toBe(true); // unconfirmed override + own fetch
+    expect(isPending(() => latest(data))).toBe(true); // confirmation is never stripped
+
+    fetcher.resolveAll();
+    await settle();
+    // Own source landed: override cleared (A18), everything final at once.
+    expect(data()).toBe(20);
+    expect(isPending(id)).toBe(false);
+    expect(isPending(data)).toBe(false);
+    expect(isPending(() => latest(data))).toBe(false);
+  });
+
+  it("optimistic signal in an action: the override alone is unsettled (no refetch anywhere) — the no-extra-boolean idiom", async () => {
+    // A non-derived optimistic signal has no source that can confirm its
+    // guess — reversion is certain, so the shown value is never final:
+    // pending for the override's whole lifetime. This is what makes
+    // `adding()`-style flags readable straight off the optimistic state.
+    const [adding, setAdding] = createOptimistic(false);
+    let release!: () => void;
+    let run!: () => Promise<void>;
+    createRoot(() => {
+      createRenderEffect(adding, () => {});
+      run = action(function* () {
+        setAdding(true);
+        yield new Promise<void>(r => (release = r));
+      });
+    });
+    flush();
+    expect(isPending(adding)).toBe(false);
+
+    const done = run();
+    flush();
+    expect(adding()).toBe(true); // override visible (A17)
+    expect(isPending(adding)).toBe(true); // and unsettled — it WILL revert
+
+    release();
+    await done;
+    await settle();
+    expect(adding()).toBe(false);
+    expect(isPending(adding)).toBe(false);
+  });
+
+  it("store: an optimistic edit pends the leaves it touched, not untouched siblings", async () => {
+    let release!: () => void;
+    let run!: () => Promise<void>;
+    let state!: { title: string; author: string };
+    let setState!: (fn: (s: { title: string; author: string }) => void) => void;
+    createRoot(() => {
+      [state, setState] = createOptimisticStore({ title: "t1", author: "a1" });
+      createRenderEffect(
+        () => `${state.title}|${state.author}`,
+        () => {}
+      );
+      run = action(function* () {
+        setState(s => {
+          s.title = "t2";
+        });
+        yield new Promise<void>(r => (release = r));
+      });
+    });
+    flush();
+
+    const done = run();
+    flush();
+    expect(state.title).toBe("t2");
+    // The write's change set is known: title is unsettled, author is not.
+    expect(isPending(() => state.title)).toBe(true);
+    expect(isPending(() => state.author)).toBe(false);
+
+    release();
+    await done;
+    await settle();
+    expect(state.title).toBe("t1"); // reverted (non-derived store: transaction-scoped)
+    expect(isPending(() => state.title)).toBe(false);
+    expect(isPending(() => state.author)).toBe(false);
   });
 });

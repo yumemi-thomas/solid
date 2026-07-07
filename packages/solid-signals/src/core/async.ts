@@ -221,7 +221,7 @@ export function handleAsync<T>(
         // Active override: hold the fresh value as the revert target. The override
         // stays visible, so this must not commit.
         el._pendingValue = value;
-        if (__DEV__) devTrackHeldPending(el);
+        if (__DEV__) devTrackHeldPending(el, "revert");
       } else {
         // Resting optimistic node (no active override): commit through the shared
         // pending-node path, exactly like a plain async memo, so the commit clears
