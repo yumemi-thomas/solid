@@ -138,6 +138,8 @@ export function createStoreProxy<T extends object>(
 }
 
 export const storeLookup = new WeakMap();
+// Node records that hold at least one user symbol-keyed node.
+export const symbolKeyedRecords = new WeakSet<object>();
 export function wrap<T extends Record<PropertyKey, any>>(value: T, target?: StoreNode): T {
   if (target?.[STORE_WRAP]) return target[STORE_WRAP](value, target);
   let p = value[$PROXY] || storeLookup.get(value);
@@ -242,7 +244,22 @@ function getNode<T>(
     {
       equals: equals,
       unobserved() {
-        if (nodes[property] === s) delete nodes[property];
+        if (nodes[property] === s) {
+          delete nodes[property];
+          // Drop the symbol-record mark once the last user symbol node is
+          // gone, so reconcile's fast path stops probing a now string-only
+          // record. Runs only on symbol-node cleanup (cold), never on reconcile.
+          if (typeof property === "symbol" && property !== $TRACK && symbolKeyedRecords.has(nodes)) {
+            const syms = Object.getOwnPropertySymbols(nodes);
+            let hasUserSymbol = false;
+            for (let i = 0, len = syms.length; i < len; i++)
+              if (syms[i] !== $TRACK) {
+                hasUserSymbol = true;
+                break;
+              }
+            if (!hasUserSymbol) symbolKeyedRecords.delete(nodes);
+          }
+        }
       }
     },
     firewall
@@ -255,6 +272,8 @@ function getNode<T>(
     s._snapshotValue = sv === undefined ? NO_SNAPSHOT : sv;
     snapshotSources?.add(s);
   }
+  // Lets reconcile enumerate symbols only for records that need it.
+  if (typeof property === "symbol" && property !== $TRACK) symbolKeyedRecords.add(nodes);
   return (nodes[property] = s);
 }
 

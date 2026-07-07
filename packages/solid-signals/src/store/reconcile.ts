@@ -1,9 +1,9 @@
 import { setSignal } from "../core/index.js";
 import {
+  $DELETED,
   $PROXY,
   $TARGET,
   $TRACK,
-  getKeys,
   isWrappable,
   STORE_HAS,
   STORE_LOOKUP,
@@ -13,22 +13,56 @@ import {
   STORE_VALUE,
   notifySelf,
   storeLookup,
+  symbolKeyedRecords,
   wrap
 } from "./store.js";
+
+function nodeKeys(nodes: Record<PropertyKey, any>): PropertyKey[] {
+  const keys: PropertyKey[] = Object.keys(nodes);
+  // Keep the common string-key path cheap; only symbol-tracked records pay for
+  // symbol enumeration. `$TRACK` is handled separately by callers.
+  if (symbolKeyedRecords.has(nodes)) {
+    const syms = Object.getOwnPropertySymbols(nodes);
+    for (let i = 0, len = syms.length; i < len; i++) {
+      if (syms[i] !== $TRACK) keys.push(syms[i]);
+    }
+  }
+  return keys;
+}
 
 function unwrap(value: any) {
   return value?.[$TARGET]?.[STORE_VALUE] ?? value;
 }
 
-function getOverrideValue(value: any, override: any, key: string, optOverride?: any) {
+function getOverrideValue(value: any, override: any, key: PropertyKey, optOverride?: any) {
   if (optOverride && key in optOverride) return optOverride[key];
   return override && key in override ? override[key] : value[key];
 }
 
+// Append a value's *enumerable* own symbol keys. Symbol-free objects (the
+// common case) pay only an empty `getOwnPropertySymbols` call — no per-key
+// predicate — so the string fast path stays on `Object.keys`.
+function addEnumSymbols(o: any, keys: Set<PropertyKey>) {
+  const syms = Object.getOwnPropertySymbols(o);
+  for (let i = 0, len = syms.length; i < len; i++) {
+    if (Object.prototype.propertyIsEnumerable.call(o, syms[i])) keys.add(syms[i]);
+  }
+}
+
 function getAllKeys(value, override, next) {
-  const keys = getKeys(value, override) as string[];
+  // Reconcile must diff enumerable symbol keys the same way it diffs strings,
+  // but keep the string keys on the `Object.keys` fast path — symbols are
+  // appended only when the object actually has them.
+  const keys = new Set<PropertyKey>(Object.keys(value));
+  addEnumSymbols(value, keys);
+  if (override) {
+    for (const key of Reflect.ownKeys(override))
+      override[key] === $DELETED ? keys.delete(key) : keys.add(key);
+  }
   const nextKeys = Object.keys(next);
-  return Array.from(new Set([...keys, ...nextKeys]));
+  for (let i = 0, len = nextKeys.length; i < len; i++) keys.add(nextKeys[i]);
+  addEnumSymbols(next, keys);
+  return Array.from(keys);
 }
 
 // Array entries can be `null`/`undefined`/primitives, not just keyed objects.
@@ -54,14 +88,14 @@ function keyedMatch(a: any, b: any, keyFn: (item: NonNullable<any>) => any) {
 function syncArrayNodeMembership(target: any, next: any) {
   let nodes = target[STORE_NODE];
   if (nodes) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       key in next || setSignal(nodes[key], undefined);
     }
   }
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);
@@ -212,7 +246,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
   let nodes = target[STORE_NODE];
   if (nodes) {
     const tracked = nodes[$TRACK];
-    const keys = tracked ? getAllKeys(previous, undefined, next) : Object.keys(nodes);
+    const keys = tracked ? getAllKeys(previous, undefined, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       const node = nodes[key];
@@ -234,7 +268,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
   // has
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);
@@ -364,7 +398,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
   // values
   if (nodes) {
     const tracked = nodes[$TRACK];
-    const keys = tracked ? getAllKeys(previous, override, next) : Object.keys(nodes);
+    const keys = tracked ? getAllKeys(previous, override, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       const node = nodes[key];
@@ -386,7 +420,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
   // has
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);
