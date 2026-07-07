@@ -126,6 +126,21 @@ two findings — one real defect, one wrong assumption of mine:
   status, no held value, no override). What the companion should read in that
   in-between window is a **semantic** question, not a consistency one — see §6.
 
+## 5b. Findings from the second assertion pass (2026-07-06, INV-2 + window probes)
+
+- **INV-2 implemented and green.** Active override ⇒ `_pendingValue` revert
+  target + registration in a `_optimisticNodes` list, checked at the end of
+  every flush. Verified the assertion actually fires via a mutation test
+  (deregistering a live override throws INV-2).
+- **Blocked-merged window probes** (optimistic node entangled with a second
+  async source through a shared reader; own fetch resolved, transition still
+  blocked) surfaced two ruled-spec violations (V1: A13 — resting optimistic
+  `isPending` false where the plain control is true; V2: A7/A13 — `latest()`
+  read-order dependence / `[false, undefined]`) and one new open question
+  (C4: ambient reads of an active override see the committed value when
+  entangled, the override when not). See SPEC-ASYNC-SEMANTICS.md "Known
+  violations" and `tests/spec-async-open-questions.test.ts`.
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[open — from INV-4 narrowing]` When async is in flight on a node whose

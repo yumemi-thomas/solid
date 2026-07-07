@@ -98,6 +98,34 @@ export function createAsyncReporters(): Map<Computed<any>, Set<Computed<any>>> {
   return __TEST__ ? new CheckedReportersMap() : new Map();
 }
 
+/**
+ * INV-2: a node with an *active* override must hold a revert target in
+ * `_pendingValue` (set on first override) and be registered for reversion in
+ * the queue's or a transition's `_optimisticNodes`. An unregistered active
+ * override would survive transition completion forever. Runs at the end of
+ * every flush (not just quiescence — the invariant holds mid-transition).
+ */
+export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) => boolean): void {
+  if (!__TEST__) return;
+  for (const node of optimisticNodes) {
+    if (isDisposed(node)) {
+      optimisticNodes.delete(node);
+      continue;
+    }
+    if (node._overrideValue === undefined || node._overrideValue === NOT_PENDING) continue;
+    assertInvariant(
+      node._pendingValue !== NOT_PENDING,
+      "INV-2",
+      "a node has an active optimistic override but no _pendingValue revert target — reversion at transition completion has nothing to restore"
+    );
+    assertInvariant(
+      isRegisteredForRevert(node),
+      "INV-2",
+      "a node has an active optimistic override but is not registered in any _optimisticNodes list — the override can never revert"
+    );
+  }
+}
+
 /** INV-1: an isPending() probe must never leak past its own call. */
 export function devCheckFlushStart(): void {
   if (!__TEST__) return;

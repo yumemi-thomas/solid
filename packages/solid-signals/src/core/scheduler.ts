@@ -27,6 +27,7 @@ import {
 import {
   beginAsyncReporterWrites,
   createAsyncReporters,
+  devCheckActiveOverrides,
   devCheckFlushStart,
   devCheckMergedLaneEmpty,
   devCheckQuiescent,
@@ -449,6 +450,14 @@ export class GlobalQueue extends Queue {
       this.run(EFFECT_RENDER);
       activeLanes.size && runLaneEffects(EFFECT_USER);
       this.run(EFFECT_USER);
+      if (__DEV__) {
+        devCheckActiveOverrides(n => {
+          if (this._optimisticNodes.includes(n as OptimisticNode)) return true;
+          if (activeTransition?._optimisticNodes.includes(n as OptimisticNode)) return true;
+          for (const t of transitions) if (t._optimisticNodes.includes(n as OptimisticNode)) return true;
+          return false;
+        });
+      }
       if (
         __DEV__ &&
         !scheduled &&
