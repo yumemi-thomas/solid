@@ -69,14 +69,24 @@ export function link(
   if (isRecomputing) {
     nextDep = prevDep !== null ? prevDep._nextDep : sub._deps;
     if (nextDep !== null && nextDep._dep === dep) {
+      nextDep._gen = sub._depGen;
       sub._depsTail = nextDep;
       nextDep._pendingObserver = pendingObserver;
       return;
     }
   }
 
+  // A link stamped with the current pass generation was created or reused
+  // in-order during this recompute, i.e. it already sits in the validated
+  // [deps.._depsTail] prefix — the O(1) equivalent of scanning the dep list
+  // (the old alien-signals `isValidLink` walk, O(n²) when a computation
+  // re-reads earlier deps non-consecutively, e.g. store leaf reads).
   const prevSub = dep._subsTail;
-  if (prevSub !== null && prevSub._sub === sub && (!isRecomputing || isValidLink(prevSub, sub))) {
+  if (
+    prevSub !== null &&
+    prevSub._sub === sub &&
+    (!isRecomputing || prevSub._gen === sub._depGen)
+  ) {
     prevSub._pendingObserver = pendingObserver;
     return;
   }
@@ -90,6 +100,7 @@ export function link(
         _nextDep: nextDep,
         _prevSub: prevSub,
         _nextSub: null,
+        _gen: sub._depGen,
         _pendingObserver: pendingObserver
       });
   if (prevDep !== null) prevDep._nextDep = newLink;
@@ -97,18 +108,4 @@ export function link(
 
   if (prevSub !== null) prevSub._nextSub = newLink;
   else dep._subs = newLink;
-}
-
-// https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L284
-function isValidLink(checkLink: Link, sub: Computed<unknown>): boolean {
-  const depsTail = sub._depsTail;
-  if (depsTail !== null) {
-    let link = sub._deps!;
-    do {
-      if (link === checkLink) return true;
-      if (link === depsTail) break;
-      link = link._nextDep!;
-    } while (link !== null);
-  }
-  return false;
 }

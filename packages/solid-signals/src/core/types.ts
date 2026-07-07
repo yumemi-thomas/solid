@@ -11,6 +11,13 @@ export interface Link {
   _nextDep: Link | null;
   _prevSub: Link | null;
   _nextSub: Link | null;
+  /**
+   * `_sub._depGen` at the time this link was created or last revalidated
+   * in-order. A link stamped with the subscriber's current pass generation is
+   * inside the validated `[deps.._depsTail]` prefix — an O(1) replacement for
+   * scanning the dep list to answer membership (see `link()`).
+   */
+  _gen: number;
   // True when the link was created by an `isPending` read. Such a link observes
   // the dep's pending state only: `notifyStatus` re-runs the subscriber on a
   // real (non-NotReadyError) error instead of propagating the error through it,
@@ -75,6 +82,8 @@ export interface Owner {
 export interface Computed<T> extends RawSignal<T>, Owner {
   _deps: Link | null;
   _depsTail: Link | null;
+  /** Recompute-pass counter; bumped when dep revalidation starts. */
+  _depGen: number;
   _flags: number;
   _blocked?: boolean;
   _pendingSource?: Computed<any>;

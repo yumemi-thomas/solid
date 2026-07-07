@@ -205,6 +205,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   const oldcontext = context;
   context = el;
   el._depsTail = null;
+  el._depGen++;
   el._flags = REACTIVE_RECOMPUTING_DEPS;
   el._time = clock;
   let value = el._pendingValue === NOT_PENDING ? el._value : el._pendingValue;
@@ -319,7 +320,13 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     // effect() can call its runner synchronously for the first run.
     if (isEffect && valueChanged) {
       (el as any)._modified = !el._error;
-      if (!create) el._queue.enqueue(isEffect, GlobalQueue._runEffect.bind(null, el));
+      // Reuse one bound runner per effect — runEffect no-ops on a stale
+      // `_modified`, so re-enqueueing the same function is harmless.
+      if (!create)
+        el._queue.enqueue(
+          isEffect,
+          ((el as any)._boundRunEffect ??= GlobalQueue._runEffect.bind(null, el))
+        );
     }
 
     if (el._error) {
@@ -443,6 +450,7 @@ export function computed<T>(
     _prevHeap: null as any,
     _deps: null,
     _depsTail: null,
+    _depGen: 0,
     _subs: null,
     _subsTail: null,
     _parent: context,
@@ -501,6 +509,7 @@ export function createEffectNode<T>(
     _prevHeap: null as any,
     _deps: null,
     _depsTail: null,
+    _depGen: 0,
     _subs: null,
     _subsTail: null,
     _parent: context,
