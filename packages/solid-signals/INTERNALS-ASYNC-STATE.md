@@ -63,10 +63,18 @@ through `notifyStatus(STATUS_ERROR)` `[ruled — #2837]`. `setSignal` checks
 `STATUS_UNINITIALIZED` *before* invoking the comparator so a user comparator
 never sees `undefined` prev on first commit `[decided while fixing #2837]`.
 
-## 5. Invariants for `__DEV__` assertions
+## 5. Invariants for `__TEST__` assertions
 
 Confidence: **high** = implementation self-consistency, assert now.
 **medium** = believed structural, assert but watch for false positives.
+
+> Gating: the machinery lives in `core/invariants.ts` behind `__TEST__`, not
+> `__DEV__`. The per-write Set tracking and per-flush quiescence sweep cost
+> 5-21% across the CodSpeed suite when they ran under `__DEV__` (measured
+> 2026-07-06, run for 61722cbe), which would also tax every user's dev build.
+> Call sites remain `__DEV__`-guarded for prod tree-shaking; bodies
+> early-return unless `__TEST__`. Benchmarks run with `__TEST__: false`
+> (see `vite.config.ts` benchmark-mode define).
 
 - **INV-1 (high)** `pendingProbe` is non-null only inside an `isPending()` call
   (it saves/restores; nothing else may write it).

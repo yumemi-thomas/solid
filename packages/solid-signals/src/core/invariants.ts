@@ -10,14 +10,20 @@ import type { OptimisticLane } from "./lanes.js";
 import type { Computed, Signal } from "./types.js";
 
 /**
- * Dev-mode invariant checks for the async/transition/lane machinery.
+ * Test-mode invariant checks for the async/transition/lane machinery.
  * Catalog and rationale: packages/solid-signals/INTERNALS-ASYNC-STATE.md.
  *
  * These are implementation self-consistency checks, not semantic rules: a
- * violation means the reactive system contradicted itself. They run only at
- * quiescence (fully drained scheduler) or at cheap chokepoints, and only in
- * __DEV__ builds — call sites are guarded so production tree-shakes this
- * module away.
+ * violation means the reactive system contradicted itself.
+ *
+ * They are gated on `__TEST__` (not just `__DEV__`): the per-write Set
+ * tracking and per-flush quiescence sweep are too expensive for shipped dev
+ * builds and for benchmarks (they showed up as a 5-21% hit across the
+ * CodSpeed suite when they ran under `__DEV__`). Call sites stay `__DEV__`
+ * guarded so production tree-shakes the calls; each entry point here
+ * early-returns unless `__TEST__` is set, so dev builds pay only a no-op
+ * call. The test suite (vitest run) defines `__TEST__: true`; benchmark mode
+ * defines `__TEST__: false`.
  */
 
 type AnyNode = Signal<any> | Computed<any>;
@@ -45,14 +51,17 @@ const companionOwners = new Set<AnyNode>();
 const optimisticNodes = new Set<AnyNode>();
 
 export function devTrackHeldPending(node: AnyNode): void {
+  if (!__TEST__) return;
   heldPendingNodes.add(node);
 }
 
 export function devTrackCompanionOwner(node: AnyNode): void {
+  if (!__TEST__) return;
   companionOwners.add(node);
 }
 
 export function devTrackOptimistic(node: AnyNode): void {
+  if (!__TEST__) return;
   optimisticNodes.add(node);
 }
 
@@ -86,11 +95,12 @@ class CheckedReportersMap extends Map<Computed<any>, Set<Computed<any>>> {
 }
 
 export function createAsyncReporters(): Map<Computed<any>, Set<Computed<any>>> {
-  return __DEV__ ? new CheckedReportersMap() : new Map();
+  return __TEST__ ? new CheckedReportersMap() : new Map();
 }
 
 /** INV-1: an isPending() probe must never leak past its own call. */
 export function devCheckFlushStart(): void {
+  if (!__TEST__) return;
   assertInvariant(
     !InvariantHooks.pendingProbeActive?.(),
     "INV-1",
@@ -100,7 +110,7 @@ export function devCheckFlushStart(): void {
 
 /** INV-5: a merged lane's work moved to its root on merge and must stay empty. */
 export function devCheckMergedLaneEmpty(lane: OptimisticLane): void {
-  if (!lane._mergedInto) return;
+  if (!__TEST__ || !lane._mergedInto) return;
   assertInvariant(
     lane._pendingAsync.size === 0 &&
       lane._effectQueues[0].length === 0 &&
@@ -117,6 +127,7 @@ export function devCheckMergedLaneEmpty(lane: OptimisticLane): void {
  * agree with a fresh computation of their owner's state.
  */
 export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean): void {
+  if (!__TEST__) return;
   for (const node of heldPendingNodes) {
     if (isDisposed(node) || node._pendingValue === NOT_PENDING) {
       heldPendingNodes.delete(node);
