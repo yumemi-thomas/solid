@@ -219,6 +219,21 @@ mirroring. Those four cover all nine fingerprints plus V1–V4.
 
 ## 7. Decision log
 
+- 2026-07-07: considered and REJECTED — mode-conditional NotReady from
+  `isPending` (throw only during SSR/hydration, return a value in CSR).
+  Rationale for rejection: (1) the tracked-uninitialized read is the ONLY
+  throwing case — everything post-initialization is already safe outside
+  boundaries in every mode, so the proposal only legalizes hand-rolled
+  initial-load boundaries (`isPending(data) ? spinner : data()`); (2)
+  boundaries are structural (SSR streaming and hydration reveal need
+  delimited regions), verdicts are informational — a safe-everywhere client
+  primitive becomes the easiest way to write loading UI that SSR cannot
+  stream, creating a CSR→SSR migration cliff in code authors consider
+  finished; (3) it forks a primitive's semantics by execution mode right
+  after V1–V3 established that verdicts must not depend on context
+  accidents; (4) the one-rule model "isPending performs the read you give
+  it" (the probe is not a shield) stays true in every environment today.
+  Keep A16/B5a as ruled.
 - 2026-07-07: A20 — overrides are unsettled; pending scope is a property of
   the read. (1) An active override reads `isPending === true` uniformly (every
   node kind): overrides mask stale *content* (A17), not *settlement* — the
