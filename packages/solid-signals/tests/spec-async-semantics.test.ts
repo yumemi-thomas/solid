@@ -790,7 +790,7 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
  * reader entangles it with another still-pending async source, so nothing
  * commits yet.
  */
-describe("V1–V4: verdicts in and after the blocked-merged window (fixed 2026-07-07)", () => {
+describe("V1–V5: verdicts in and after the blocked-merged window (fixed 2026-07-07)", () => {
   // Shared harness: data's async is entangled with a second async source
   // through a shared reader; data's own fetch has resolved, but the merged
   // transition is still blocked on the other fetch.
@@ -965,5 +965,66 @@ describe("V1–V4: verdicts in and after the blocked-merged window (fixed 2026-0
     expect(state.title).toBe("server2");
     expect(isPending(() => state.title)).toBe(false);
     expect(isPending(() => latest(() => state.title))).toBe(false);
+  });
+
+  // V5 (A17/A18 corollary — found and fixed with the revert-target
+  // elimination, 2026-07-07b): an authoritative refetch value held in the
+  // blocked-merged window must survive a first optimistic write. The old
+  // model stashed a revert target on first override (`_pendingValue =
+  // _value`), clobbering the held refetch result; the override's revert then
+  // resurrected the STALE committed value. With no revert targets, the held
+  // value stays a pending commit and elevates at its own transition's commit
+  // — unobservably under the override (A17) — so the revert reveals the
+  // refetch result.
+  it("V5/A17: optimistic write in the blocked window does not clobber the held refetch value", async () => {
+    const [id, setId] = createSignal(1);
+    const [other, setOther] = createSignal(1);
+    const dataFetch = deferredFetcher((t: number) => t * 10);
+    const otherFetch = deferredFetcher((t: number) => t * 100);
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    let release!: () => void;
+    let run!: () => Promise<void>;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => dataFetch.fetch(id()));
+      const mOther = createMemo(() => otherFetch.fetch(other()));
+      const joined = createMemo(() => `${data()}|${mOther()}`);
+      createRenderEffect(joined, () => {});
+      run = action(function* () {
+        setData(999);
+        yield new Promise<void>(r => (release = r));
+      });
+    });
+    flush();
+    dataFetch.resolveAll();
+    otherFetch.resolveAll();
+    await settle();
+    expect(data()).toBe(10);
+
+    // Enter the blocked window: data's fetch lands (20, held), other pending.
+    setId(2);
+    setOther(2);
+    flush();
+    dataFetch.resolveAll();
+    await settle();
+    expect(latest(data)).toBe(20);
+
+    // Optimistic write while the window holds 20.
+    const done = run();
+    flush();
+    expect(data()).toBe(999); // override visible (A17)
+
+    // Everything settles: other fetch lands, action releases, override reverts.
+    otherFetch.resolveAll();
+    await settle();
+    release();
+    await done;
+    await settle();
+
+    // The refetch produced 20 for id=2; the revert must reveal it, not 10.
+    expect(data()).toBe(20);
+    expect(latest(data)).toBe(20);
+    expect(isPending(data)).toBe(false);
   });
 });

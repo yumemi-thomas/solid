@@ -207,18 +207,19 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
   for (let i = 0; i < len; i++) {
     const node = nodes[i];
     node._optimisticLane = undefined;
-    if (node._pendingValue !== NOT_PENDING) {
-      node._value = node._pendingValue as any;
-      node._pendingValue = NOT_PENDING;
-      // Mirror commitPendingNode: the node now has a committed visible value.
-      // Without this, a node first initialized under an optimistic override
-      // (e.g. the latest() shadow computed during an initial-load transition)
-      // stays UNINITIALIZED forever, so later pending phases mis-classify it
-      // as an initial load and readers suspend instead of observing the
-      // stale-value/pending pair (#2829).
-      if (!((node as any)._statusFlags & STATUS_PENDING))
-        (node as any)._statusFlags &= ~STATUS_UNINITIALIZED;
-    }
+    // Revert is a pure drop: there is no revert target to commit — masked
+    // authoritative values hold in _pendingValue and elevate on their OWN
+    // transition's schedule (A18 as re-ruled 2026-07-07). A pv still held
+    // here belongs to a transition that hasn't completed and must NOT commit
+    // early. (Reverts run inside finalizePureQueue AFTER commitPendingNodes,
+    // so holds owned by the completing transition have already elevated.)
+    // A node that lived its whole first transition under an override (e.g.
+    // the latest() shadow created mid-initial-load, #2829) has shown values
+    // without ever committing one; it is initialized in every observable
+    // sense, so clear the marker or later refetches mis-classify as initial
+    // load (pending reads false / readers suspend).
+    if (!((node as any)._statusFlags & STATUS_PENDING))
+      (node as any)._statusFlags &= ~STATUS_UNINITIALIZED;
     const prevOverride = node._overrideValue;
     node._overrideValue = NOT_PENDING;
     if (prevOverride !== NOT_PENDING && node._value !== prevOverride) insertSubs(node, true);

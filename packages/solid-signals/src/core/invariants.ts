@@ -45,20 +45,6 @@ export const InvariantHooks: {
 // holding one at quiescence with no queued commit is a leak (#2827 class).
 const heldPendingNodes = new Set<AnyNode>();
 
-/**
- * INV-8: why a node's `_pendingValue` is held.
- * - "revert" — revert target for an optimistic override: set on first
- *   override, updated by corrections while the override is active. Only
- *   exists while the override is ACTIVE (the revert commits the value).
- * - "held" — a transition/refetch hold awaiting commit: plain held writes,
- *   transition-held sync recomputes, resting-node async resolutions.
- * The distinction located V1's root cause (the #2799 carve-out muted "held"
- * holds); the carve-out is gone, but write sites keep declaring provenance —
- * it documents intent and backs future INV-8 assertions.
- */
-export type PendingHoldKind = "revert" | "held";
-export const pendingHoldProvenance = new WeakMap<AnyNode, PendingHoldKind>();
-
 // INV-4: nodes that own isPending()/latest() companions, checked for
 // companion coherence at quiescence (#2831 class).
 const companionOwners = new Set<AnyNode>();
@@ -67,10 +53,11 @@ const companionOwners = new Set<AnyNode>();
 // override must have reverted (overrides never outlive their transition).
 const optimisticNodes = new Set<AnyNode>();
 
-export function devTrackHeldPending(node: AnyNode, kind: PendingHoldKind = "held"): void {
+// (Former INV-8 hold-provenance tracking is gone with revert targets: every
+// held `_pendingValue` is now a pending commit — there is only one kind.)
+export function devTrackHeldPending(node: AnyNode): void {
   if (!__TEST__) return;
   heldPendingNodes.add(node);
-  pendingHoldProvenance.set(node, kind);
 }
 
 export function devTrackCompanionOwner(node: AnyNode): void {
@@ -117,11 +104,13 @@ export function createAsyncReporters(): Map<Computed<any>, Set<Computed<any>>> {
 }
 
 /**
- * INV-2: a node with an *active* override must hold a revert target in
- * `_pendingValue` (set on first override) and be registered for reversion in
+ * INV-2: a node with an *active* override must be registered for reversion in
  * the queue's or a transition's `_optimisticNodes`. An unregistered active
  * override would survive transition completion forever. Runs at the end of
  * every flush (not just quiescence — the invariant holds mid-transition).
+ * (There is no revert-target requirement: authoritative values commit
+ * silently into `_value` under the override mask — A17 — so reverting is
+ * just dropping the override.)
  */
 export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) => boolean): void {
   if (!__TEST__) return;
@@ -131,11 +120,6 @@ export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) =
       continue;
     }
     if (node._overrideValue === undefined || node._overrideValue === NOT_PENDING) continue;
-    assertInvariant(
-      node._pendingValue !== NOT_PENDING,
-      "INV-2",
-      "a node has an active optimistic override but no _pendingValue revert target — reversion at transition completion has nothing to restore"
-    );
     assertInvariant(
       isRegisteredForRevert(node),
       "INV-2",

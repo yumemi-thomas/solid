@@ -330,11 +330,13 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
 
       if (create || (isEffect && activeTransition !== el._transition) || isOptimisticDirty) {
         el._value = value;
-        // Lane-propagated correction: upstream data is fresh, correct override unconditionally
+        // Lane-propagated correction: upstream data is fresh, correct the
+        // override unconditionally. The direct _value commit is the lane's
+        // own reveal schedule; drop any superseded older hold so its queued
+        // commit can't clobber the fresh value.
         if (hasOverride && isOptimisticDirty) {
           el._overrideValue = value;
-          el._pendingValue = value;
-          if (__DEV__) devTrackHeldPending(el, "revert");
+          el._pendingValue = NOT_PENDING;
         }
       } else {
         el._pendingValue = value;
@@ -354,10 +356,12 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
       if (!hasOverride || isOptimisticDirty || el._overrideValue !== prevVisible)
         insertSubs(el, isOptimisticDirty || hasOverride);
     } else if (hasOverride) {
-      // Unchanged value recomputed while an override is active: refresh the
-      // revert target.
+      // Unchanged value (equals the override) recomputed while the override
+      // is active: _value may still be stale, so hold the authoritative value
+      // for commit on its own transition's schedule — invisibly (A17/A18).
+      if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
       el._pendingValue = value;
-      if (__DEV__) devTrackHeldPending(el, "revert");
+      if (__DEV__) devTrackHeldPending(el);
     } else if (el._height != oldHeight) {
       for (let s = el._subs; s !== null; s = s._nextSub) {
         insertIntoHeapHeight(s._sub, s._sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
@@ -370,10 +374,13 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     el._pendingFirstChild !== null ||
     el._pendingDisposal !== null ||
     !!(el._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED));
+  // Masked holds (hasOverride) always queue: their commit belongs to their
+  // own transition's schedule (A18 re-rule) and is unobservable under the
+  // override (A17). Revert no longer commits anything, so an unqueued masked
+  // hold would leak (INV-7) once the revert clears _transition.
   needsPendingCommit &&
     (!create || el._statusFlags & STATUS_PENDING) &&
-    !el._transition &&
-    !(activeTransition && hasOverride) &&
+    (!el._transition || hasOverride) &&
     queuePendingNode(el);
   el._transition &&
     isEffect &&
@@ -1030,11 +1037,10 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
   if (isOptimistic) {
     const firstOverride = el._overrideValue === NOT_PENDING;
     if (!firstOverride) globalQueue.initTransition(resolveTransition(el as any));
-    if (firstOverride) {
-      el._pendingValue = el._value;
-      if (__DEV__) devTrackHeldPending(el, "revert");
-      globalQueue._optimisticNodes.push(el);
-    }
+    // No revert target is stashed: while the override is active every reader
+    // sees it (A17), so authoritative arrivals commit silently into _value and
+    // reverting is just dropping the override — _value is already correct.
+    if (firstOverride) globalQueue._optimisticNodes.push(el);
 
     (el as any)._overrideSinceLane = true;
 
@@ -1183,7 +1189,23 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
       )
         return true;
     }
-    return el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED);
+    // Pending when an uncommitted value exists: either the owner holds an
+    // authoritative pending commit (the latest view exposes it, and it is not
+    // final until it commits) or the companion itself holds one from a
+    // transition-held recompute. The owner check replaces the old read of the
+    // companion's revert-target stash, which no longer exists (A17 — arrivals
+    // commit silently under the override mask, so nothing is stashed). It is
+    // scoped to non-firewall owners: leaf refetch reporting is the firewall
+    // STATUS_PENDING branch above, and a leaf's held value during the initial
+    // projection commit is initial load, which never reads pending.
+    const parentHeld =
+      !parentNode._firewall &&
+      parentNode._pendingValue !== NOT_PENDING &&
+      !(parent._statusFlags & STATUS_UNINITIALIZED);
+    return (
+      (parentHeld || el._pendingValue !== NOT_PENDING) &&
+      !(comp._statusFlags & STATUS_UNINITIALIZED)
+    );
   }
   if (firewall && el._pendingValue !== NOT_PENDING) {
     return (
@@ -1204,11 +1226,10 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
     return true;
   }
-  // Upstream: value held in transition (not during initial load). This applies
-  // to resting optimistic nodes too (V1/A13): a resting node never holds a
-  // revert target — every revert-target write coexists with an ACTIVE override,
-  // which already returned above — so a held value here is always a
-  // transition/refetch hold and must read as pending, exactly like a plain
+  // Upstream: value held in transition (not during initial load). Applies to
+  // resting optimistic nodes too (V1/A13): revert targets no longer exist
+  // (2026-07-07b — every held value is a pending commit), so a held value is
+  // always a transition/refetch hold and reads pending, exactly like a plain
   // async memo (the #2799 carve-out that skipped this for resting optimistic
   // nodes muted entangled refetch holds and was removed with the #2838 work).
   if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) return true;

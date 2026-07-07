@@ -140,7 +140,7 @@ two findings — one real defect, one wrong assumption of mine:
   (C4: ambient reads of an active override see the committed value when
   entangled, the override when not). See SPEC-ASYNC-SEMANTICS.md "Known
   violations" (all fixed 2026-07-07; pinned in
-  `tests/spec-async-semantics.test.ts`, "V1–V4" describe).
+  `tests/spec-async-semantics.test.ts`, "V1–V5" describe).
 - **C4 root cause (ruled + fixed same day).** The entangled divergence was a
   premature revert, not a read-path issue: on the first flush after the write,
   `transitionComplete`'s reporter loop found no live blockers (the shared
@@ -241,6 +241,46 @@ Cost: +253 B gzip on `dist/prod.js` (+1.0%); core reactivity benchmarks
 unchanged within noise. C2's `insertSubs` blanket lane-clear on reversion
 remains queued (still unobservable; needs dead-lane plumbing).
 
+## 5e. Revert-target elimination (2026-07-07b — A18 re-rule)
+
+The `_pendingValue` slot used to mean three things: a plain write awaiting
+flush commit, a transition-held value awaiting transition commit, and the
+*revert target* for an active override (refreshed from four write sites,
+committed by `resolveOptimisticNodes` at revert). The third meaning is gone.
+The invariant set is now:
+
+- **`_pendingValue` has one meaning: a pending commit.** Every held value
+  elevates to `_value` at its own transition's commit (or the plain flush
+  commit), through `queuePendingNode`/`commitPendingNode` — no exceptions.
+- **`_value` changes only at commit points.** Under an active override the
+  hold and its eventual commit are unobservable (A17: every reader gets the
+  override; the one raw-`_value` reader — the stashed-read exception — only
+  admits plain optimistic signals, which have no authoritative writer).
+- **Revert is a pure drop.** `resolveOptimisticNodes` clears the override,
+  compares it against `_value`, notifies on divergence — commits nothing.
+  Masked holds queue into their transition (`recompute`'s queue gate allows
+  override-active nodes through; `asyncWrite`'s override branch collapsed
+  into the resting branch), so nothing leaks (INV-7) and nothing reveals
+  before its transition completes.
+- Masked holds do **not** notify subscribers (`asyncWrite` skips
+  `insertSubs` under an active override): the visible value is unchanged;
+  the revert is the notification point.
+
+This fixed a real clobber bug (**V5**, pinned in the spec suite): the old
+first-override stash (`_pendingValue = _value`) overwrote a refetch value
+held on a resting node in the blocked-merged window, so the revert
+resurrected stale data. INV-2 no longer asserts a revert target; the INV-8
+hold-provenance tracker was deleted (one meaning — nothing to distinguish).
+
+An intermediate design ("silent commit": masked arrivals write `_value`
+directly, elevation immediate) was implemented and discarded — it kept the
+old reveal-at-revert timing but gave `_value` a context-dependent meaning.
+The commit-point discipline (maintainer re-rule of A18) reveals corrections
+atomically with their own (possibly merged) transition, reading
+`isPending === true` throughout (A20); corrections still *propagate*
+internally on arrival, so downstream refetches start immediately — the
+schedule only gates the reveal.
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose
@@ -337,7 +377,20 @@ remains queued (still unobservable; needs dead-lane plumbing).
   async in a merged transition must not delay the correction or the async it
   triggers. Together with A17: the override holds while its own fetch is in
   flight (transition can't complete and drop it), and yields the moment the
-  authoritative value arrives.
+  authoritative value arrives. **(Superseded by the 2026-07-07b re-rule
+  below.)**
+- 2026-07-07b: A18 re-ruled during the revert-target elimination (§5e) —
+  an override's lifetime is bound to **its own transition**, and `_value`
+  changes only at commit points. In unmerged graphs own-source resolution IS
+  the lane-transition's completion, so behavior coincides with the original
+  ruling (all original A18 pins unchanged). In genuinely merged transitions,
+  corrections reveal atomically with the merged completion — pending true
+  throughout (A20) — instead of escaping early via the revert-commit. The
+  "unrelated async must not delay" concern was re-examined: matching
+  confirmations collapse silently either way; corrections propagate
+  internally on arrival (no waterfalls); only the reveal is gated, honestly
+  dimmed. Maintainer: "the non-blocking aspect… this only gates the reveal";
+  "`_value` elevation should only happen at the end of the transition."
 
 - 2026-07-06: C4 → A17 — an active optimistic override is THE value for every
   reader (ambient and tracked), regardless of entanglement, until its owning

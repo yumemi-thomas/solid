@@ -224,25 +224,27 @@ export function handleAsync<T>(
       setter(value);
       if (wasUninitialized) clearStatus(el, true);
     } else if (el._overrideValue !== undefined) {
-      if (el._overrideValue !== NOT_PENDING) {
-        // Active override: hold the fresh value as the revert target. The override
-        // stays visible, so this must not commit.
-        el._pendingValue = value;
-        if (__DEV__) devTrackHeldPending(el, "revert");
-      } else {
-        // Resting optimistic node (no active override): commit through the shared
-        // pending-node path, exactly like a plain async memo, so the commit clears
-        // STATUS_UNINITIALIZED — no divergence from a non-optimistic source (#2806).
-        if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
-        el._pendingValue = value;
-        if (__DEV__) devTrackHeldPending(el);
-        // The hold is a companion-visible write like any other (A13/A19): the
-        // clearStatus() above computed its verdict before the hold existed, so
-        // isPending must re-derive (the value is not final until commit — V1)
-        // and latest() must see the fresh in-flight value (V2).
-        syncCompanions(el, value);
-        insertSubs(el);
-      }
+      // Optimistic node — resting OR masked by an active override — holds
+      // through the shared pending-node path, exactly like a plain async memo,
+      // so the commit clears STATUS_UNINITIALIZED (#2806) and elevation to
+      // _value happens on this value's OWN transition schedule (A18 as
+      // re-ruled 2026-07-07: _value only changes at commit points). With an
+      // override active the hold and its eventual commit are unobservable
+      // (A17 — every reader sees the override); the revert reveals whatever
+      // has committed by then, so corrections reveal atomically with their
+      // transition rather than escaping it.
+      if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
+      el._pendingValue = value;
+      if (__DEV__) devTrackHeldPending(el);
+      // The hold is a companion-visible write like any other (A13/A19): the
+      // clearStatus() above computed its verdict before the hold existed, so
+      // isPending must re-derive (the value is not final until commit — V1)
+      // and latest() must see the fresh in-flight value (V2). Subscribers are
+      // only notified when the hold is visible to them: under an active
+      // override every reader sees the override (A17), so waking subs would
+      // re-show an unchanged view — the revert is the notification point.
+      syncCompanions(el, value);
+      if (!hasActiveOverride(el)) insertSubs(el);
       el._time = clock;
     } else if (lane) {
       // Route through lane's effect queue for independent flushing
