@@ -13,7 +13,7 @@ import {
   STATUS_PENDING,
   STATUS_UNINITIALIZED
 } from "./constants.js";
-import { currentOptimisticLane } from "./core.js";
+import { currentOptimisticLane, snapCompanionsToState } from "./core.js";
 import { DEV, emitDiagnostic } from "./dev.js";
 import { NotReadyError } from "./error.js";
 import { insertIntoHeap, runHeap, type Heap } from "./heap.js";
@@ -200,7 +200,11 @@ function mergeTransitionState(target: Transition, outgoing: Transition): void {
 }
 
 function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
-  for (let i = 0; i < nodes.length; i++) {
+  // Settlement writes below (snapCompanionsToState → updatePendingSignal-style
+  // notifications) may push fresh optimistic nodes; only this batch settles
+  // now, so iterate a fixed window and splice it out at the end.
+  const len = nodes.length;
+  for (let i = 0; i < len; i++) {
     const node = nodes[i];
     node._optimisticLane = undefined;
     if (node._pendingValue !== NOT_PENDING) {
@@ -220,7 +224,17 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
     if (prevOverride !== NOT_PENDING && node._value !== prevOverride) insertSubs(node, true);
     node._transition = null;
   }
-  nodes.length = 0;
+  // Settlement checkpoint (#2838): companions caught in this batch (or owned
+  // by a node in it) re-derive from committed state, so verdicts survive the
+  // transition that produced them (A19 — pending is a property of the data).
+  for (let i = 0; i < len; i++) {
+    const node = nodes[i];
+    if (node._pendingSignal || node._latestValueComputed) snapCompanionsToState(node);
+    const owner = node._parentSource;
+    if (owner && (owner._pendingSignal === node || owner._latestValueComputed === node))
+      snapCompanionsToState(owner);
+  }
+  nodes.splice(0, len);
 }
 
 function cleanupCompletedLanes(completingTransition: Transition | null): void {
@@ -459,7 +473,7 @@ export class GlobalQueue extends Queue {
             if (t._optimisticNodes.includes(n as OptimisticNode)) return true;
           return false;
         });
-        devCensusCompanions();
+        devCensusCompanions(n => n === this._pendingNode || this._pendingNodes.includes(n));
       }
       if (
         __DEV__ &&
@@ -615,6 +629,7 @@ function commitPendingNode(n: Signal<any>): void {
       n._value = n._pendingValue as any;
       n._pendingValue = NOT_PENDING;
     }
+    if (n._pendingSignal || n._latestValueComputed) snapCompanionsToState(n);
     return;
   }
   if (n._pendingValue !== NOT_PENDING) {
@@ -627,6 +642,7 @@ function commitPendingNode(n: Signal<any>): void {
   if (!(c._statusFlags! & STATUS_PENDING)) c._statusFlags! &= ~STATUS_UNINITIALIZED;
   if (c._pendingFirstChild !== null || c._pendingDisposal !== null)
     GlobalQueue._dispose(c as Computed<unknown>, false, true);
+  if (n._pendingSignal || n._latestValueComputed) snapCompanionsToState(n);
 }
 
 function commitPendingNodes() {

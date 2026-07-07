@@ -53,7 +53,6 @@ import {
 } from "./lanes.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
 import {
-  devCheckRestingCarveOut,
   devTrackCompanionOwner,
   devTrackHeldPending,
   devTrackOptimistic,
@@ -1139,10 +1138,10 @@ function getPendingSignal(el: Signal<any> | Computed<any>): Signal<boolean> {
   if (!el._pendingSignal) {
     // Start false, write true if pending - ensures reversion returns to false
     el._pendingSignal = optimisticSignal(false, { ownedWrite: true });
-    // Propagate parent-child lane relationship for isPending(() => latest(x))
-    if (el._parentSource) {
-      el._pendingSignal._parentSource = el;
-    }
+    // Back-reference to the owner: parent-child lane relationship (companion
+    // lanes never merge with the owner's lane) and the settlement checkpoint
+    // (resolveOptimisticNodes re-derives a reverted companion from its owner).
+    el._pendingSignal._parentSource = el;
     if (computePendingState(el)) setSignal(el._pendingSignal, true);
     if (__DEV__) devTrackCompanionOwner(el);
   }
@@ -1170,8 +1169,20 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
     // reports the firewall refetch like any async memo (#2831).
     const parentNode = el._parentSource as FirewallSignal<any>;
     const parent = (parentNode._firewall || parentNode) as Computed<any>;
-    if (parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED))
-      return true;
+    if (parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED)) {
+      // A20/V4: broad firewall inheritance is coordination, and the latest
+      // view strips coordination. On an optimistic-capable leaf with no
+      // unconfirmed edit (resting override), a pure firewall refresh is
+      // refresh noise the latest form must filter. Plain leaves (A9) and
+      // self-async parents (A8 — no firewall) keep reporting it; a leaf
+      // holding an active edit is confirmation-uncertainty, never stripped.
+      if (
+        !parentNode._firewall ||
+        parentNode._overrideValue === undefined ||
+        hasActiveOverride(parentNode)
+      )
+        return true;
+    }
     return el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED);
   }
   if (firewall && el._pendingValue !== NOT_PENDING) {
@@ -1193,34 +1204,17 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
     return true;
   }
-  // Upstream: value held in transition (not during initial load). Excluded for a
-  // *resting* optimistic node (`_overrideValue === NOT_PENDING`, no active override):
-  // its held `_pendingValue` belongs to a reverting optimistic write, not a refetch, so
-  // it must not read as pending. Muting pending is the job of an active override; a
-  // resting optimistic node otherwise behaves like a plain async memo and reports
-  // pending only via the downstream async-in-flight check below (#2799).
-  if (
-    el._overrideValue !== NOT_PENDING &&
-    el._pendingValue !== NOT_PENDING &&
-    !(comp._statusFlags & STATUS_UNINITIALIZED)
-  )
-    return true;
+  // Upstream: value held in transition (not during initial load). This applies
+  // to resting optimistic nodes too (V1/A13): a resting node never holds a
+  // revert target — every revert-target write coexists with an ACTIVE override,
+  // which already returned above — so a held value here is always a
+  // transition/refetch hold and must read as pending, exactly like a plain
+  // async memo (the #2799 carve-out that skipped this for resting optimistic
+  // nodes muted entangled refetch holds and was removed with the #2838 work).
+  if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) return true;
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
-  const pending = !!(
-    comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)
-  );
-  if (
-    __DEV__ &&
-    !pending &&
-    el._overrideValue === NOT_PENDING &&
-    el._pendingValue !== NOT_PENDING &&
-    !(comp._statusFlags & STATUS_UNINITIALIZED)
-  )
-    // The carve-out muted a held value AND nothing else reports pending: only
-    // sound for revert-target holds — a refetch hold here is the V1 lie.
-    devCheckRestingCarveOut(el);
-  return pending;
+  return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
 }
 
 /**
@@ -1257,6 +1251,74 @@ export function updatePendingSignal(el: Signal<any> | Computed<any>): void {
       signalLanes.delete(sig);
       sig._optimisticLane = undefined;
     }
+  }
+  // The latest() shadow's own verdict derives from the owner (its
+  // computePendingState consults `_parentSource`), so any owner state change
+  // that lands here must flow through to the shadow's companion too (#2838).
+  if (el._latestValueComputed) updatePendingSignal(el._latestValueComputed);
+}
+
+/**
+ * A firewall's status change re-derives the verdicts of its probed leaves:
+ * leaf companions consult the firewall (broad inheritance), so async
+ * starting/settling on the firewall must poke them or they keep a stale
+ * verdict forever (V4 stuck-companion class, #2838).
+ */
+export function updateChildCompanions(el: Computed<any>): void {
+  for (
+    let child: FirewallSignal<any> | null = el._child;
+    child !== null;
+    child = child._nextChild
+  ) {
+    if (child._pendingSignal || child._latestValueComputed) updatePendingSignal(child);
+  }
+}
+
+/**
+ * Settlement checkpoint (#2838): re-derive a node's companions directly from
+ * its committed state. Called when the transition machinery for the node is
+ * done with it — a pending commit or an optimistic revert. Verdicts are
+ * written committed (not through setSignal) because a transition-scoped
+ * override window opened here would itself need a settlement, re-scheduling
+ * forever while async is still in flight. This is what keeps companions
+ * coherent past transition completion: a verdict is a property of the data
+ * (A19), so it must survive the transition that happened to produce it.
+ */
+export function snapCompanionsToState(owner: Signal<any> | Computed<any>): void {
+  const sig = owner._pendingSignal;
+  // An active override on the companion belongs to a transition that is still
+  // running; its own settlement re-enters here after the revert.
+  if (sig && (sig._overrideValue === undefined || sig._overrideValue === NOT_PENDING)) {
+    const pending = computePendingState(owner);
+    if (sig._value !== pending || sig._pendingValue !== NOT_PENDING) {
+      sig._value = pending;
+      sig._pendingValue = NOT_PENDING;
+      sig._time = clock;
+      insertSubs(sig);
+      schedule();
+    }
+  }
+  const shadow = owner._latestValueComputed;
+  if (shadow && !(shadow._flags & REACTIVE_DISPOSED)) {
+    // The shadow may have cached a mid-transition view (a stale committed
+    // value read under a lane — the V2 read-order freeze) that no write path
+    // will ever correct. Invalidate it so the next read re-derives from
+    // committed state — but only when its committed value actually diverged;
+    // a shadow with an active override (or already holding the right value)
+    // is coherent and dirtying it mid-settlement would leak a half-settled
+    // view to subscribers.
+    if (
+      (shadow._overrideValue === undefined || shadow._overrideValue === NOT_PENDING) &&
+      shadow._pendingValue === NOT_PENDING &&
+      !Object.is(shadow._value, owner._value) &&
+      !(shadow._flags & (REACTIVE_DIRTY | REACTIVE_CHECK))
+    ) {
+      shadow._flags |= REACTIVE_DIRTY;
+      insertIntoHeap(shadow, shadow._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
+      insertSubs(shadow);
+      schedule();
+    }
+    snapCompanionsToState(shadow);
   }
 }
 

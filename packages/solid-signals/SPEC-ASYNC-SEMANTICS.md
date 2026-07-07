@@ -35,8 +35,8 @@ optimistic lanes.
 | A16 | (was B5) `isPending` never throws in untracked contexts — thunks that throw real errors or read uninitialized async sources yield `false`. Carve-out (B5a, pinned as current behavior): in *tracked* contexts the `NotReadyError` of an uninitialized source propagates so the reader participates in loading boundaries. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
 | A17 | (was C4) An *active* optimistic override is THE value for every **read** — ambient/untracked and tracked alike — regardless of transition entanglement. "It is the optimistic future value... it is both immediate and is the future until we know otherwise." "Knowing otherwise" is its own async source resolving (see A18); a transition whose optimistic node is still pending on its own fetch is not complete, so the override cannot be dropped early. **No-tearing is an effect-level concern, not a read-level one**: when async *derived from* the optimistic value is in flight, the lane holds its render effects (the rendered view keeps the committed state as a unit) — but direct reads still return the override ("direct read shows optimistic, effect waits"). Do NOT mask the override from any read path to prevent tearing; that breaks the real-world optimistic-UI contract. | maintainer ruling, 2026-07-06/07 | `tests/spec-async-semantics.test.ts`; downstream-async lane holding: `tests/createOptimistic.test.ts` (CategoryDisplay/News-Finance real-world sections) |
 | A18 | (was B4) An override's lifetime is bound to **its own async source**, not its transition. When the node's own fetch resolves, the authoritative value wins immediately — the override clears/corrects to the fresh value (never the pre-write value) — even while unrelated async in a merged transition is still pending. Rationale: "otherwise unrelated parts of a transition get held up waiting for other async to resolve, especially if the optimistic value needs correction and triggers further async" — the correction cascade must start on arrival. | maintainer ruling, 2026-07-07 | `tests/spec-async-semantics.test.ts` |
-| A19 | (was C1 — **partially reverses an earlier decision**) **Definition: `isPending(x)` ≡ the value you can currently observe for `x` is not the final one.** Three causes of non-finality, each ending on its own terms: (i) a write held by a live transition — ends at commit; (ii) the node's own async in flight — ends at resolution; (iii) a fresh value that arrived but is held uncommitted by a transition it's entangled with — ends at that commit. A node is pending while *any* cause holds it and final the moment none does — cascading async falls out of the definition rather than needing a rule ("once it can show its landed value it is no longer pending"). **The one boundary-scoped exception is the initial NotReady**: an uninitialized source is *loading*, not pending (A16/A12) — no observable value exists to be non-final — and its thrown `NotReadyError` must propagate to loading boundaries (A16/B5a) because SSR streaming and hydration reveal are driven by boundaries. Everywhere else, boundaries and reporters never enter the definition: they decide what renders and what a transition waits for, not verdicts. The rejected earlier framing ("if it isn't read somewhere that reports to the transition, it isn't actually pending") was a proxy for cause (i) wrongly applied to causes (ii)/(iii), tying data verdicts to graph-topology accidents. Causes (ii)/(iii) implementation lands with the #2838 shadow/companion redesign; until then the post-transition refetch window misreports `false` — pinned as expected failure **V3** (and V1 is the cause-(iii) instance). | maintainer ruling, 2026-07-07 | cause (i) + boundary interplay: `tests/spec-async-semantics.test.ts`; causes (ii)/(iii): `tests/spec-async-open-questions.test.ts` (V3/V1, `it.fails` until the redesign) |
-| A20 | **Overrides are unsettled; pending scope is a property of the read; `latest` strips coordination, nothing strips confirmation.** (1) An *active* optimistic override reads `isPending === true` — uniformly, on every node kind (signal, computed, store leaf). Overrides mask stale *content* (A17), not *settlement*: until the node's own source confirms the guess (A18) or the transition reverts it, the shown value is unconfirmed. `isPending` reports unsettledness, never what UI to show — the community no-extra-boolean idioms (`isPending(() => books.length)` as the "Adding…" label) depend on this. Non-derived optimistic signals/stores are the degenerate case: no source can ever confirm them (they are transaction-scoped values, not predictions), so reversion is certain and they are pending for the override's whole lifetime. (2) Scope: `isPending(fn)` reports unsettledness of what `fn` *touched*. A refetch pends every read of a store because the authority's change set is unbounded; an optimistic write pends exactly the leaves it wrote (known change set) — untouched siblings stay settled. Broadness is not a store rule, it is what unbounded uncertainty looks like. (3) The three forms: a transition hold and broad firewall inheritance are *coordination* (future value known; the wait is atomicity) — the `latest` view absorbs them. A node's own async in flight and an active override are *confirmation-uncertainty* (future value unknown) — pending under **both** plain and latest forms (consistent with A8 for self-async memos). Pairing rule: render `x()` → `isPending(x)`; render the optimistic visual `latest(x)` → `isPending(() => latest(x))`. `latest` discriminates *whose* unsettledness you read, never *why*: on store leaves it filters inherited firewall breadth (the "refresh-noise" idiom); on standalone self-async nodes it is identical to the plain form (A8) — a node's refresh and its confirmation are the same event, so the edit-vs-reload question needs granularity (a store leaf) or a separate transaction-scoped flag. (4) No contradiction with "optimism guards against pending" (News/Finance): the guard is downstream value-shielding — the override stops invalidation from cascading, so a downstream memo stays clean and its own verdict stays `false`; pending propagates through async status, not cached values, so the optimistic node's own `true` never reads through a clean memo. | maintainer ruling, 2026-07-07 (this supersedes the earlier "override assumes not pending" framing — that instinct is honored on the *value* axis by A17, not the settlement axis) | `tests/spec-async-semantics.test.ts`; downstream shielding: `tests/createOptimistic.test.ts` (News/Finance action pattern); latest-form leaf filter pinned as expected failure **V4** |
+| A19 | (was C1 — **partially reverses an earlier decision**) **Definition: `isPending(x)` ≡ the value you can currently observe for `x` is not the final one.** Three causes of non-finality, each ending on its own terms: (i) a write held by a live transition — ends at commit; (ii) the node's own async in flight — ends at resolution; (iii) a fresh value that arrived but is held uncommitted by a transition it's entangled with — ends at that commit. A node is pending while *any* cause holds it and final the moment none does — cascading async falls out of the definition rather than needing a rule ("once it can show its landed value it is no longer pending"). **The one boundary-scoped exception is the initial NotReady**: an uninitialized source is *loading*, not pending (A16/A12) — no observable value exists to be non-final — and its thrown `NotReadyError` must propagate to loading boundaries (A16/B5a) because SSR streaming and hydration reveal are driven by boundaries. Everywhere else, boundaries and reporters never enter the definition: they decide what renders and what a transition waits for, not verdicts. The rejected earlier framing ("if it isn't read somewhere that reports to the transition, it isn't actually pending") was a proxy for cause (i) wrongly applied to causes (ii)/(iii), tying data verdicts to graph-topology accidents. Causes (ii)/(iii) were implemented by the #2838 shadow/companion redesign (2026-07-07) — see V3/V1 under Known violations (fixed). | maintainer ruling, 2026-07-07 | cause (i) + boundary interplay: `tests/spec-async-semantics.test.ts`; causes (ii)/(iii): same file, "V1–V4" describe |
+| A20 | **Overrides are unsettled; pending scope is a property of the read; `latest` strips coordination, nothing strips confirmation.** (1) An *active* optimistic override reads `isPending === true` — uniformly, on every node kind (signal, computed, store leaf). Overrides mask stale *content* (A17), not *settlement*: until the node's own source confirms the guess (A18) or the transition reverts it, the shown value is unconfirmed. `isPending` reports unsettledness, never what UI to show — the community no-extra-boolean idioms (`isPending(() => books.length)` as the "Adding…" label) depend on this. Non-derived optimistic signals/stores are the degenerate case: no source can ever confirm them (they are transaction-scoped values, not predictions), so reversion is certain and they are pending for the override's whole lifetime. (2) Scope: `isPending(fn)` reports unsettledness of what `fn` *touched*. A refetch pends every read of a store because the authority's change set is unbounded; an optimistic write pends exactly the leaves it wrote (known change set) — untouched siblings stay settled. Broadness is not a store rule, it is what unbounded uncertainty looks like. (3) The three forms: a transition hold and broad firewall inheritance are *coordination* (future value known; the wait is atomicity) — the `latest` view absorbs them. A node's own async in flight and an active override are *confirmation-uncertainty* (future value unknown) — pending under **both** plain and latest forms (consistent with A8 for self-async memos). Pairing rule: render `x()` → `isPending(x)`; render the optimistic visual `latest(x)` → `isPending(() => latest(x))`. `latest` discriminates *whose* unsettledness you read, never *why*: on store leaves it filters inherited firewall breadth (the "refresh-noise" idiom); on standalone self-async nodes it is identical to the plain form (A8) — a node's refresh and its confirmation are the same event, so the edit-vs-reload question needs granularity (a store leaf) or a separate transaction-scoped flag. (4) No contradiction with "optimism guards against pending" (News/Finance): the guard is downstream value-shielding — the override stops invalidation from cascading, so a downstream memo stays clean and its own verdict stays `false`; pending propagates through async status, not cached values, so the optimistic node's own `true` never reads through a clean memo. | maintainer ruling, 2026-07-07 (this supersedes the earlier "override assumes not pending" framing — that instinct is honored on the *value* axis by A17, not the settlement axis) | `tests/spec-async-semantics.test.ts`; downstream shielding: `tests/createOptimistic.test.ts` (News/Finance action pattern); latest-form leaf filter: **V4** in the "V1–V4" describe (fixed 2026-07-07) |
 
 ## Tier B (inferred — needs verdict)
 
@@ -81,43 +81,49 @@ Tier A.
   entangled (merged) transition completed on the first flush and silently
   dropped the override. Fixed by removing the self-source exclusion.
 
-## Known violations (expected failures, found 2026-07-06)
+## Known violations — ALL FIXED by the #2838 redesign (2026-07-07)
 
-Two ruled Tier A propositions are violated in the **blocked-merged window**
-(a node's own fetch resolved, but a shared reader entangles it with another
-still-pending async source, so nothing commits). Reproduced as `it.fails`
-cases in `tests/spec-async-open-questions.test.ts` — when one starts passing,
-its bug is fixed and the test should move to the spec file:
+Four ruled Tier A propositions were violated, mostly in the **blocked-merged
+window** (a node's own fetch resolved, but a shared reader entangles it with
+another still-pending async source, so nothing commits). All four now pass
+and are pinned as spec tests in `tests/spec-async-semantics.test.ts`
+("V1–V4" describe); the former `it.fails` characterization file
+(`spec-async-open-questions.test.ts`) is retired. What each was, and what
+fixed it:
 
-- **V1 (violates A13).** A *resting* optimistic node reports
-  `isPending === false` in the window while still showing the stale value;
-  the plain-memo control reports `true` at the same checkpoint. Root cause:
-  `computePendingState`'s #2799 carve-out skips the held `_pendingValue` for
-  every resting optimistic node, but here the held value comes from an
-  entangled refetch, not a reverting optimistic write. A fix must
-  distinguish those two reasons for holding a value.
-- **V2 (violates A7/A13).** `latest()`'s verdict in the window is
-  *read-order dependent*: a probe made while both fetches are in flight
-  freezes the shadow at the stale value for the entire window, and override
-  interleavings surface `[isPending, latest] === [false, undefined]` — the
-  pair A7 rules out. Root cause: the probe-driven shadow design (#2838);
-  verdicts must not depend on when a consumer happened to read.
-- **V3 (violates A19, ruled 2026-07-07).** In pure-signals graphs the
-  transition completes while the refetch is still in flight; an existing
-  `isPending` companion keeps its lane-scoped verdict (`false`) through the
-  window even though `latest()` still shows the stale value. A19 says
-  pending is a property of the data (refetch in flight + stale value
-  visible), so this must read `true`. Root cause: the companion caches a
-  boundary-scoped verdict instead of deriving from the data's state —
-  same design family as V1/V2, fixed by the #2838 redesign.
-- **V4 (violates A20's three-form algebra, found 2026-07-07).** The
-  latest-form on an untouched store leaf must filter a pure firewall refresh
-  (coordination) — `isPending(() => latest(() => leaf))` must read `false`
-  while the plain form reads `true`. Currently it reads `true`, and once the
-  refresh settles the leaf's companion is **stuck true forever** (the INV-4
-  quiescence assertion catches the stuck state as an unhandled error). This
-  breaks the community "refresh-noise filter" idiom. Root cause: the
-  probe-driven companion design — #2838 family with V1–V3.
+- **V1 (violated A13) — FIXED.** A *resting* optimistic node reported
+  `isPending === false` in the window while still showing the stale value.
+  Root cause: `computePendingState`'s #2799 carve-out skipped the held
+  `_pendingValue` for every resting optimistic node. The INV-8 provenance
+  probe proved a resting node can never hold a *revert target* (revert
+  targets only coexist with an ACTIVE override — the revert itself commits
+  the value), so the carve-out was removed outright: a held value on a
+  resting node is always a refetch/transition hold and reads pending, like a
+  plain memo. `asyncWrite`'s resting-hold branch also now syncs companions
+  like every other write path.
+- **V2 (violated A7/A13) — FIXED.** `latest()`'s verdict in the window was
+  *read-order dependent*: an early probe froze the shadow at the stale value
+  for the entire window. Fixed by the same resting-hold companion sync (the
+  arriving value is pushed into the shadow) plus the settlement checkpoint
+  (`snapCompanionsToState`): commits/reverts invalidate a shadow whose
+  cached value diverged from committed state, so it re-derives on next pull.
+- **V3 (violated A19) — FIXED.** After a reporter-less transition completed,
+  an existing companion kept its transition-scoped `false` while the refetch
+  was still in flight. Fixed by the settlement checkpoint: when
+  `resolveOptimisticNodes`/`commitPendingNode` settle a node (or its
+  companion), the companion re-derives from `computePendingState` and the
+  verdict is written *committed* — verdicts are a property of the data (A19)
+  and survive the transition that produced them.
+- **V4 (violated A20's three-form algebra) — FIXED.** The latest-form on an
+  optimistic store leaf with no unconfirmed edit now filters a pure firewall
+  refresh (`computePendingState` strips broad firewall inheritance for
+  resting optimistic-capable leaves — plain store leaves keep A9, standalone
+  self-async nodes keep A8), and the stuck-true companion is gone: a
+  firewall's status change pokes the companions of its probed leaves
+  (`updateChildCompanions`).
+
+The companion-vs-oracle census (`COMPANION_CENSUS=1`) reports **zero
+divergence fingerprints** across the suite post-redesign.
 
 ## Process
 

@@ -46,17 +46,18 @@ export const InvariantHooks: {
 const heldPendingNodes = new Set<AnyNode>();
 
 /**
- * INV-8 (pre-redesign, V1 class): why a node's `_pendingValue` is held.
+ * INV-8: why a node's `_pendingValue` is held.
  * - "revert" — revert target for an optimistic override: set on first
- *   override, updated by corrections while the override is active.
+ *   override, updated by corrections while the override is active. Only
+ *   exists while the override is ACTIVE (the revert commits the value).
  * - "held" — a transition/refetch hold awaiting commit: plain held writes,
  *   transition-held sync recomputes, resting-node async resolutions.
- * `computePendingState`'s resting-optimistic carve-out (#2799) exists to mute
- * *revert* holds only; a "held" hold reaching that carve-out while the
- * downstream async check reports false means isPending lies (V1).
+ * The distinction located V1's root cause (the #2799 carve-out muted "held"
+ * holds); the carve-out is gone, but write sites keep declaring provenance —
+ * it documents intent and backs future INV-8 assertions.
  */
 export type PendingHoldKind = "revert" | "held";
-const pendingHoldProvenance = new WeakMap<AnyNode, PendingHoldKind>();
+export const pendingHoldProvenance = new WeakMap<AnyNode, PendingHoldKind>();
 
 // INV-4: nodes that own isPending()/latest() companions, checked for
 // companion coherence at quiescence (#2831 class).
@@ -70,20 +71,6 @@ export function devTrackHeldPending(node: AnyNode, kind: PendingHoldKind = "held
   if (!__TEST__) return;
   heldPendingNodes.add(node);
   pendingHoldProvenance.set(node, kind);
-}
-
-/**
- * INV-8 probe: called from computePendingState when the resting-optimistic
- * carve-out (#2799) is about to skip a held `_pendingValue`. Skipping is only
- * sound for revert-target holds; muting a refetch/transition hold makes
- * isPending lie (V1). Non-asserting for now — the V1 `it.fails` test pins the
- * user-visible symptom; this reports every internal occurrence so the
- * redesign can verify the carve-out never fires for "held" provenance.
- */
-export let restingCarveOutMutedHeldCount = 0;
-export function devCheckRestingCarveOut(node: AnyNode): void {
-  if (!__TEST__) return;
-  if (pendingHoldProvenance.get(node) === "held") restingCarveOutMutedHeldCount++;
 }
 
 export function devTrackCompanionOwner(node: AnyNode): void {
@@ -193,7 +180,7 @@ const censusEnabled =
   typeof globalThis !== "undefined" && !!(globalThis as any).process?.env?.COMPANION_CENSUS;
 const censusSeen = new Map<string, number>();
 
-export function devCensusCompanions(): void {
+export function devCensusCompanions(isQueuedForCommit?: (node: AnyNode) => boolean): void {
   if (!__TEST__ || !censusEnabled) return;
   const oracle = InvariantHooks.computePendingState;
   if (!oracle) return;
@@ -203,6 +190,11 @@ export function devCensusCompanions(): void {
     const hasOverride = node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING;
     const resting = node._overrideValue === NOT_PENDING;
     const held = node._pendingValue !== NOT_PENDING;
+    // A held write already queued in the global commit queue lands on the
+    // next flush; probes inside this one-flush window observe the fresh
+    // value, so the A10 pair rule mutes the verdict for them — the
+    // companion/oracle disagreement is unobservable, not a divergence.
+    if (held && isQueuedForCommit?.(node)) continue;
     const sp = !!(comp._statusFlags & STATUS_PENDING);
     const su = !!(comp._statusFlags & STATUS_UNINITIALIZED);
     const stateKey =
@@ -211,19 +203,37 @@ export function devCensusCompanions(): void {
 
     const pendingSignal = node._pendingSignal;
     if (pendingSignal) {
-      const cached = pendingSignal._value;
+      // Compare what a read would actually observe (A17: an active override
+      // IS the value), not the raw committed slot — mid-transition the
+      // verdict legitimately lives in the companion's override.
+      const cached =
+        pendingSignal._overrideValue !== undefined && pendingSignal._overrideValue !== NOT_PENDING
+          ? pendingSignal._overrideValue
+          : pendingSignal._value;
       const fresh = oracle(node);
       if (cached !== fresh) {
         censusRecord(`pending companion=${cached} oracle=${fresh} ${stateKey}`);
       }
     }
     const shadow = node._latestValueComputed;
-    if (shadow && !(shadow._flags & (REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_DISPOSED))) {
+    if (
+      shadow &&
+      !(shadow._flags & (REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_DISPOSED)) &&
+      // A never-initialized shadow (first read threw NotReady inside a probe)
+      // has cached nothing that could be stale — the next pull computes it.
+      !(shadow._statusFlags & STATUS_UNINITIALIZED)
+    ) {
       // Latest-view oracle: override if active, else the held in-flight
-      // value, else the committed value (A17/A20 read order).
+      // value, else the committed value (A17/A20 read order) — on both sides.
       const expected = hasOverride ? node._overrideValue : held ? node._pendingValue : node._value;
+      const shadowOverride =
+        shadow._overrideValue !== undefined && shadow._overrideValue !== NOT_PENDING;
       const shadowHeld = shadow._pendingValue !== NOT_PENDING;
-      const effective = shadowHeld ? shadow._pendingValue : shadow._value;
+      const effective = shadowOverride
+        ? shadow._overrideValue
+        : shadowHeld
+          ? shadow._pendingValue
+          : shadow._value;
       if (!Object.is(effective, expected)) {
         const label =
           effective === undefined

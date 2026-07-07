@@ -549,10 +549,10 @@ describe("A19 (was C1): isPending(x) = the observable value of x is not final", 
   // transition (ends at that commit). Pending while any cause holds, final
   // the moment none does. Uninitialized async is loading, not pending —
   // the initial NotReady plays to boundaries (SSR/hydration), see A16.
-  // These tests pin the cause-(i) half and the boundary interplay, which the
-  // implementation already gets right. Causes (ii)/(iii) — verdicts that must
-  // survive the transition's death — are pinned as expected failures V3/V1 in
-  // spec-async-open-questions.test.ts until the #2838 redesign.
+  // These tests pin the cause-(i) half and the boundary interplay. Causes
+  // (ii)/(iii) — verdicts that must survive the transition's death — were
+  // implemented by the #2838 redesign and are pinned in the "V1–V4" describe
+  // at the bottom of this file.
 
   it("cause (i): a held trigger write is pending until commit, final at commit", async () => {
     const [tick, setTick] = createSignal(1);
@@ -777,5 +777,193 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     expect(state.title).toBe("t1"); // reverted (non-derived store: transaction-scoped)
     expect(isPending(() => state.title)).toBe(false);
     expect(isPending(() => state.author)).toBe(false);
+  });
+});
+
+/**
+ * V1–V4 — the four known violations found while characterizing the
+ * blocked-merged-transition window (2026-07-06/07), fixed by the #2838
+ * companion/shadow redesign (2026-07-07). Formerly `it.fails` pins in
+ * spec-async-open-questions.test.ts; promoted here on the day they flipped.
+ *
+ * The "blocked-merged window": a node's own fetch resolved, but a shared
+ * reader entangles it with another still-pending async source, so nothing
+ * commits yet.
+ */
+describe("V1–V4: verdicts in and after the blocked-merged window (fixed 2026-07-07)", () => {
+  // Shared harness: data's async is entangled with a second async source
+  // through a shared reader; data's own fetch has resolved, but the merged
+  // transition is still blocked on the other fetch.
+  async function enterBlockedWindow(kind: "plain" | "optimistic", prime: boolean) {
+    const [id, setId] = createSignal(1);
+    const [other, setOther] = createSignal(1);
+    const dataFetch = deferredFetcher((t: number) => t * 10);
+    const otherFetch = deferredFetcher((t: number) => t * 100);
+
+    let data!: SourceAccessor<number>;
+    createRoot(() => {
+      if (kind === "plain") {
+        data = createMemo(() => dataFetch.fetch(id()));
+      } else {
+        data = createOptimistic(() => dataFetch.fetch(id()))[0];
+      }
+      const mOther = createMemo(() => otherFetch.fetch(other()));
+      const joined = createMemo(() => `${data()}|${mOther()}`);
+      createRenderEffect(joined, () => {});
+    });
+    flush();
+    dataFetch.resolveAll();
+    otherFetch.resolveAll();
+    await settle();
+    if (prime) {
+      latest(data);
+      isPending(data);
+    }
+
+    setId(2);
+    setOther(2);
+    flush();
+    dataFetch.resolveAll();
+    await settle();
+    // In the window now: data's fetch resolved to 20, transition blocked on other.
+    return {
+      data,
+      finish: async () => {
+        otherFetch.resolveAll();
+        await settle();
+      }
+    };
+  }
+
+  // Control: the plain memo's behavior in the window — the reference point
+  // A13 holds the resting optimistic node to.
+  it("control (plain memo): stale read, fresh latest, isPending true in the window", async () => {
+    const w = await enterBlockedWindow("plain", true);
+    expect(w.data()).toBe(10);
+    expect(latest(w.data)).toBe(20);
+    expect(isPending(w.data)).toBe(true);
+    await w.finish();
+    expect(w.data()).toBe(20);
+    expect(isPending(w.data)).toBe(false);
+  });
+
+  // V1 (A13): a resting optimistic node in the window matches the plain-memo
+  // control — stale read, isPending TRUE. Fixed by (a) removing the #2799
+  // carve-out from computePendingState (a resting node never holds a revert
+  // target — revert targets only coexist with an ACTIVE override — so a held
+  // value on a resting node is always a refetch/transition hold), and (b)
+  // asyncWrite's resting hold syncing companions like every other write.
+  it("V1/A13: resting optimistic reports isPending true in the window", async () => {
+    const w = await enterBlockedWindow("optimistic", true);
+    expect(w.data()).toBe(10);
+    expect(latest(w.data)).toBe(20);
+    expect(isPending(w.data)).toBe(true);
+    await w.finish();
+    expect(w.data()).toBe(20);
+    expect(isPending(w.data)).toBe(false);
+  });
+
+  // V1, unprimed variant: companions created *inside* the window must derive
+  // the same verdict as pre-existing ones — verdicts don't depend on when the
+  // consumer first probed.
+  it("V1/A13: a companion created inside the window derives the same verdict", async () => {
+    const w = await enterBlockedWindow("optimistic", false);
+    expect(isPending(w.data)).toBe(true);
+    await w.finish();
+    expect(isPending(w.data)).toBe(false);
+  });
+
+  // V2 (A7/A13): latest()'s verdict must not be read-order dependent. An
+  // early probe (made while both fetches were in flight) must not freeze the
+  // shadow at the stale value for the rest of the window. Fixed by the same
+  // resting-hold companion sync: the arriving value is pushed into the
+  // shadow instead of waiting for a recompute that never comes.
+  it("V2/A7: an early probe does not freeze latest() at the stale value for the window", async () => {
+    const w = await enterBlockedWindow("optimistic", true);
+    // (enterBlockedWindow probed once in-flight via prime, then the data
+    // fetch landed.) latest() now shows the fresh in-flight value:
+    expect(latest(w.data)).toBe(20);
+    expect(isPending(w.data)).toBe(true);
+    await w.finish();
+    expect(latest(w.data)).toBe(20);
+    expect(isPending(w.data)).toBe(false);
+  });
+
+  // V3 (A19): isPending is data-centric — cause (ii) of non-finality (own
+  // async in flight) survives the transition's death. In pure-signals graphs
+  // (no render-effect reporters) the transition completes on the first flush
+  // while the refetch is still in flight; the companion must re-derive from
+  // the data's state, not keep a transition-scoped verdict. Fixed by the
+  // settlement checkpoint: optimistic reverts re-derive companions from
+  // committed state (snapCompanionsToState).
+  it("V3/A19: isPending stays true during the post-transition refetch window", async () => {
+    const [tick, setTick] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+
+    let data!: SourceAccessor<number>;
+    createRoot(() => {
+      data = createMemo(() => fetcher.fetch(tick()));
+    });
+
+    isPending(data); // companion exists before the write
+    fetcher.resolveAll();
+    await settle();
+    expect(latest(data)).toBe(10);
+    expect(isPending(data)).toBe(false);
+
+    setTick(2);
+    flush();
+    // Transition already completed (no reporters), refetch in flight, the
+    // observable value is the stale 10 — not final, so pending is true.
+    expect(latest(data)).toBe(10);
+    expect(isPending(data)).toBe(true);
+
+    fetcher.resolveAll();
+    await settle();
+    expect(latest(data)).toBe(20);
+    expect(isPending(data)).toBe(false);
+  });
+
+  // V4 (A20 three-form algebra): `latest` strips COORDINATION. A firewall
+  // refetch seen from an optimistic store leaf with no unconfirmed edit is
+  // coordination-shaped (broad inheritance), so the latest form filters it
+  // while the plain form reports it — the community "refresh-noise" idiom.
+  // And once the refresh settles, the verdict clears (the firewall's status
+  // change pokes probed leaf companions — no more stuck-true companion).
+  it("V4/A20: latest-form on an optimistic store leaf filters a pure firewall refresh and clears at settle", async () => {
+    let resolveFetch!: (n: number) => void;
+    const [tick, setTick] = createSignal(0);
+    let state!: { title: string };
+    createRoot(() => {
+      [state] = createOptimisticStore(
+        async (s: { title: string }) => {
+          tick();
+          const n = await new Promise<number>(r => (resolveFetch = r));
+          s.title = "server" + n;
+        },
+        { title: "init" }
+      );
+      createRenderEffect(
+        () => state.title,
+        () => {}
+      );
+    });
+    flush();
+    resolveFetch(1);
+    await settle();
+    expect(state.title).toBe("server1");
+
+    // Pure refresh: no optimistic edit anywhere. The plain form reports the
+    // broad refetch; the latest form filters it.
+    setTick(1);
+    flush();
+    expect(isPending(() => state.title)).toBe(true);
+    expect(isPending(() => latest(() => state.title))).toBe(false);
+
+    resolveFetch(2);
+    await settle();
+    expect(state.title).toBe("server2");
+    expect(isPending(() => state.title)).toBe(false);
+    expect(isPending(() => latest(() => state.title))).toBe(false);
   });
 });

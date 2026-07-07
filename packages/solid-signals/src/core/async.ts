@@ -10,7 +10,14 @@ import {
   STATUS_PENDING,
   STATUS_UNINITIALIZED
 } from "./constants.js";
-import { context, setSignal, syncCompanions, untrack, updatePendingSignal } from "./core.js";
+import {
+  context,
+  setSignal,
+  syncCompanions,
+  untrack,
+  updateChildCompanions,
+  updatePendingSignal
+} from "./core.js";
 import { devTrackHeldPending } from "./invariants.js";
 import { emitDiagnostic } from "./dev.js";
 import { NotReadyError, StatusError } from "./error.js";
@@ -229,6 +236,11 @@ export function handleAsync<T>(
         if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
         el._pendingValue = value;
         if (__DEV__) devTrackHeldPending(el);
+        // The hold is a companion-visible write like any other (A13/A19): the
+        // clearStatus() above computed its verdict before the hold existed, so
+        // isPending must re-derive (the value is not final until commit — V1)
+        // and latest() must see the fresh in-flight value (V2).
+        syncCompanions(el, value);
         insertSubs(el);
       }
       el._time = clock;
@@ -366,7 +378,8 @@ export function clearStatus(el: Computed<any>, clearUninitialized: boolean = fal
   el._statusFlags = clearUninitialized ? 0 : el._statusFlags & STATUS_UNINITIALIZED;
   if (el._error) setPendingError(el);
   // Update pending signal for isPending() reactivity
-  if (el._pendingSignal) updatePendingSignal(el);
+  if (el._pendingSignal || el._latestValueComputed) updatePendingSignal(el);
+  if (el._child) updateChildCompanions(el);
   if (el._notifyStatus) el._notifyStatus();
 }
 
@@ -406,6 +419,7 @@ export function notifyStatus(
       el._error = error;
     }
     updatePendingSignal(el);
+    if (el._child) updateChildCompanions(el);
   }
 
   if (lane && !blockStatus) {

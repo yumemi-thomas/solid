@@ -139,7 +139,8 @@ two findings — one real defect, one wrong assumption of mine:
   read-order dependence / `[false, undefined]`) and one new open question
   (C4: ambient reads of an active override see the committed value when
   entangled, the override when not). See SPEC-ASYNC-SEMANTICS.md "Known
-  violations" and `tests/spec-async-open-questions.test.ts`.
+  violations" (all fixed 2026-07-07; pinned in
+  `tests/spec-async-semantics.test.ts`, "V1–V4" describe).
 - **C4 root cause (ruled + fixed same day).** The entangled divergence was a
   premature revert, not a read-path issue: on the first flush after the write,
   `transitionComplete`'s reporter loop found no live blockers (the shared
@@ -193,6 +194,53 @@ must be updated at exactly four transition points — status-flag transitions
 and (for shadows) initialization from the committed value + override
 mirroring. Those four cover all nine fingerprints plus V1–V4.
 
+## 5d. The redesign as landed (2026-07-07, closes #2838's core)
+
+Companions stayed lazy and probe-created; what changed is that every oracle
+input now flows through to them, and settlement re-derives them:
+
+1. **Oracle simplification (V1).** The #2799 resting-optimistic carve-out in
+   `computePendingState` was removed. INV-8 provenance proved a resting node
+   can never hold a revert target (revert targets only coexist with an ACTIVE
+   override; the revert commits the value), so a held value on a resting node
+   is always a refetch/transition hold — pending, like a plain memo.
+2. **Missing write path (V1/V2).** `asyncWrite`'s resting-hold branch now
+   calls `syncCompanions` like every other write: the arriving value updates
+   the verdict and is pushed into the `latest()` shadow (no more read-order
+   freeze).
+3. **Settlement checkpoint (V3).** `snapCompanionsToState(owner)`: called
+   from `commitPendingNode` and `resolveOptimisticNodes` (second pass over
+   the settled batch — the batch is spliced, not cleared, because snaps can
+   push fresh optimistic nodes). It re-derives the companion from
+   `computePendingState` and writes the verdict COMMITTED (not via
+   `setSignal` — an override window opened at settlement would itself need a
+   settlement, re-scheduling forever while async is in flight). A companion
+   with an active override is skipped: its own revert re-enters the snap.
+   Shadows whose cached value diverged from committed state are invalidated
+   (dirty + heap + notify) so the next pull re-derives; coherent shadows are
+   left alone (dirtying them re-ran effects with half-settled state).
+   `_pendingSignal._parentSource` is now always the owner (was: only for
+   store-leaf chains) so the checkpoint can find the owner from a reverted
+   companion.
+4. **Status pokes flow to the whole companion tree (V3/V4).**
+   `updatePendingSignal(el)` recurses into `el._latestValueComputed` (the
+   shadow's verdict derives from the owner), and `notifyStatus`/`clearStatus`
+   on a firewall call `updateChildCompanions` — probed leaves re-derive when
+   the firewall's async starts/settles (no more stuck-true leaf companions).
+5. **A20 latest-form filter (V4).** `computePendingState`'s `_parentSource`
+   branch strips broad firewall inheritance for optimistic-capable leaves
+   with no unconfirmed edit; plain leaves keep A9, standalone self-async
+   keeps A8, an active leaf edit is confirmation-uncertainty and never
+   stripped.
+
+Post-redesign census: **zero divergence fingerprints** across the suite
+(the census itself was refined to compare the companion's *visible* value —
+override first, A17 — and to ignore one-flush holds already queued for
+commit, where the A10 pair rule makes the disagreement unobservable).
+Cost: +253 B gzip on `dist/prod.js` (+1.0%); core reactivity benchmarks
+unchanged within noise. C2's `insertSubs` blanket lane-clear on reversion
+remains queued (still unobservable; needs dead-lane plumbing).
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose
@@ -219,6 +267,10 @@ mirroring. Those four cover all nine fingerprints plus V1–V4.
 
 ## 7. Decision log
 
+- 2026-07-07: #2838 core redesign landed — V1–V4 fixed (see §5d). The
+  carve-out removal reverses the #2799 *mechanism* while preserving its
+  intent (the original #2799 symptom — pending muted during refresh — is
+  covered by the A13 spec tests; the fix's over-broad skip was V1's cause).
 - 2026-07-07: considered and REJECTED — mode-conditional NotReady from
   `isPending` (throw only during SSR/hydration, return a value in CSR).
   Rationale for rejection: (1) the tracked-uninitialized read is the ONLY
