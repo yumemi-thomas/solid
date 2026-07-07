@@ -70,9 +70,15 @@ export function mergeLanes(lane1: OptimisticLane, lane2: OptimisticLane): Optimi
   if (lane1 === lane2) return lane1;
 
   lane2._mergedInto = lane1;
+  // Move (not copy) the merged lane's work: after the merge all routing goes
+  // through findLane() to the root, so anything left behind here is dead —
+  // and anything *added* here later is a routing bug (INV-5).
   for (const node of lane2._pendingAsync) lane1._pendingAsync.add(node);
+  lane2._pendingAsync.clear();
   lane1._effectQueues[0].push(...lane2._effectQueues[0]);
   lane1._effectQueues[1].push(...lane2._effectQueues[1]);
+  lane2._effectQueues[0].length = 0;
+  lane2._effectQueues[1].length = 0;
 
   return lane1;
 }

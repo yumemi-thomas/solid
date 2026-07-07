@@ -24,6 +24,14 @@ import {
   hasActiveOverride,
   signalLanes
 } from "./lanes.js";
+import {
+  beginAsyncReporterWrites,
+  createAsyncReporters,
+  devCheckFlushStart,
+  devCheckMergedLaneEmpty,
+  devCheckQuiescent,
+  endAsyncReporterWrites
+} from "./invariants.js";
 import type { Computed, Signal } from "./types.js";
 
 export { activeLanes, assignOrMergeLane, findLane };
@@ -116,6 +124,7 @@ export function shouldReadStashedOptimisticValue(node: Signal<any>): boolean {
  */
 function runLaneEffects(type: number): void {
   for (const lane of activeLanes) {
+    if (__DEV__) devCheckMergedLaneEmpty(lane);
     if (lane._mergedInto || lane._pendingAsync.size > 0) continue;
     const effects = lane._effectQueues[type - 1];
     if (effects.length) {
@@ -177,11 +186,14 @@ function mergeTransitionState(target: Transition, outgoing: Transition): void {
   for (const lane of activeLanes) if (lane._transition === outgoing) lane._transition = target;
   target._optimisticNodes.push(...outgoing._optimisticNodes);
   for (const store of outgoing._optimisticStores) target._optimisticStores.add(store);
+  // Legal transfer, not a new registration: entries move between transitions.
+  if (__DEV__) beginAsyncReporterWrites();
   for (const [source, reporters] of outgoing._asyncReporters) {
     let targetReporters = target._asyncReporters.get(source);
     if (!targetReporters) target._asyncReporters.set(source, (targetReporters = new Set()));
     for (const reporter of reporters) targetReporters.add(reporter);
   }
+  if (__DEV__) endAsyncReporterWrites();
   for (const sub of outgoing._gatedSubs) target._gatedSubs.add(sub);
 }
 
@@ -368,6 +380,7 @@ export class GlobalQueue extends Queue {
     if (this._running) return;
     this._running = true;
     try {
+      if (__DEV__) devCheckFlushStart();
       runHeap(dirtyQueue, GlobalQueue._update);
       if (activeTransition) {
         const isComplete = transitionComplete(activeTransition);
@@ -436,6 +449,16 @@ export class GlobalQueue extends Queue {
       this.run(EFFECT_RENDER);
       activeLanes.size && runLaneEffects(EFFECT_USER);
       this.run(EFFECT_USER);
+      if (
+        __DEV__ &&
+        !scheduled &&
+        !activeTransition &&
+        transitions.size === 0 &&
+        activeLanes.size === 0
+      ) {
+        // Fully drained: no transition-scoped state may survive this point.
+        devCheckQuiescent(n => n === this._pendingNode || this._pendingNodes.includes(n));
+      }
       if (__DEV__) DEV.hooks.onUpdate?.();
     } finally {
       this._running = false;
@@ -448,8 +471,12 @@ export class GlobalQueue extends Queue {
         const actualError = error !== undefined ? error : node._error;
         if (activeTransition && actualError) {
           const source = (actualError as NotReadyError).source;
+          // The one sanctioned registration site (INV-3): async blockers only
+          // enter the transition from queue notification.
+          if (__DEV__) beginAsyncReporterWrites();
           let reporters = activeTransition._asyncReporters.get(source);
           if (!reporters) activeTransition._asyncReporters.set(source, (reporters = new Set()));
+          if (__DEV__) endAsyncReporterWrites();
           const prevSize = reporters.size;
           reporters.add(node);
           if (reporters.size !== prevSize) schedule();
@@ -468,7 +495,7 @@ export class GlobalQueue extends Queue {
       activeTransition = transition ?? {
         _time: clock,
         _pendingNodes: [],
-        _asyncReporters: new Map(),
+        _asyncReporters: __DEV__ ? createAsyncReporters() : new Map(),
         _optimisticNodes: [],
         _optimisticStores: new Set(),
         _actions: [],

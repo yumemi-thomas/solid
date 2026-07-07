@@ -11,6 +11,7 @@ import {
   STATUS_UNINITIALIZED
 } from "./constants.js";
 import { context, setSignal, syncCompanions, untrack, updatePendingSignal } from "./core.js";
+import { devTrackHeldPending } from "./invariants.js";
 import { emitDiagnostic } from "./dev.js";
 import { NotReadyError, StatusError } from "./error.js";
 import { trimStaleDeps } from "./graph.js";
@@ -220,12 +221,14 @@ export function handleAsync<T>(
         // Active override: hold the fresh value as the revert target. The override
         // stays visible, so this must not commit.
         el._pendingValue = value;
+        if (__DEV__) devTrackHeldPending(el);
       } else {
         // Resting optimistic node (no active override): commit through the shared
         // pending-node path, exactly like a plain async memo, so the commit clears
         // STATUS_UNINITIALIZED — no divergence from a non-optimistic source (#2806).
         if (el._pendingValue === NOT_PENDING) queuePendingNode(el);
         el._pendingValue = value;
+        if (__DEV__) devTrackHeldPending(el);
         insertSubs(el);
       }
       el._time = clock;
