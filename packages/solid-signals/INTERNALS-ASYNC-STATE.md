@@ -140,6 +140,17 @@ two findings — one real defect, one wrong assumption of mine:
   (C4: ambient reads of an active override see the committed value when
   entangled, the override when not). See SPEC-ASYNC-SEMANTICS.md "Known
   violations" and `tests/spec-async-open-questions.test.ts`.
+- **C4 root cause (ruled + fixed same day).** The entangled divergence was a
+  premature revert, not a read-path issue: on the first flush after the write,
+  `transitionComplete`'s reporter loop found no live blockers (the shared
+  reader's dep is the *joined* memo, whose dep walk doesn't reach the sources,
+  and it never re-notified because the lane served it the override), and the
+  optimistic-node backstop loop excluded nodes pending on **their own** fetch
+  (`_error.source !== node`, from 128f5e59). The transition completed and
+  `resolveOptimisticNodes` dropped the override one tick after the tracked
+  reader saw it. Fix: remove the self-source exclusion — a transition holding
+  an optimistic node with an active override and *any* in-flight async
+  (its own fetch included) is not complete. Ruled as A17.
 
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
@@ -172,6 +183,20 @@ two findings — one real defect, one wrong assumption of mine:
 
 ## 7. Decision log
 
+- 2026-07-06: C4 → A17 — an active optimistic override is THE value for every
+  reader (ambient and tracked), regardless of entanglement, until its owning
+  transition completes. `transitionComplete` no longer excludes self-sourced
+  pending optimistic nodes from blocking completion.
+- 2026-07-07: A17 clarification — no-tearing is enforced at the EFFECT level,
+  not the read level. When async derived from the optimistic value is in
+  flight, the lane holds its render effects (`runLaneEffects` skips lanes with
+  `_pendingAsync`), so the rendered view updates as one unit; but direct reads
+  (ambient or in-graph) still return the override immediately. An attempted
+  read-level gate (return committed value from ownerless reads while the lane
+  holds) broke 19 real-world pinned tests (CategoryDisplay/News-Finance in
+  `createOptimistic.test.ts` — "direct read shows optimistic, effect waits")
+  and was reverted. Render effects read close to ambient semantics (stale
+  reads), so a read-level gate cannot distinguish them cleanly anyway.
 - 2026-07-06: #2837 — comparator errors are node errors (boundary-containable);
   `setSignal` checks uninitialized before comparator.
 - 2026-07-06: #2839 — `EffectBundle.error` is compute-phase only; effect-phase

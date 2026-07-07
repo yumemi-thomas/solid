@@ -91,10 +91,16 @@ async function enterBlockedWindow(kind: "plain" | "optimistic", prime: boolean) 
   dataFetch.resolveAll();
   await settle();
   // In the window now: data's fetch resolved to 20, transition blocked on other.
-  return { data, setData, otherFetch, log, finish: async () => {
-    otherFetch.resolveAll();
-    await settle();
-  } };
+  return {
+    data,
+    setData,
+    otherFetch,
+    log,
+    finish: async () => {
+      otherFetch.resolveAll();
+      await settle();
+    }
+  };
 }
 
 describe("B4 (undecided): user override vs async correction", () => {
@@ -173,54 +179,10 @@ describe("C1 (open): isPending after the transition completed but async still in
   });
 });
 
-describe("C4 (open, found 2026-07-06): ambient override visibility depends on entanglement", () => {
-  // In the simple graph (B4 test above) an ambient/untracked read of an
-  // active override returns the override (99). In the blocked-merged window
-  // the same ambient read returns the COMMITTED value while tracked readers
-  // (the joined render effect) see the override. Both halves are pinned here;
-  // which one is intended needs a ruling.
-  it("blocked window: ambient read shows the committed value; tracked reader saw the override", async () => {
-    const [id, setId] = createSignal(1);
-    const [other, setOther] = createSignal(1);
-    const dataFetch = deferredFetcher((t: number) => t * 10);
-    const otherFetch = deferredFetcher((t: number) => t * 100);
-    const log: string[] = [];
-
-    let data!: SourceAccessor<number>;
-    let setData!: (v: number) => void;
-    createRoot(() => {
-      [data, setData] = createOptimistic(() => dataFetch.fetch(id()));
-      const mOther = createMemo(() => otherFetch.fetch(other()));
-      const joined = createMemo(() => `${data()}|${mOther()}`);
-      createRenderEffect(joined, v => {
-        log.push(v);
-      });
-    });
-    flush();
-    dataFetch.resolveAll();
-    otherFetch.resolveAll();
-    await settle();
-    log.length = 0;
-
-    setId(2);
-    setOther(2);
-    setData(99);
-    flush();
-    // Tracked (lane-routed) reader sees the override...
-    expect(log).toEqual(["99|100"]);
-    // ...the ambient read does not (contrast: 99 in the simple graph, B4 test).
-    expect(data()).toBe(10);
-
-    dataFetch.resolveAll();
-    await settle();
-    expect(data()).toBe(10); // still the committed view
-
-    otherFetch.resolveAll();
-    await settle();
-    expect(data()).toBe(20); // reverted to the fresh value at completion
-    expect(log).toEqual(["99|100", "20|200"]);
-  });
-});
+// C4 was ruled 2026-07-06 ("override should always be read if present") and
+// promoted to A17 in spec-async-semantics.test.ts, together with the fix:
+// transitionComplete no longer excludes a node pending on its own fetch from
+// blocking completion, so entangled transitions can't silently drop overrides.
 
 describe("known violations in the blocked-merged window (expected failures)", () => {
   // Control: the plain memo is coherent in the window — stale read, fresh
@@ -242,12 +204,15 @@ describe("known violations in the blocked-merged window (expected failures)", ()
   // Root cause: computePendingState's #2799 carve-out skips the held
   // `_pendingValue` for every resting optimistic node, but here the held
   // value comes from an entangled refetch, not a reverting optimistic write.
-  it.fails("A13 violation: resting optimistic reports isPending true in the window (currently false)", async () => {
-    const w = await enterBlockedWindow("optimistic", true);
-    expect(w.data()).toBe(10);
-    expect(isPending(w.data)).toBe(true); // currently false
-    await w.finish();
-  });
+  it.fails(
+    "A13 violation: resting optimistic reports isPending true in the window (currently false)",
+    async () => {
+      const w = await enterBlockedWindow("optimistic", true);
+      expect(w.data()).toBe(10);
+      expect(isPending(w.data)).toBe(true); // currently false
+      await w.finish();
+    }
+  );
 
   // VIOLATION of A7/A13: latest()'s verdict in the window is READ-ORDER
   // dependent. If the first in-window probe happens after the flush, it
@@ -257,43 +222,46 @@ describe("known violations in the blocked-merged window (expected failures)", ()
   // (and `undefined` appears in override interleavings — the pair A7 rules
   // out). #2838's probe-driven shadow is the root cause: verdicts must not
   // depend on when the consumer happened to read.
-  it.fails("A7/A13 violation: an early probe must not freeze latest() at the stale value for the whole window", async () => {
-    const [id, setId] = createSignal(1);
-    const [other, setOther] = createSignal(1);
-    const dataFetch = deferredFetcher((t: number) => t * 10);
-    const otherFetch = deferredFetcher((t: number) => t * 100);
+  it.fails(
+    "A7/A13 violation: an early probe must not freeze latest() at the stale value for the whole window",
+    async () => {
+      const [id, setId] = createSignal(1);
+      const [other, setOther] = createSignal(1);
+      const dataFetch = deferredFetcher((t: number) => t * 10);
+      const otherFetch = deferredFetcher((t: number) => t * 100);
 
-    let data!: SourceAccessor<number>;
-    createRoot(() => {
-      data = createOptimistic(() => dataFetch.fetch(id()))[0];
-      const mOther = createMemo(() => otherFetch.fetch(other()));
-      const joined = createMemo(() => `${data()}|${mOther()}`);
-      createRenderEffect(joined, () => {});
-    });
-    flush();
-    dataFetch.resolveAll();
-    otherFetch.resolveAll();
-    await settle();
-    latest(data); // prime the shadow before the write
-    isPending(data);
+      let data!: SourceAccessor<number>;
+      createRoot(() => {
+        data = createOptimistic(() => dataFetch.fetch(id()))[0];
+        const mOther = createMemo(() => otherFetch.fetch(other()));
+        const joined = createMemo(() => `${data()}|${mOther()}`);
+        createRenderEffect(joined, () => {});
+      });
+      flush();
+      dataFetch.resolveAll();
+      otherFetch.resolveAll();
+      await settle();
+      latest(data); // prime the shadow before the write
+      isPending(data);
 
-    setId(2);
-    setOther(2);
-    flush();
-    // Probe while both fetches are in flight — legitimately reports the
-    // stale 10 — but this read freezes the shadow for the rest of the window.
-    expect(latest(data)).toBe(10);
-    expect(isPending(data)).toBe(true);
+      setId(2);
+      setOther(2);
+      flush();
+      // Probe while both fetches are in flight — legitimately reports the
+      // stale 10 — but this read freezes the shadow for the rest of the window.
+      expect(latest(data)).toBe(10);
+      expect(isPending(data)).toBe(true);
 
-    dataFetch.resolveAll();
-    await settle();
+      dataFetch.resolveAll();
+      await settle();
 
-    // Same checkpoint as the passing plain-memo control and the
-    // probe-after-flush path — but the early probe froze the shadow at 10.
-    expect(latest(data)).toBe(20); // currently 10
+      // Same checkpoint as the passing plain-memo control and the
+      // probe-after-flush path — but the early probe froze the shadow at 10.
+      expect(latest(data)).toBe(20); // currently 10
 
-    otherFetch.resolveAll();
-    await settle();
-    expect(latest(data)).toBe(20);
-  });
+      otherFetch.resolveAll();
+      await settle();
+      expect(latest(data)).toBe(20);
+    }
+  );
 });

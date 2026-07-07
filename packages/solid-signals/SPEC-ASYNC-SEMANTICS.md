@@ -33,6 +33,7 @@ optimistic lanes.
 | A14 | (was B2) `isPending`/`latest` companion nodes get child lanes that do not merge with the owner's lane: an `isPending` effect (spinner) fires while the owner's async is still in flight. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
 | A15 | (was B3) Transition entanglement is graph-driven: writes whose async work is observed by a shared reader settle as one unit (no tearing — nothing commits until all entangled async resolves); writes on fully disjoint graphs keep independent transitions and settle independently. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
 | A16 | (was B5) `isPending` never throws in untracked contexts — thunks that throw real errors or read uninitialized async sources yield `false`. Carve-out (B5a, pinned as current behavior): in *tracked* contexts the `NotReadyError` of an uninitialized source propagates so the reader participates in loading boundaries. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
+| A17 | (was C4) An *active* optimistic override is THE value for every **read** — ambient/untracked and tracked alike — regardless of transition entanglement. "It is the optimistic future value... it is both immediate and is the future until we know otherwise." It reverts to the fresh async value only when its owning transition completes; a transition whose optimistic node is still pending on its own fetch is not complete. **No-tearing is an effect-level concern, not a read-level one**: when async *derived from* the optimistic value is in flight, the lane holds its render effects (the rendered view keeps the committed state as a unit) — but direct reads still return the override ("direct read shows optimistic, effect waits"). Do NOT mask the override from any read path to prevent tearing; that breaks the real-world optimistic-UI contract. | maintainer ruling, 2026-07-06/07 | `tests/spec-async-semantics.test.ts`; downstream-async lane holding: `tests/createOptimistic.test.ts` (CategoryDisplay/News-Finance real-world sections) |
 
 ## Tier B (inferred — needs verdict)
 
@@ -68,12 +69,12 @@ Tier A.
   render-effect notification. In pure-signals graphs a memo that re-blocks on
   the same source after pruning never re-registers — is the transition allowed
   to complete "early" there (ties into C1)?
-- [ ] **C4 — Ambient override visibility depends on entanglement (found
-  2026-07-06).** An untracked/ambient read of an *active* override returns
-  the override in a simple graph, but the **committed** value when the node's
-  transition is entangled (merged) with another async source — while tracked
-  lane-routed readers see the override in both cases. Which read is right?
-  Both halves characterized in `tests/spec-async-open-questions.test.ts`.
+- [x] **C4 — RULED, promoted to A17 (2026-07-06).** The override must always
+  be read if present. The observed divergence was not a visibility question
+  but a premature-revert bug: `transitionComplete` excluded a node pending on
+  *its own* fetch from blocking completion (`_error.source !== node`), so an
+  entangled (merged) transition completed on the first flush and silently
+  dropped the override. Fixed by removing the self-source exclusion.
 
 ## Known violations (expected failures, found 2026-07-06)
 

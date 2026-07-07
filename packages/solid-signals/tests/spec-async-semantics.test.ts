@@ -309,3 +309,146 @@ describe("A16 (was B5): isPending never throws in untracked contexts", () => {
     expect(result).toBe("pending:false");
   });
 });
+
+describe("A17 (was C4): an active override is THE value — every reader, until its async settles", () => {
+  // Maintainer ruling (2026-07-06): "override should always be read if
+  // present.. it is the optimistic future value, it is both immediate and is
+  // the future until we know otherwise." That must not depend on whether the
+  // node's transition got entangled (merged) with other async work. The
+  // override holds while the node's own async is still in flight and reverts
+  // to the fresh value only when the owning transition completes.
+  //
+  // Before the fix, transitionComplete excluded a node pending on ITS OWN
+  // fetch from blocking completion (`_error.source !== node`), so an
+  // entangled transition completed on the first flush and silently dropped
+  // the override — the ambient read returned the committed value while
+  // tracked readers had seen the override for one tick.
+  it("entangled graph: ambient and tracked reads both hold the override until completion", async () => {
+    const [id, setId] = createSignal(1);
+    const [other, setOther] = createSignal(1);
+    const dataFetch = deferredFetcher((t: number) => t * 10);
+    const otherFetch = deferredFetcher((t: number) => t * 100);
+    const log: string[] = [];
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => dataFetch.fetch(id()));
+      const mOther = createMemo(() => otherFetch.fetch(other()));
+      const joined = createMemo(() => `${data()}|${mOther()}`);
+      createRenderEffect(joined, v => {
+        log.push(v);
+      });
+    });
+    flush();
+    dataFetch.resolveAll();
+    otherFetch.resolveAll();
+    await settle();
+    log.length = 0;
+
+    // Both sources refetch (entangled through `joined`) + user override.
+    setId(2);
+    setOther(2);
+    setData(99);
+    flush();
+    // Tracked (lane-routed) reader sees the override...
+    expect(log).toEqual(["99|100"]);
+    // ...and so does the ambient read — same as the simple graph (B4 test).
+    expect(data()).toBe(99);
+
+    dataFetch.resolveAll();
+    await settle();
+
+    otherFetch.resolveAll();
+    await settle();
+    // Everything settled: reverted to the fresh async value everywhere.
+    expect(data()).toBe(20);
+    expect(log[log.length - 1]).toBe("20|200");
+  });
+
+  // No-tearing is enforced at the EFFECT level, not the read level (ruling
+  // 2026-07-07): async derived FROM the optimistic value holds the lane's
+  // render effects — the rendered view moves as one unit — while direct reads
+  // (ambient included) return the override immediately ("direct read shows
+  // optimistic, effect waits"). The real-world CategoryDisplay/News-Finance
+  // suites in createOptimistic.test.ts pin this extensively; this is the
+  // minimal spec statement.
+  it("downstream async: direct read shows the override immediately, lane effects wait for it", async () => {
+    const [id, setId] = createSignal(1);
+    const dataFetch = deferredFetcher((t: number) => t * 10);
+    const derivedFetch = deferredFetcher((t: number) => `derived(${t})`);
+    const valueLog: number[] = [];
+    const derivedLog: string[] = [];
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => dataFetch.fetch(id()));
+      const derived = createMemo(() => derivedFetch.fetch(data()));
+      createRenderEffect(data, v => {
+        valueLog.push(v);
+      });
+      createRenderEffect(derived, v => {
+        derivedLog.push(v);
+      });
+    });
+    flush();
+    dataFetch.resolveAll();
+    await settle();
+    derivedFetch.resolveAll();
+    await settle();
+    valueLog.length = 0;
+    derivedLog.length = 0;
+
+    // Refetch + override: derived(99) is now in flight in the override's lane.
+    setId(2);
+    setData(99);
+    flush();
+    // Direct read shows the override immediately...
+    expect(data()).toBe(99);
+    // ...but the lane holds BOTH its effects (value and derived move together).
+    expect(valueLog).toEqual([]);
+    expect(derivedLog).toEqual([]);
+
+    // Downstream async for the optimistic view resolves: the view appears
+    // atomically — no tearing, no window where value updated but derived hadn't.
+    derivedFetch.resolveAll();
+    await settle();
+    expect(valueLog).toEqual([99]);
+    expect(derivedLog).toEqual(["derived(99)"]);
+
+    // Real refetch lands: corrected value flows through the same unit.
+    dataFetch.resolveAll();
+    await settle();
+    derivedFetch.resolveAll();
+    await settle();
+    expect(data()).toBe(20);
+    expect(valueLog).toEqual([99, 20]);
+    expect(derivedLog).toEqual(["derived(99)", "derived(20)"]);
+  });
+
+  it("simple graph: override visible ambiently until its own fetch settles", async () => {
+    const [id, setId] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => fetcher.fetch(id()));
+      createRenderEffect(data, () => {});
+    });
+    flush();
+    fetcher.resolveAll();
+    await settle();
+    expect(data()).toBe(10);
+
+    setId(2);
+    setData(99);
+    flush();
+    expect(data()).toBe(99);
+
+    fetcher.resolveAll();
+    await settle();
+    expect(data()).toBe(20);
+  });
+});

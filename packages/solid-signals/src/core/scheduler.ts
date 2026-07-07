@@ -454,7 +454,8 @@ export class GlobalQueue extends Queue {
         devCheckActiveOverrides(n => {
           if (this._optimisticNodes.includes(n as OptimisticNode)) return true;
           if (activeTransition?._optimisticNodes.includes(n as OptimisticNode)) return true;
-          for (const t of transitions) if (t._optimisticNodes.includes(n as OptimisticNode)) return true;
+          for (const t of transitions)
+            if (t._optimisticNodes.includes(n as OptimisticNode)) return true;
           return false;
         });
       }
@@ -824,8 +825,7 @@ function transitionComplete(transition: Transition): boolean {
         hasActiveOverride(node) &&
         "_statusFlags" in node &&
         node._statusFlags & STATUS_PENDING &&
-        node._error instanceof NotReadyError &&
-        node._error.source !== node
+        node._error instanceof NotReadyError
       ) {
         done = false;
         break;
