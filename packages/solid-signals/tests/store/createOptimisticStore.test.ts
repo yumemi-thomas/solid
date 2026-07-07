@@ -1708,19 +1708,29 @@ describe("createOptimisticStore", () => {
       expect(state!.data).toBe(10);
       expect(isPending(() => state!.data)).toBe(false);
 
-      // User changes ID and optimistically sets expected data
+      // Contrast: a pure source change with no optimistic write — the refetch
+      // pends the store. This is what proves the probe is live, so the mask
+      // assertions below can't pass vacuously.
       setId(2);
+      flush();
+      expect(state!.data).toBe(10);
+      expect(isPending(() => state!.data)).toBe(true);
+
+      // Optimistic write MID-refetch: the mask (A20 re-rule 2026-07-07c)
+      // flips the verdict off while the very same fetch is still in flight.
       setState!(s => {
         s.data = 999;
-      }); // optimistic write
+      });
       flush();
-
-      // Optimistic value is immediate
       expect(state!.data).toBe(999);
-      // isPending - async is in flight
-      expect(isPending(() => state!.data)).toBe(true);
+      expect(isPending(() => state!.data)).toBe(false);
       // latest() returns the optimistic value
       expect(latest(() => state!.data)).toBe(999);
+
+      // Fetch lands: server value wins, override reverts, still settled.
+      await new Promise(r => setTimeout(r, 0));
+      expect(state!.data).toBe(20);
+      expect(isPending(() => state!.data)).toBe(false);
     });
 
     it("isPending preserves async optimistic store overrides", async () => {
@@ -1752,17 +1762,25 @@ describe("createOptimisticStore", () => {
       expect(state!.data).toBe(10);
       expect(values.at(-1)).toEqual({ data: 10, pending: false });
 
+      // Contrast: the bare refetch pends the leaf — the effect observes the
+      // true verdict, proving the pending channel is wired.
       setId(2);
+      flush();
+      expect(values.at(-1)).toEqual({ data: 10, pending: true });
+
+      // The optimistic write mid-refetch flips it back off (mask) while the
+      // override is visible; no {999, pending} pair ever forms.
       setState!(s => {
         s.data = 999;
       });
       flush();
 
       expect(state!.data).toBe(999);
-      expect(values).toContainEqual({ data: 999, pending: true });
+      expect(values.at(-1)).toEqual({ data: 999, pending: false });
+      expect(values.some(v => v.pending && v.data === 999)).toBe(false);
     });
 
-    it("isPending tracks deep optimistic store reads during an optimistic transition", async () => {
+    it("a plain optimistic store is never pending — no source can supersede it, and writes are decreed", async () => {
       let state: { count: number };
       let setState: (fn: (s: { count: number }) => void) => void;
       let resolveAction!: () => void;
@@ -1796,7 +1814,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.count).toBe(1);
-      expect(pendingValues.at(-1)).toBe(true);
+      expect(pendingValues.at(-1)).toBe(false); // masked — the write is decreed
 
       resolveAction();
       await actionPromise;
@@ -1807,7 +1825,7 @@ describe("createOptimisticStore", () => {
       expect(pendingValues.at(-1)).toBe(false);
     });
 
-    it("isPending tracks deep optimistic store reads before async refresh starts", async () => {
+    it("deep reads stay settled from optimistic write through the sync-back refresh (mask)", async () => {
       let state: Refreshable<{ count: number }>;
       let setState: (fn: (s: { count: number }) => void) => void;
       let save!: () => Promise<void>;
@@ -1845,7 +1863,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.count).toBe(1);
-      expect(pendingValues.at(-1)).toBe(true);
+      expect(pendingValues.at(-1)).toBe(false); // masked for the write's whole lifetime
 
       resolveAction();
       await actionPromise;
@@ -1854,9 +1872,19 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(pendingValues.at(-1)).toBe(false);
+
+      // Contrast (proves the deep probe is live): a bare refresh with no
+      // optimistic write pends the same read, then clears when data lands.
+      refresh(state!);
+      flush();
+      expect(pendingValues.at(-1)).toBe(true);
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
     });
 
-    it("isPending tracks deep nested optimistic store reads before async refresh starts", async () => {
+    it("deep nested reads stay settled during an optimistic transaction (mask)", async () => {
       let state: Refreshable<{ items: { name: string }[] }>;
       let setState: (fn: (s: { items: { name: string }[] }) => void) => void;
       let save!: () => Promise<void>;
@@ -1879,7 +1907,7 @@ describe("createOptimisticStore", () => {
           setState(s => {
             s.items[0].name = "Modified";
           });
-          expect(isPending(() => deep(state))).toBe(true);
+          expect(isPending(() => deep(state))).toBe(false); // masked
           yield new Promise<void>(resolve => {
             resolveAction = resolve;
           });
@@ -1896,7 +1924,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.items[0].name).toBe("Modified");
-      expect(pendingValues.at(-1)).toBe(true);
+      expect(pendingValues.at(-1)).toBe(false); // masked
 
       resolveAction();
       await actionPromise;
@@ -1904,9 +1932,18 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(pendingValues.at(-1)).toBe(false);
+
+      // Contrast: a bare refresh (no write) pends the same deep read.
+      refresh(state!);
+      flush();
+      expect(pendingValues.at(-1)).toBe(true);
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
     });
 
-    it("isPending tracks deep optimistic store reads from a nested proxy", async () => {
+    it("deep reads from a nested proxy stay settled during an optimistic transaction (mask)", async () => {
       let state: Refreshable<{ items: { name: string }[] }>;
       let setState: (fn: (s: { items: { name: string }[] }) => void) => void;
       let save!: () => Promise<void>;
@@ -1929,7 +1966,7 @@ describe("createOptimisticStore", () => {
           setState(s => {
             s.items[0].name = "Modified";
           });
-          expect(isPending(() => deep(state.items))).toBe(true);
+          expect(isPending(() => deep(state.items))).toBe(false); // masked
           yield new Promise<void>(resolve => {
             resolveAction = resolve;
           });
@@ -1946,7 +1983,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.items[0].name).toBe("Modified");
-      expect(pendingValues.at(-1)).toBe(true);
+      expect(pendingValues.at(-1)).toBe(false); // masked
 
       resolveAction();
       await actionPromise;
@@ -1954,9 +1991,18 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(pendingValues.at(-1)).toBe(false);
+
+      // Contrast: a bare refresh (no write) pends the nested-proxy deep read.
+      refresh(state!);
+      flush();
+      expect(pendingValues.at(-1)).toBe(true);
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(pendingValues.at(-1)).toBe(false);
     });
 
-    it("isPending clears for deep optimistic store reads when fresh projection data lands", async () => {
+    it("deep reads stay settled through write → refresh → fresh data landing (mask covers the sync-back)", async () => {
       let serverCount = 0;
       const fetches: Array<() => void> = [];
       let state: Refreshable<{ count: number }>;
@@ -2004,13 +2050,15 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.count).toBe(1);
-      expect(pendingValues.at(-1)).toBe(true);
+      expect(pendingValues.at(-1)).toBe(false); // masked
 
       resolveAction();
       await actionPromise;
       await Promise.resolve();
       flush();
-      expect(pendingValues.at(-1)).toBe(true);
+      // The refresh's fetch is in flight, but the override is still live —
+      // the mask covers its own sync-back for the write's whole lifetime.
+      expect(pendingValues.at(-1)).toBe(false);
 
       fetches.shift()!();
       await Promise.resolve();
@@ -2019,9 +2067,22 @@ describe("createOptimisticStore", () => {
 
       expect(state!.count).toBe(2);
       expect(pendingValues.at(-1)).toBe(false);
+
+      // Contrast: the same refresh WITHOUT an optimistic write pends the
+      // deep read — the quiet above came from the mask, not a dead probe.
+      serverCount = 3;
+      refresh(state!);
+      flush();
+      expect(pendingValues.at(-1)).toBe(true);
+      fetches.shift()!();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(state!.count).toBe(3);
+      expect(pendingValues.at(-1)).toBe(false);
     });
 
-    it("isPending stays true for generator-backed optimistic stores while override is visible", async () => {
+    it("generator-backed optimistic store reads settled while an override is visible (mask)", async () => {
       let state: { data: number };
       let setState: (fn: (s: { data: number }) => void) => void;
       let resolveAsync!: () => void;
@@ -2064,7 +2125,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.data).toBe(999);
-      expect(isPending(() => state!.data)).toBe(true);
+      expect(isPending(() => state!.data)).toBe(false); // masked
 
       resolveAsync();
       resolveAction();
@@ -2076,15 +2137,17 @@ describe("createOptimisticStore", () => {
       expect(isPending(() => state!.data)).toBe(false);
     });
 
-    it("isPending stays true when the same render reads generator-backed store length", async () => {
+    it("same-render length + verdict read stays settled during an optimistic push (mask)", async () => {
       let state: readonly number[];
       let setState: (fn: (s: number[]) => void) => void;
       let resolveAction!: () => void;
       let holdOptimistic!: () => Promise<void>;
+      let resolveFetch!: () => void;
       const seen: Array<readonly [number, boolean]> = [];
 
       createRoot(() => {
         [state, setState] = createOptimisticStore<number[]>(async function* () {
+          await new Promise<void>(r => (resolveFetch = r));
           yield [];
         }, []);
 
@@ -2104,15 +2167,16 @@ describe("createOptimisticStore", () => {
       });
 
       flush();
-      await Promise.resolve();
-      await Promise.resolve();
+      resolveFetch();
+      await new Promise(r => setTimeout(r, 0));
+      flush();
 
       expect(seen.at(-1)).toEqual([0, false]);
 
       const actionPromise = holdOptimistic();
       flush();
 
-      expect(seen.at(-1)).toEqual([1, true]);
+      expect(seen.at(-1)).toEqual([1, false]); // masked
 
       resolveAction();
       await actionPromise;
@@ -2120,18 +2184,30 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(seen.at(-1)).toEqual([0, false]);
+
+      // Contrast: a bare refetch (no optimistic write) pends the same
+      // same-render length read — the mask, not a dead probe, kept it quiet.
+      refresh(state! as Refreshable<readonly number[]>);
+      flush();
+      expect(seen.at(-1)).toEqual([0, true]);
+      resolveFetch();
+      await new Promise(r => setTimeout(r, 0));
+      flush();
+      expect(seen.at(-1)).toEqual([0, false]);
     });
 
-    it("isPending stays true when generator-backed store length and pending are read in separate renders", async () => {
+    it("separate-render length and verdict reads stay settled during an optimistic push (mask)", async () => {
       let state: readonly number[];
       let setState: (fn: (s: number[]) => void) => void;
       let resolveAction!: () => void;
       let holdOptimistic!: () => Promise<void>;
+      let resolveFetch!: () => void;
       const lengths: number[] = [];
       const pendingStates: boolean[] = [];
 
       createRoot(() => {
         [state, setState] = createOptimisticStore<number[]>(async function* () {
+          await new Promise<void>(r => (resolveFetch = r));
           yield [];
         }, []);
 
@@ -2158,8 +2234,9 @@ describe("createOptimisticStore", () => {
       });
 
       flush();
-      await Promise.resolve();
-      await Promise.resolve();
+      resolveFetch();
+      await new Promise(r => setTimeout(r, 0));
+      flush();
 
       expect(lengths.at(-1)).toBe(0);
       expect(pendingStates.at(-1)).toBe(false);
@@ -2168,7 +2245,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(lengths.at(-1)).toBe(1);
-      expect(pendingStates.at(-1)).toBe(true);
+      expect(pendingStates.at(-1)).toBe(false); // masked
 
       resolveAction();
       await actionPromise;
@@ -2177,9 +2254,19 @@ describe("createOptimisticStore", () => {
 
       expect(lengths.at(-1)).toBe(0);
       expect(pendingStates.at(-1)).toBe(false);
+
+      // Contrast: a bare refetch pends the separate-render verdict effect.
+      refresh(state! as Refreshable<readonly number[]>);
+      flush();
+      expect(pendingStates.at(-1)).toBe(true);
+      resolveFetch();
+      await new Promise(r => setTimeout(r, 0));
+      flush();
+      expect(pendingStates.at(-1)).toBe(false);
+      expect(lengths.at(-1)).toBe(0);
     });
 
-    it("isPending clears after an optimistic override settles on top of an async projection", async () => {
+    it("override on top of an async projection reads settled throughout (mask)", async () => {
       let resolveProjection!: () => void;
       let resolveAction!: () => void;
       let state: { data: number };
@@ -2224,7 +2311,7 @@ describe("createOptimisticStore", () => {
       flush();
 
       expect(state!.data).toBe(999);
-      expect(isPending(() => state!.data)).toBe(true);
+      expect(isPending(() => state!.data)).toBe(false); // masked
 
       resolveProjection();
       resolveAction();

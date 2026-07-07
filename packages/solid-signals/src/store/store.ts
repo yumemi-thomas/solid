@@ -15,6 +15,8 @@ import {
   suppressComputedRecompute,
   trackOptimisticStore,
   untrack,
+  updateChildCompanions,
+  updatePendingSignal,
   type Computed,
   type Refreshable,
   type Signal
@@ -83,7 +85,8 @@ export const STORE_VALUE = "v",
   STORE_WRAP = "w",
   STORE_LOOKUP = "l",
   STORE_FIREWALL = "f",
-  STORE_OPTIMISTIC = "p";
+  STORE_OPTIMISTIC = "p",
+  STORE_MASKED = "m";
 const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
@@ -98,6 +101,8 @@ export type StoreNode = {
   [STORE_LOOKUP]?: WeakMap<any, any>;
   [STORE_FIREWALL]?: Computed<any>;
   [STORE_OPTIMISTIC]?: boolean;
+  /** This target currently contributes to its firewall's store-wide mask. */
+  [STORE_MASKED]?: boolean;
   [STORE_SNAPSHOT_PROPS]?: Record<PropertyKey, any>;
 };
 
@@ -346,6 +351,29 @@ export function getPropertyDescriptor(
   return Reflect.getOwnPropertyDescriptor(source, property);
 }
 
+/**
+ * Store-wide mask bookkeeping (A20 re-rule 2026-07-07c): the store is the
+ * primitive, so an optimistic write decrees the WHOLE store settled for
+ * `isPending` — firewall, written leaves, untouched siblings, structural
+ * reads — for the lifetime of the override/transition. The firewall carries a
+ * count of masked targets (nested objects mask independently); companions of
+ * the firewall and its probed leaves are poked on 0↔1 transitions so an
+ * already-materialized verdict flips without waiting for another write.
+ */
+export function maskStoreTarget(target: StoreNode, on: boolean): void {
+  const firewall = target[STORE_FIREWALL];
+  // Plain optimistic stores have no firewall: no source can pend them, so
+  // there is nothing to mask (leaf overrides mask themselves per-node).
+  if (!firewall) return;
+  if (!!target[STORE_MASKED] === on) return;
+  target[STORE_MASKED] = on;
+  const count = (firewall._optimisticMask = (firewall._optimisticMask || 0) + (on ? 1 : -1));
+  if ((on && count === 1) || (!on && count === 0)) {
+    updatePendingSignal(firewall);
+    updateChildCompanions(firewall);
+  }
+}
+
 function prepareStoreWrite(target: StoreNode, store: any, property: PropertyKey) {
   if (target[STORE_OPTIMISTIC]) {
     const firewall = target[STORE_FIREWALL];
@@ -370,7 +398,10 @@ function prepareStoreWrite(target: StoreNode, store: any, property: PropertyKey)
   }
   const useOptimistic = target[STORE_OPTIMISTIC] && !projectionWriteActive;
   const overrideKey = useOptimistic ? STORE_OPTIMISTIC_OVERRIDE : STORE_OVERRIDE;
-  if (useOptimistic) trackOptimisticStore(store);
+  if (useOptimistic) {
+    trackOptimisticStore(store);
+    maskStoreTarget(target, true);
+  }
   return { base, overrideKey, state };
 }
 
@@ -680,7 +711,10 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         const useOptimistic = target[STORE_OPTIMISTIC] && !projectionWriteActive;
         const overrideKey = useOptimistic ? STORE_OPTIMISTIC_OVERRIDE : STORE_OVERRIDE;
         // Track store for reversion when writing optimistically
-        if (useOptimistic) trackOptimisticStore(target[$PROXY]);
+        if (useOptimistic) {
+          trackOptimisticStore(target[$PROXY]);
+          maskStoreTarget(target, true);
+        }
         const prevLayer = getOverlayLayer(target, property);
         const prev = prevLayer ? prevLayer[property] : target[STORE_VALUE][property];
         if (

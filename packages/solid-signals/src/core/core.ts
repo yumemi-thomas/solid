@@ -45,10 +45,8 @@ import {
   findLane,
   getOrCreateLane,
   hasActiveOverride,
-  mergeLanes,
   resolveLane,
   resolveTransition,
-  signalLanes,
   type OptimisticLane
 } from "./lanes.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
@@ -774,20 +772,11 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
       pendingCheckActive = true;
       throw (owner as Computed<any>)._error;
     }
-    if (firewall && el._overrideValue !== undefined) {
-      if (
-        el._overrideValue !== NOT_PENDING &&
-        (firewall._inFlight || !!(firewall._statusFlags & STATUS_PENDING))
-      ) {
-        pendingProbe!.found = true;
-      }
-      collectPendingSources(el);
-      collectPendingSources(firewall);
-      if (c && tracking) link(el, c as Computed<any>);
-    } else {
-      collectPendingSources(el);
-      if (firewall) collectPendingSources(firewall);
-    }
+    // Verdicts come uniformly from the collected sources' pending signals
+    // (computePendingState); an active leaf override is not special-cased to
+    // force `found` — the mask (A20 re-rule 2026-07-07c) reads it settled.
+    collectPendingSources(el);
+    if (firewall) collectPendingSources(firewall);
     pendingCheckActive = true;
   } else if (typeof computed._fn === "function") {
     prepareComputed(el as Computed<unknown>, false);
@@ -1162,68 +1151,70 @@ function collectPendingSources(el: Signal<any> | Computed<any>): void {
 
 /**
  * Compute whether a node is in "pending" state.
- * Pending means: has stale data while new data is loading.
- * Returns false for initial async loads (no stale data to show).
+ *
+ * The rule (A20, re-ruled 2026-07-07c): a node is pending iff the value the
+ * reader observes is going to be superseded by work already in motion.
+ * - Plain reads watch the committed channel: pending during an in-flight
+ *   fetch AND while a resolved value is still held by its transition.
+ * - `latest` reads watch the fresh channel (the shadow, `_parentSource`
+ *   branch): they already show held values, so only actually-in-flight async
+ *   supersedes them.
+ * - An active optimistic override is certainty by decree: the writer declared
+ *   the value not-superseded, so the node reads false for the override's
+ *   whole lifetime (the mask). Action-scoped "saving" affordances belong in
+ *   the data (co-written flags), never in verdicts.
+ * Returns false for initial async loads (no stale data to show — loading, not
+ * pending) and for disposed nodes (a dead source can never settle).
  */
 function computePendingState(el: Signal<any> | Computed<any>): boolean {
   const comp = el as Computed<any>;
+  // A verdict is a property of live data: a disposed source can never settle,
+  // so it is never pending (INV-9 — a latched true would hold a spinner
+  // forever; the PR #2845 disposal edge).
+  if (comp._flags & REACTIVE_DISPOSED) return false;
   const firewall = (el as FirewallSignal<any>)._firewall;
+  // Store-wide mask: the store is the primitive, so an optimistic write
+  // decrees the WHOLE store settled — firewall, written leaves, untouched
+  // siblings, structural reads — for the lifetime of the override/transition.
+  // "Once you write optimistically you manage your own pending state."
+  if (((firewall || comp) as Computed<any>)._optimisticMask) return false;
   if (el._parentSource) {
-    // A store leaf's async status lives on its firewall, not the leaf signal
-    // itself — consult it so `isPending(() => latest(() => store.value))`
-    // reports the firewall refetch like any async memo (#2831).
+    // The latest() shadow's verdict: pending follows the channel you read
+    // (A20), and the latest view is the fresh channel — it already shows
+    // transition-held values, so a hold cannot supersede what it shows. It
+    // reads pending only while async that will replace what it shows is
+    // actually in flight ("false as soon as that async is done, even if the
+    // same update has other async still running").
     const parentNode = el._parentSource as FirewallSignal<any>;
+    // Mask (A20): an active override IS the value by decree — nothing in
+    // motion supersedes it, including its own firewall's refetch.
+    if (hasActiveOverride(parentNode)) return false;
+    // A store leaf's async status lives on its firewall, not the leaf signal
+    // itself (#2831). A leaf downstream of an in-flight refetch is pending in
+    // both forms — the latest view strips holds, never in-flight async.
     const parent = (parentNode._firewall || parentNode) as Computed<any>;
-    if (parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED)) {
-      // A20/V4: broad firewall inheritance is coordination, and the latest
-      // view strips coordination. On an optimistic-capable leaf with no
-      // unconfirmed edit (resting override), a pure firewall refresh is
-      // refresh noise the latest form must filter. Plain leaves (A9) and
-      // self-async parents (A8 — no firewall) keep reporting it; a leaf
-      // holding an active edit is confirmation-uncertainty, never stripped.
-      if (
-        !parentNode._firewall ||
-        parentNode._overrideValue === undefined ||
-        hasActiveOverride(parentNode)
-      )
-        return true;
-    }
-    // Pending when an uncommitted value exists: either the owner holds an
-    // authoritative pending commit (the latest view exposes it, and it is not
-    // final until it commits) or the companion itself holds one from a
-    // transition-held recompute. The owner check replaces the old read of the
-    // companion's revert-target stash, which no longer exists (A17 — arrivals
-    // commit silently under the override mask, so nothing is stashed). It is
-    // scoped to non-firewall owners: leaf refetch reporting is the firewall
-    // STATUS_PENDING branch above, and a leaf's held value during the initial
-    // projection commit is initial load, which never reads pending.
-    const parentHeld =
-      !parentNode._firewall &&
-      parentNode._pendingValue !== NOT_PENDING &&
-      !(parent._statusFlags & STATUS_UNINITIALIZED);
-    return (
-      (parentHeld || el._pendingValue !== NOT_PENDING) &&
-      !(comp._statusFlags & STATUS_UNINITIALIZED)
+    if (parent._optimisticMask) return false;
+    return !!(
+      parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED)
     );
   }
+  // Mask (A20, re-ruled 2026-07-07c): an active override is certainty by
+  // decree — writing it declares the shown value not-superseded, so the node
+  // is never pending while it holds, no matter what async is in motion around
+  // it. Action-scoped "saving" affordances belong in the data (co-written
+  // flags), not in verdicts.
+  if (hasActiveOverride(el)) return false;
+  // A held store leaf defers to its firewall: when the firewall's own work is
+  // in flight the firewall carries the verdict (probes collect it alongside
+  // the leaf — #2831), so the leaf reports only holds the firewall does NOT
+  // explain: manual projection writes, or holds outliving a settled firewall.
+  // Without this, leaf companions flip in lockstep with the firewall and
+  // churn duplicate effect runs during initial projection loads.
   if (firewall && el._pendingValue !== NOT_PENDING) {
     return (
       !!(firewall._flags & REACTIVE_MANUAL_WRITE) ||
       (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING))
     );
-  }
-  // An active override splits by what it can promise (A20). On an optimistic
-  // COMPUTED the override predicts the authoritative source's next value —
-  // assume the guess is correct and it IS the final value, so the override
-  // itself contributes not-pending; it reads pending only while actually held
-  // by in-flight async (its own fetch confirming/correcting, or async spawned
-  // by observers of the override — its lane). On an optimistic SIGNAL there
-  // is no source that can land on the guess: reversion is certain, the shown
-  // value is never final, so an active override is pending for its whole
-  // lifetime. (Internal pending/latest helpers carry `_parentSource` and
-  // returned in the first branch above.)
-  if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
-    return true;
   }
   // Upstream: value held in transition (not during initial load). Applies to
   // resting optimistic nodes too (V1/A13): revert targets no longer exist
@@ -1255,22 +1246,7 @@ export function syncCompanions<T>(el: Signal<T> | Computed<T>, value: T): void {
  */
 export function updatePendingSignal(el: Signal<any> | Computed<any>): void {
   if (el._pendingSignal) {
-    const pending = computePendingState(el);
-    const sig = el._pendingSignal;
-    setSignal(sig, pending);
-    // When override clears: merge sub-lane into source's lane
-    if (!pending && sig._optimisticLane) {
-      const sourceLane = resolveLane(el as any);
-      if (sourceLane && sourceLane._pendingAsync.size > 0) {
-        const sigLane = findLane(sig._optimisticLane);
-        if (sigLane !== sourceLane) {
-          mergeLanes(sourceLane, sigLane);
-        }
-      }
-      // Clear so next write creates a fresh independent sub-lane
-      signalLanes.delete(sig);
-      sig._optimisticLane = undefined;
-    }
+    setSignal(el._pendingSignal, computePendingState(el));
   }
   // The latest() shadow's own verdict derives from the owner (its
   // computePendingState consults `_parentSource`), so any owner state change

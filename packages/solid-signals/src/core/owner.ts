@@ -13,6 +13,7 @@ import {
   pendingCheckActive,
   PRIMITIVE_IN_FORBIDDEN_SCOPE_MESSAGE,
   runWithOwner,
+  snapCompanionsToState,
   tracking
 } from "./core.js";
 import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
@@ -59,7 +60,16 @@ export function dispose(node: Computed<unknown>): void {
 export function disposeChildren(node: Owner, self: boolean = false, zombie?: boolean): void {
   const flags = (node as any)._flags;
   if (flags & REACTIVE_DISPOSED) return;
-  if (self) (node as any)._flags = flags | REACTIVE_DISPOSED;
+  if (self) {
+    (node as any)._flags = flags | REACTIVE_DISPOSED;
+    // Companions are created detached and outlive their owner, but a verdict
+    // must not: a disposed source can never settle, so an isPending companion
+    // latched `true` here would hold a spinner forever (INV-9, the PR #2845
+    // edge). Snap runs after the DISPOSED flag is set so the oracle reads
+    // false, and notifies subscribers still watching the companion.
+    const n = node as Computed<unknown>;
+    if (n._pendingSignal || n._latestValueComputed) snapCompanionsToState(n);
+  }
   if (self && __DEV__) clearSignals(node);
   if (self && (node as any)._fn) (node as Computed<unknown>)._inFlight = null;
   let child = zombie ? (node._pendingFirstChild as Owner) : node._firstChild;

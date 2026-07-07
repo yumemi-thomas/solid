@@ -16,8 +16,9 @@ A `Signal`/`Computed` participating in async/transitions carries:
 | Field | Meaning | Written by |
 | --- | --- | --- |
 | `_value` | Committed, visible value | `recompute` (create/effect paths), `commitPendingNode`, `resolveOptimisticNodes`, `asyncWrite` (lane branch) |
-| `_pendingValue` | Transition-held next value; `NOT_PENDING` sentinel when absent | `setSignal` (non-optimistic), `recompute` (held branch), `asyncWrite` (override-active branch), `setSignal` on first override (holds the *revert target*) |
+| `_pendingValue` | Transition-held next value; `NOT_PENDING` sentinel when absent (one meaning — a pending commit; revert targets were eliminated 2026-07-07b, §5e) | `setSignal` (non-optimistic), `recompute` (held branch), `asyncWrite` (override-active branch) |
 | `_overrideValue` | Optimistic override; `undefined` = not an optimistic node, `NOT_PENDING` = resting optimistic node, else = active override | `setSignal` (optimistic branch), `recompute` (lane-corrected), `resolveOptimisticNodes` (clears to `NOT_PENDING`) |
+| `_optimisticMask` | Store-wide mask counter on a derived store's firewall: number of store targets under it with live optimistic state; non-zero forces every verdict under the firewall to `false` (A21) | `maskStoreTarget` (store.ts) — incremented from `prepareStoreWrite`/`deleteProperty` on the first optimistic write to a target, decremented from `clearOptimisticStore`/`clearOptimisticOverride` |
 | `_statusFlags` | `STATUS_PENDING` / `STATUS_ERROR` / `STATUS_UNINITIALIZED` | `notifyStatus`, `clearStatus`, commit paths |
 | `_error` | Current error (`NotReadyError` for pending, `StatusError`-wrapped for real) | compute catch, `notifyStatus` |
 | `_pendingSignal` | Lazily-created companion: boolean "is pending" signal for `isPending()` | `getPendingSignal`, updated via `updatePendingSignal` |
@@ -80,9 +81,10 @@ Confidence: **high** = implementation self-consistency, assert now.
 
 - **INV-1 (high)** `pendingProbe` is non-null only inside an `isPending()` call
   (it saves/restores; nothing else may write it).
-- **INV-2 (high)** A node with an *active* override (`hasActiveOverride`) also has
-  `_pendingValue !== NOT_PENDING` (the revert target is set on first override)
-  and is registered in a transition's/queue's `_optimisticNodes`.
+- **INV-2 (high)** A node with an *active* override (`hasActiveOverride`) is
+  registered in a transition's/queue's `_optimisticNodes`. (The original
+  revert-target half was retired with §5e — there is no revert target to
+  assert.)
 - **INV-3 (high)** `_asyncReporters` gains entries only inside
   `GlobalQueue.notify` (render-effect notification path). Guard flag around the
   legal write site; assert on any other mutation. `[ruled]`
@@ -102,6 +104,16 @@ Confidence: **high** = implementation self-consistency, assert now.
 - **INV-7 (medium)** `_pendingValue !== NOT_PENDING` on a non-optimistic node
   implies the node is queued (`_pendingNode`/`_pendingNodes`) or held by a
   transition — a pending value with no committer is a leak (the #2827 class).
+- **INV-9 (high)** An `isPending` companion of a DISPOSED owner reads `false`
+  at quiescence — a stale `true` outliving its source would hold a spinner
+  forever (the #2845 disposal edge). Enforced by the disposal guard in
+  `computePendingState` plus the `snapCompanionsToState` call in
+  `disposeChildren`.
+- **INV-10 (high)** The mask (A20/A21, 2026-07-07c): a companion's
+  *observable* verdict (override first, A17) is `false` whenever its owner
+  holds an active override, and whenever its firewall's `_optimisticMask` is
+  non-zero — checked for every node in `_optimisticNodes` and every tracked
+  companion owner at the end of each flush.
 
 Rejected for assertion (state space too dynamic, would need semantic rulings):
 whether `_optimisticLane` must always resolve to a live lane (stale lanes are
@@ -229,11 +241,12 @@ input now flows through to them, and settlement re-derives them:
    shadow's verdict derives from the owner), and `notifyStatus`/`clearStatus`
    on a firewall call `updateChildCompanions` — probed leaves re-derive when
    the firewall's async starts/settles (no more stuck-true leaf companions).
-5. **A20 latest-form filter (V4).** `computePendingState`'s `_parentSource`
+5. **A20 latest-form filter (V4).** ~~`computePendingState`'s `_parentSource`
    branch strips broad firewall inheritance for optimistic-capable leaves
-   with no unconfirmed edit; plain leaves keep A9, standalone self-async
-   keeps A8, an active leaf edit is confirmation-uncertainty and never
-   stripped.
+   with no unconfirmed edit.~~ **Superseded by the mask model (§5f)** — the
+   filter belonged to the one-day "overrides are unsettled" A20 and was
+   replaced by the per-channel verdict + mask checks. The companion-poke
+   plumbing from this item (point 4 above) is what survives.
 
 Post-redesign census: **zero divergence fingerprints** across the suite
 (the census itself was refined to compare the companion's *visible* value —
@@ -278,10 +291,68 @@ An intermediate design ("silent commit": masked arrivals write `_value`
 directly, elevation immediate) was implemented and discarded — it kept the
 old reveal-at-revert timing but gave `_value` a context-dependent meaning.
 The commit-point discipline (maintainer re-rule of A18) reveals corrections
-atomically with their own (possibly merged) transition, reading
-`isPending === true` throughout (A20); corrections still *propagate*
-internally on arrival, so downstream refetches start immediately — the
-schedule only gates the reveal.
+atomically with their own (possibly merged) transition — reading
+`isPending === false` throughout under the A20 mask (2026-07-07c);
+corrections still *propagate* internally on arrival, so downstream refetches
+start immediately — the schedule only gates the reveal.
+
+## 5f. The mask model (2026-07-07c — A20/A21 re-rule, #2844/#2728)
+
+The verdict oracle was rewritten around one rule: **an active override is
+certainty by decree, and `isPending` follows the channel the read observes.**
+`computePendingState` is now a short decision ladder:
+
+1. **Disposal guard** — `REACTIVE_DISPOSED` → `false` (INV-9; a dead source
+   can never settle).
+2. **Store-wide mask** — `(firewall || node)._optimisticMask` → `false`
+   (A21; the store is the primitive the decree covers).
+3. **Latest-shadow branch** (`_parentSource` set): the fresh channel.
+   Owner has an active override → `false` (the decree); owner's firewall
+   masked → `false`; otherwise pending iff the owner (or its firewall) has
+   `STATUS_PENDING` without `STATUS_UNINITIALIZED` — in-flight async only,
+   **no held-value checks**: the shadow already shows held values, so a hold
+   cannot supersede what it shows (A8: "false as soon as that async is done,
+   even if the same update has other async still running").
+4. **Own active override** → `false` (A20 node-scoped mask).
+5. **Held store leaf defers to its firewall** — while the firewall's own
+   work is in flight the firewall carries the verdict (probes collect both);
+   the leaf reports only holds the firewall does not explain (manual
+   projection writes; holds outliving a settled firewall). Prevents
+   duplicate leaf/firewall effect churn during projection loads.
+6. **Held value** (`_pendingValue`, initialized) → `true` (plain channel:
+   a pending commit supersedes the committed value — A19 causes i/iii).
+7. **Own async in flight** (initialized) → `true` (A19 cause ii).
+
+Supporting machinery:
+
+- **`maskStoreTarget(target, on)`** (store.ts): flips `STORE_MASKED` on the
+  store target and maintains the firewall's `_optimisticMask` counter;
+  on 0↔1 transitions pokes the firewall's companion and every probed leaf's
+  (`updatePendingSignal` + `updateChildCompanions`). Raised from
+  `prepareStoreWrite`/`deleteProperty` on the first optimistic write to a
+  target; lowered from `clearOptimisticStore`/`clearOptimisticOverride`
+  when the target's optimistic state fully clears. Plain stores without a
+  firewall never set the flag.
+- **Disposal snap** (owner.ts): `disposeChildren` calls
+  `snapCompanionsToState` on disposed owners that have companions, so a
+  latched `true` verdict reverts and notifies instead of outliving its
+  source (INV-9).
+- **INV-10** (invariants.ts): end-of-flush assertion of the mask, both arms
+  (active-override owners and store-wide-masked firewalls/leaves), using the
+  companion's *observable* verdict (override first, A17).
+
+Dead machinery removed with the model (verified by suite + census):
+
+- `updatePendingSignal`'s late lane-merge block (merging a companion's
+  sub-lane into the source's lane when an override cleared) — with masked
+  verdicts there is no `true`→`false` edge at override-clear to coordinate;
+  `mergeLanes`/`signalLanes` imports left with it.
+- `read()`'s probe special-case that forced `pendingProbe.found = true` for
+  firewall/override hits — verdicts now come uniformly from
+  `computePendingState` over collected sources.
+
+Cost: net −27 B raw / +8 B gzip on minified `dist/prod.js`; core reactivity
+and store benchmarks flat within noise (best-of-3 isolated runs).
 
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
@@ -294,8 +365,8 @@ schedule only gates the reveal.
   (#2799/#2806 lean this way; not stated as a rule).
 - `[assumed]` Parent/child lane independence (companion lanes don't merge with
   owner lanes) is a design decision, not an accident — the `assignOrMergeLane`
-  carve-out and `updatePendingSignal`'s late merge (when override clears and
-  parent still has `_pendingAsync`) encode it.
+  carve-out encodes it. (The other encoder, `updatePendingSignal`'s late
+  merge at override-clear, was removed as dead under the mask model — §5f.)
 - `[open]` When two transitions merge, should `isPending` observers of a source
   in transition A report pending for async that only transition B is waiting
   on? (Current behavior: yes, merged transitions are one unit.)
@@ -309,6 +380,26 @@ schedule only gates the reveal.
 
 ## 7. Decision log
 
+- 2026-07-07c: **A20 re-ruled — the mask** (supersedes the previous day's
+  "overrides are unsettled" entry below; GabbeV model adopted after the
+  #2844/#2728 discussions and the todos-example precedent). An active
+  override reads `isPending === false` for its whole lifetime, on every node
+  kind, in both forms — action affordances belong in the data (co-written
+  flags / separate `createOptimistic(false)`), never in verdicts. **A21**
+  added: for derived optimistic stores the mask is store-wide (any live
+  optimistic write silences the whole store — "the store is the boundary";
+  writes to the same store entangle). **A8** re-ruled: `latest` is an
+  override the system writes for itself as soon as a held value exists, so
+  the latest form follows the source's own async only (never pending on
+  signals/sync computeds; false the instant the fetch resolves even if the
+  commit is held by merged async). **A9** re-ruled: both forms report a
+  firewall refetch on resting leaves (old latest-form filter gone; A21 is
+  the only silencer). Implementation in §5f; INV-10 enforces; the
+  repo agent rules (`.cursor/rules/async-registration-invariants.mdc`) carry
+  the mask rules so future changes can't regress them silently.
+- 2026-07-07c: disposal latch fixed (INV-9, the #2845 edge):
+  `computePendingState` returns `false` for disposed nodes and
+  `disposeChildren` snaps companions, so no verdict outlives its source.
 - 2026-07-07: #2838 core redesign landed — V1–V4 fixed (see §5d). The
   carve-out removal reverses the #2799 *mechanism* while preserving its
   intent (the original #2799 symptom — pending muted during refresh — is
@@ -329,7 +420,8 @@ schedule only gates the reveal.
   it" (the probe is not a shield) stays true in every environment today.
   Keep A16/B5a as ruled.
 - 2026-07-07: A20 — overrides are unsettled; pending scope is a property of
-  the read. (1) An active override reads `isPending === true` uniformly (every
+  the read. **(SUPERSEDED next day by the 2026-07-07c mask re-rule above;
+  kept for the reasoning record.)** (1) An active override reads `isPending === true` uniformly (every
   node kind): overrides mask stale *content* (A17), not *settlement* — the
   community no-extra-boolean idioms depend on it. Non-derived optimistic
   signals/stores are transaction-scoped values, not predictions (no source can

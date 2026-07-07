@@ -13,6 +13,8 @@ export {
   optimisticComputed,
   isPending,
   latest,
+  updatePendingSignal,
+  updateChildCompanions,
   refresh,
   staleValues,
   setSnapshotCapture,

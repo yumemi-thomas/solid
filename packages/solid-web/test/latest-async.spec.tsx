@@ -11,6 +11,12 @@
  * 2. the first click never turned `isPending(() => latest(x))` on;
  * 3. `latest()` shows the new value as soon as its own fetch resolves, even
  *    while the unrelated async keeps the transition open.
+ *
+ * Per-channel verdicts (A20 re-rule 2026-07-07c): `isPending(() => latest(x))`
+ * follows x's OWN fetch — it turns off the moment that fetch resolves, even
+ * while the unrelated async still holds the transition. Dimming therefore
+ * always accompanies the stale value and lifts exactly when the fresh value
+ * appears.
  */
 import { expect, test } from "vitest";
 import { createMemo, createSignal, isPending, latest, Loading, flush } from "solid-js";
@@ -81,10 +87,11 @@ test("latest + isPending(latest) across refreshes under Loading (#2829)", async 
   expect(state()).toBe("Async Value 0|op=0.5");
 
   // Fast fetch resolves; slow one still holds the transition. Symptom 3:
-  // latest() already shows the new value.
+  // latest() already shows the new value — and its verdict settles with it
+  // (own async done ⇒ not pending, even mid-transition).
   cur1.resolve();
   await settle();
-  expect(state()).toBe("Async Value 1|op=0.5");
+  expect(state()).toBe("Async Value 1|op=1");
 
   cur2.resolve();
   await settle();
@@ -100,7 +107,7 @@ test("latest + isPending(latest) across refreshes under Loading (#2829)", async 
 
   cur1.resolve();
   await settle();
-  expect(state()).toBe("Async Value 2|op=0.5");
+  expect(state()).toBe("Async Value 2|op=1");
 
   cur2.resolve();
   await settle();

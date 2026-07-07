@@ -845,14 +845,17 @@ describe("createOptimistic", () => {
 
       // Optimistic value is immediate
       expect($data!()).toBe(20);
-      // isPending - async is in flight
-      expect(isPending($data!)).toBe(true);
+      // The mask (2026-07-07c): the active override is certainty by decree —
+      // not pending even while its own confirming fetch is in flight.
+      expect(isPending($data!)).toBe(false);
       // latest() returns the optimistic value
       expect(latest($data!)).toBe(20);
 
-      // Source signal is held
+      // Source signal is held — and its plain-channel verdict reports it
+      // (contrast: the mask is node-scoped, not transition-wide).
       expect($id()).toBe(1); // held during transition
       expect(latest($id)).toBe(2); // in-flight value
+      expect(isPending($id)).toBe(true);
 
       // After async completes
       await new Promise(r => setTimeout(r, 0));
@@ -891,8 +894,9 @@ describe("createOptimistic", () => {
 
       // Optimistic value is immediate
       expect($data!()).toBe(999);
-      // isPending - async is in flight
-      expect(isPending($data!)).toBe(true);
+      // The mask (2026-07-07c): even a wrong guess is decreed settled — the
+      // correction reveals through a value change, never a pending window.
+      expect(isPending($data!)).toBe(false);
       // latest() returns the optimistic value
       expect(latest($data!)).toBe(999);
 
@@ -2134,9 +2138,10 @@ describe("createOptimistic", () => {
       chain.setOptimistic(20);
       flush();
 
-      // Optimistic is set - NOW we're pending (have stale data, loading new)
+      // Optimistic is set — masked (2026-07-07c): the override is certainty
+      // by decree, so the node reads settled even mid-refetch.
       expect(chain.optimistic()).toBe(20);
-      expect(chain.pendingComputes.at(-1)).toBe(true); // Now pending!
+      expect(chain.pendingComputes.at(-1)).toBe(false);
 
       // Resolve second async (lane ready)
       chain.resolveSecond();
@@ -2192,7 +2197,7 @@ describe("createOptimistic", () => {
       chain.setOptimistic(999); // Wrong!
       flush();
 
-      expect(chain.pendingComputes.at(-1)).toBe(true); // Now pending (have stale data)
+      expect(chain.pendingComputes.at(-1)).toBe(false); // masked — the guess is decreed
 
       // Resolve second async (lane flushes with wrong value)
       chain.resolveSecond();
@@ -2310,8 +2315,9 @@ describe("createOptimistic", () => {
       setOptimistic(20);
       flush();
 
-      // Both should go to pending (have stale data, loading new)
-      expect(pendingOptimisticComputes.at(-1)).toBe(true);
+      // The override masks its own node (2026-07-07c); the downstream async
+      // memo reports its own in-flight fetch — that's the independence.
+      expect(pendingOptimisticComputes.at(-1)).toBe(false);
       expect(pendingSecondComputes.at(-1)).toBe(true);
 
       // Resolve second (lane flushes)
@@ -2320,11 +2326,10 @@ describe("createOptimistic", () => {
       flush();
 
       expect(values).toEqual([10, 20]);
-      // secondAsync's own async work is resolved; the upstream optimistic source
-      // remains pending independently.
+      // secondAsync's own async work is resolved.
       expect(pendingSecondComputes.at(-1)).toBe(false);
-      // optimistic still pending (firstAsync not resolved)
-      expect(pendingOptimisticComputes.at(-1)).toBe(true);
+      // optimistic stays masked while firstAsync confirms the guess.
+      expect(pendingOptimisticComputes.at(-1)).toBe(false);
 
       // Resolve first
       resolveFirst!();
@@ -2481,9 +2486,11 @@ describe("createOptimistic", () => {
       expect(selectedValues).toEqual(["News"]); // Effect hasn't fired yet
 
       // CRITICAL: isPending should fire IMMEDIATELY when categoryData starts loading
-      // (isPending has its own lane that can flush without waiting for categoryData)
+      // (isPending has its own lane that can flush without waiting for categoryData).
+      // The optimistic node itself is masked (2026-07-07c): the decree covers
+      // it, while the downstream fetch reports its own activity.
       expect(pendingComputes.at(-1)).toBe(true);
-      expect(optimisticPendingComputes.at(-1)).toBe(true);
+      expect(optimisticPendingComputes.at(-1)).toBe(false);
 
       // categoryData resolves with Finance data (optimistic path)
       resolveCategoryDetails!(categoryItems["Finance"]);

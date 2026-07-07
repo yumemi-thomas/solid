@@ -245,6 +245,67 @@ Size cost of the taken subset: +140B min / +63B gz (new link/node fields minus t
 
 ---
 
+## #2844 — Proposal: background refresh (revalidate without marking reads pending)
+
+- **Author:** brenelz (follow-up comment relays GabbeV's position: optimistic overrides should hide their pendingness)
+- **State:** DECISION FINAL (July 7, **reverses the same-day draft below in part**) — the producer-side `background` flag and the refresh-inside-action variant stay declined, but **GabbeV's model was adopted wholesale** (the mask: an active override reads `isPending === false`; store-wide for derived optimistic stores). Engineering landed on `next` (mask + per-channel verdicts + store-wide mask + INV-9/INV-10; spec re-ruled A8/A9/A19/A20, new A21). Response redrafted below, NOT posted.
+
+### Decision (final)
+
+**Ruled (Ryan, July 7): `refresh(source)` ≡ a source write** — unchanged, and it still kills the flag: `refresh(books, { background: true })` would have to mean `setUserId(id, { background: true })`, "change the inputs but tell readers nothing is unsettled," which is incoherent for a *plain* refetch (the reads genuinely might change). Refresh-inside-action-is-background is likewise still declined (context-dependent primitive behavior).
+
+**Reversed (Ryan + GabbeV, later July 7): overrides hide pendingness — the mask (SPEC A20/A21).** The morning draft defended "overrides are unsettled" with the two-axis argument; re-litigating against GabbeV's track record, the todos example (which already used co-written `pending` flags, not `isPending`, for per-row affordances), and the follow-on Discord discussion flipped it:
+
+1. **The decisive argument:** deriving *action progress* from a *data verdict* was the only use case that needed override-pending — "the only place you seem to need optimistic state being considered pending is when you want to use it to derive that an action is in flight… isPending is about the data being in the process of being updated, not about an action being in progress." Action affordances belong in the data (co-written flag / separate `createOptimistic(false)`); you're already writing the optimistic update, the flag rides along.
+2. **The mask is store-wide for derived optimistic stores (A21):** any live optimistic write silences `isPending` for the whole store — written leaves, untouched siblings, structural reads, the firewall's own refetch. "The store is the boundary"; once you write optimistically you own the store's pending affordances. This also dissolves partial-store-pending as a concept (it only ever arose from overrides) and answers GabbeV's #2728 entanglement worry: optimistic writes to the same store entangle, not just same-property writes.
+3. **`latest` re-ruled with it (A8):** `latest` is "an optimistic that sets itself to the value as soon as it is available" — so `isPending(() => latest(x))` follows x's own in-flight async only, false the instant it resolves even if the commit is held. The blog-era latest-form idiom is gone with the old algebra (GabbeV: correct — #2831 already broke it, and it was deriving action state from store pending anyway).
+4. **This resolves the proposal's actual pain without the flag.** brenelz's sync-back scenario: the optimistic edit masks the whole store through both phases — no whole-store pending flip, no per-row flicker; "Saving…" comes from the co-written flag. Pure background polling: Gabriel's idiom `refresh(books); setBooks(s => …reassert current…)` — the self-decree masks the refetch, fresh data reconciles silently at commit, mask lifts (verified empirically: contrast plain-refresh pends / idiom fully silent / later plain refresh pends again).
+5. **What the old draft's V6 "fix" became:** V6 (latest form false under a fresh no-async override) is not a violation — it is the mask working. The disposal-latch edge it exposed was real and is fixed (INV-9: `computePendingState` disposal guard + companion snap in `disposeChildren`).
+
+Engineering landed on `next`: `computePendingState` rewritten as the mask/per-channel ladder, `_optimisticMask` + `maskStoreTarget` store plumbing, INV-10 (both arms), spec + internals docs re-ruled (SPEC A8/A9/A19/A20/A21, INTERNALS §5f), tests re-pinned with live-probe contrasts. Size/perf neutral (−27 B raw / +8 B gzip min; benches flat).
+
+### Drafted response (NOT posted, supersedes the earlier draft)
+
+> Took a while to settle this one because it forced the real design question underneath. Outcome: no `background` flag — but @GabbeV's position won, and the next beta ships it. Credit where due: this was argued from several directions for weeks, and the model that survived is his.
+>
+> **Why not the flag:** we treat `refresh(source)` as exactly equivalent to a source write — `refresh(user)` and `setUserId(id)` trigger the same recompute through the same machinery and must behave the same. `refresh(books, { background: true })` would then have to mean `setUserId(id, { background: true })`: "change the inputs but tell readers nothing is unsettled." For a plain refetch that's incoherent — every row genuinely might change, which is the same reason your alternatives section rejected `overridesOnly`. Same for making refresh implicitly background inside actions: an invalidation primitive shouldn't change meaning based on call site.
+>
+> **What changed instead — optimistic overrides now mask pending:** an active optimistic write reads `isPending === false`, and for a derived optimistic store the mask is store-wide: while any optimistic write on the store is live, the whole store — edited row, untouched rows, `length`, even the sync-back refetch — reads settled. The reasoning that finally stuck: writing optimistically is a decree. You just told the UI "this is the outcome"; it can't simultaneously be "about to change." `isPending` is for data being moved by machinery you *didn't* decree — refetches, held commits. Deriving "my action is in flight" from a data verdict was the one thing override-pending was good for, and it's better served explicitly: you're already writing the optimistic update, so write the affordance with it — `book.saving = true` in the same draft, or a separate `createOptimistic(false)`. (The todos example in the repo has quietly used exactly this pattern all along.)
+>
+> **Your scenario under the new model:** the optimistic title edit masks the store through both phases — no whole-store pending flip when `refresh(books)` runs, no flicker on untouched rows, and the per-row "Saving…" is the flag you co-wrote, which also survives nuances like retry loops that `isPending` never could. And background polling falls out with zero new API: `refresh(books); setBooks(s => { …reassert current… })` — the self-decree silences the refetch, fresh data reconciles in at commit, and the mask lifts. We verified both flows end-to-end.
+>
+> One consequence to be aware of since your blog touched it: `isPending(() => latest(x))` now follows `x`'s own in-flight async only (`latest` is effectively an optimistic that self-applies as soon as a value is available, and like any optimistic it masks) — the old latest-form store-leaf idiom is gone with the algebra that motivated it. Closing this as resolved by the new model; the `setStore`-pending question (#2743) stays open separately.
+
+---
+
+## #2728 — Proposal: `affects()` for action-affected sources
+
+- **Author:** brenelz (GabbeV carried the thread after brenelz self-resolved)
+- **State:** DECISION MADE (July 7) — decline `affects()`; the mask model (see #2844 entry) resolves the thread's real subject. Response drafted, NOT posted. Close on posting. #2743 (setStore → whole-store pending) explicitly stays open.
+
+### Decision
+
+The proposal ("mark a source pending for `isPending()` while an action runs, before `refresh` starts") is declined on the same axis as the #2844 ruling — it *overloads a data verdict with action state*, which brenelz himself concluded mid-thread ("you'd just use optimistic state… overloading what isPending means") and Ryan seconded at the time. The mask model now makes that the ruled answer rather than an instinct: action-in-flight affordances are explicit optimistic state (co-written flags / `createOptimistic(false)`), and `isPending` never reports them.
+
+GabbeV's two follow-on concerns in-thread are both addressed by the adopted model:
+
+1. **Entanglement of sequential mutations** ("two mutations on the same store only entangle if their refreshes happen to overlap — the first refresh might reveal both early"): under A21 the store is the entanglement unit — any optimistic write to the same store joins the store's live optimistic scope, so same-store mutations entangle by construction, not by refresh timing.
+2. **"Optimistic should hide pending" + the background-polling idiom** (`refresh(thing); setOptimisticThing(thing)`): adopted verbatim — this is A20/A21, and the polling idiom is verified working (see #2844 entry).
+
+His parenthetical `isOptimistic` helper suggestion stays in the "prove its worth first" bucket he put it in — co-written flags cover the known cases. His sync-engine `affects()` use case (subscription-driven updates where nothing refreshes but you know a mutation will land) is noted but not compelling enough to carry the API: it's the same action-affordance shape, served the same explicit way.
+
+### Drafted response (NOT posted)
+
+> Closing the loop on this one, because the discussion here (and in #2844) ended up driving a real design change. The short version: `affects()` is declined for the reason you yourself landed on mid-thread — it overloads what `isPending` means — but @GabbeV's position from this thread ("optimistic state should hide pending") is now the shipped model, in the next beta.
+>
+> Concretely: an active optimistic override reads `isPending === false` for its whole lifetime, and for a derived optimistic store the mask is store-wide — any live optimistic write to the store silences pending for everything under it, refetch included. `isPending` is now strictly about data being updated by machinery you didn't decree (refetches, held commits), never about an action being in progress. "Saving…" affordances are explicit optimistic state you co-write with the update — a flag in the draft, or a separate `createOptimistic(false)` — which is what the original `affects()` example was reaching for, expressed in data instead of a new primitive.
+>
+> That also answers the entanglement concern raised here: with the store-wide mask, the store is the entanglement unit — two mutations touching the same optimistic store entangle because they share the store's optimistic scope, not because their refreshes happened to overlap. And the background-refresh idiom works as described: `refresh(thing); setOptimisticThing(thing)` masks the revalidation entirely, with fresh data reconciling in at commit.
+>
+> `isOptimistic` stays out for now on the prove-its-worth basis — co-written flags cover everything we've seen. The `setStore` question (#2743) remains open; this decision doesn't settle it, and it deserves its own discussion.
+
+---
+
 ## #2801 — "Many hydration bugs" (six-bug report)
 
 - **Reporter:** dangkyokhoang

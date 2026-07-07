@@ -112,6 +112,17 @@ export function createAsyncReporters(): Map<Computed<any>, Set<Computed<any>>> {
  * silently into `_value` under the override mask — A17 — so reverting is
  * just dropping the override.)
  */
+/** What a read of the companion would observe right now (A17 read order). */
+function observableVerdict(pendingSignal: Signal<boolean>): boolean {
+  return (
+    pendingSignal._overrideValue !== undefined && pendingSignal._overrideValue !== NOT_PENDING
+      ? pendingSignal._overrideValue
+      : pendingSignal._pendingValue !== NOT_PENDING
+        ? pendingSignal._pendingValue
+        : pendingSignal._value
+  ) as boolean;
+}
+
 export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) => boolean): void {
   if (!__TEST__) return;
   for (const node of optimisticNodes) {
@@ -124,6 +135,32 @@ export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) =
       isRegisteredForRevert(node),
       "INV-2",
       "a node has an active optimistic override but is not registered in any _optimisticNodes list — the override can never revert"
+    );
+    // INV-10 (mask, re-rule 2026-07-07c): an active override is certainty by
+    // decree — the node's verdict must read false for as long as the override
+    // holds, no matter what async is in motion. A companion reporting true
+    // here means a verdict path missed the mask.
+    const pendingSignal = node._pendingSignal;
+    if (pendingSignal) {
+      assertInvariant(
+        observableVerdict(pendingSignal) === false,
+        "INV-10",
+        "isPending companion reports true while its owner holds an active optimistic override — the mask (override = certainty by decree) was bypassed"
+      );
+    }
+  }
+  // INV-10 store-wide: while a firewall carries the optimistic mask (any live
+  // optimistic write to its store), EVERY companion under it — the firewall's
+  // own and every probed leaf's — must read false. The store is the primitive
+  // the mask covers.
+  for (const node of companionOwners) {
+    if (isDisposed(node) || !node._pendingSignal) continue;
+    const maskOwner = ((node as any)._firewall || node) as Computed<any>;
+    if (!maskOwner._optimisticMask) continue;
+    assertInvariant(
+      observableVerdict(node._pendingSignal) === false,
+      "INV-10",
+      "isPending companion reports true under a store-wide optimistic mask — a verdict path missed the firewall's _optimisticMask"
     );
   }
 }

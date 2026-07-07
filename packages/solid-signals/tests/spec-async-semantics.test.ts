@@ -130,6 +130,11 @@ describe("A14 (was B2): companion lanes flush independently of the owner's async
   // The isPending()/latest() companion nodes get child lanes that do NOT merge
   // with the owner's lane: an isPending effect (spinner) must fire while the
   // owner's async is still in flight, not after it settles.
+  //
+  // Re-scoped by the 2026-07-07c mask ruling: an optimistic write no longer
+  // produces a `true` verdict (the override masks its own confirming fetch),
+  // so the independent-flush property is pinned on a PLAIN refetch — the
+  // spinner fires while the fetch is in flight, before anything commits.
   it("isPending effect fires true before the owner's async resolves", async () => {
     const [id, setId] = createSignal(1);
     const fetcher = deferredFetcher((t: number) => t * 10);
@@ -154,20 +159,30 @@ describe("A14 (was B2): companion lanes flush independently of the owner's async
     expect(valueLog).toEqual([10]);
     expect(pendingLog).toEqual([false]);
 
-    // Optimistic write starts a transition; async for id=2 is in flight.
+    // Plain source write: the refetch for id=2 is in flight, no override.
+    // The spinner fires without waiting for the fetch — this is the whole
+    // point of the companion child lane — while the rendered value holds.
     setId(2);
-    setData(20);
     flush();
-    // The spinner fired without waiting for the fetch — this is the whole
-    // point of the companion child lane.
     expect(pendingLog).toEqual([false, true]);
-    // The override is visible immediately through its own lane.
-    expect(valueLog).toEqual([10, 20]);
+    expect(valueLog).toEqual([10]);
 
     fetcher.resolveAll();
     await settle();
     expect(pendingLog).toEqual([false, true, false]);
     expect(data()).toBe(20);
+
+    // Mask contrast (A20 re-rule): the same shape with an optimistic write
+    // never surfaces true — the override is certainty by decree.
+    setId(3);
+    setData(30);
+    flush();
+    expect(pendingLog).toEqual([false, true, false]);
+    expect(valueLog).toEqual([10, 20, 30]);
+    fetcher.resolveAll();
+    await settle();
+    expect(pendingLog).toEqual([false, true, false]);
+    expect(data()).toBe(30);
   });
 });
 
@@ -657,33 +672,27 @@ describe("A19 (was C1): isPending(x) = the observable value of x is not final", 
   });
 });
 
-describe("A20: overrides are unsettled; pending scope is a property of the read", () => {
-  // Ruling (2026-07-07): an ACTIVE optimistic override reads pending —
-  // uniformly, on every node kind. Overrides mask stale content (A17: the
-  // override is the value every read sees), not settlement: until its own
-  // source confirms it (A18) or the transition reverts it, the shown value is
-  // unconfirmed, and `isPending` reports unsettledness, never what UI to show.
-  // "Optimistic state is often the loading state" — the community
-  // no-extra-boolean idioms (isPending(() => books.length) as the "Adding…"
-  // label) are built on this.
+describe("A20: the mask — an override is certainty by decree; pending follows the channel you read", () => {
+  // Re-ruled 2026-07-07c (GabbeV/maintainer, supersedes the one-day
+  // "overrides are unsettled" ruling): a node is pending iff the value the
+  // reader observes is going to be superseded by work already in motion.
   //
-  // Scope falls out of the read-performs principle: isPending(fn) reports
-  // unsettledness of what fn TOUCHED. A refetch pends every read of a store
-  // because the authority is recomputing (unbounded change set); an
-  // optimistic write pends exactly the leaves it wrote (known change set) —
-  // untouched siblings stay settled. Broad-on-demand stays available by
-  // reading broadly.
-  //
-  // The three forms — `latest` strips COORDINATION, nothing strips
-  // CONFIRMATION: transition holds and broad firewall inheritance are
-  // coordination (the future value is known; the wait is atomicity) and the
-  // latest view absorbs them. A node's own async in flight and an active
-  // override are confirmation-uncertainty (the future value is unknown) and
-  // read pending under BOTH forms. Pair the form with what you render:
-  // committed view x() → isPending(x); optimistic visual latest(x) →
-  // isPending(() => latest(x)).
+  // - An ACTIVE optimistic override is certainty by decree: writing it
+  //   declares the shown value not-superseded, so the node reads false for
+  //   the override's whole lifetime — no matter what async is in motion
+  //   around it (its own confirming fetch included). Action-scoped "saving"
+  //   affordances belong IN the data (co-written flags, as in the todos
+  //   example), never in verdicts.
+  // - Plain reads watch the committed channel: pending during an in-flight
+  //   fetch AND while a resolved value is still held by its transition.
+  // - `latest` reads watch the fresh channel: `latest` is an override the
+  //   system writes for itself the moment a held value exists ("it is like
+  //   an optimistic that sets itself to the value as soon as it is available
+  //   to do so"), so only an actually-in-flight fetch pends it. On a signal
+  //   or sync computed the held value exists from the instant of the write —
+  //   `latest` there is never pending.
 
-  it("optimistic computed: override + own fetch reads pending under all three forms, all clear when the fetch lands", async () => {
+  it("optimistic computed: the mask holds through the node's own confirming fetch", async () => {
     const fetcher = deferredFetcher((t: number) => t * 10);
     const [id, setId] = createSignal(1);
     let data!: SourceAccessor<number>;
@@ -701,9 +710,9 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     setData(999); // prediction for id=2
     flush();
     expect(data()).toBe(999); // A17: the override is the value
-    expect(isPending(id)).toBe(true); // held write (coordination)
-    expect(isPending(data)).toBe(true); // unconfirmed override + own fetch
-    expect(isPending(() => latest(data))).toBe(true); // confirmation is never stripped
+    expect(isPending(id)).toBe(true); // plain channel: held write, superseded at commit
+    expect(isPending(data)).toBe(false); // masked — decree, even with the fetch in flight
+    expect(isPending(() => latest(data))).toBe(false); // masked in every form
 
     fetcher.resolveAll();
     await settle();
@@ -714,11 +723,10 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     expect(isPending(() => latest(data))).toBe(false);
   });
 
-  it("optimistic signal in an action: the override alone is unsettled (no refetch anywhere) — the no-extra-boolean idiom", async () => {
-    // A non-derived optimistic signal has no source that can confirm its
-    // guess — reversion is certain, so the shown value is never final:
-    // pending for the override's whole lifetime. This is what makes
-    // `adding()`-style flags readable straight off the optimistic state.
+  it("optimistic signal in an action: the override never reads pending — the affordance IS the flag", async () => {
+    // The flag pattern: `adding()` itself is the affordance you render.
+    // Deriving "action in flight" from isPending(adding) is exactly what the
+    // mask forbids — read the optimistic value, not a verdict about it.
     const [adding, setAdding] = createOptimistic(false);
     let release!: () => void;
     let run!: () => Promise<void>;
@@ -734,8 +742,8 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
 
     const done = run();
     flush();
-    expect(adding()).toBe(true); // override visible (A17)
-    expect(isPending(adding)).toBe(true); // and unsettled — it WILL revert
+    expect(adding()).toBe(true); // override visible (A17) — this is the affordance
+    expect(isPending(adding)).toBe(false); // masked: decreed, not superseded
 
     release();
     await done;
@@ -744,7 +752,7 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     expect(isPending(adding)).toBe(false);
   });
 
-  it("store: an optimistic edit pends the leaves it touched, not untouched siblings", async () => {
+  it("store: an optimistic edit masks the leaves it touched; untouched siblings stay settled too", async () => {
     let release!: () => void;
     let run!: () => Promise<void>;
     let state!: { title: string; author: string };
@@ -767,8 +775,9 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     const done = run();
     flush();
     expect(state.title).toBe("t2");
-    // The write's change set is known: title is unsettled, author is not.
-    expect(isPending(() => state.title)).toBe(true);
+    // Plain optimistic store: no source can supersede anything (non-derived),
+    // and the written leaf is decreed — nothing reads pending.
+    expect(isPending(() => state.title)).toBe(false);
     expect(isPending(() => state.author)).toBe(false);
 
     release();
@@ -777,6 +786,69 @@ describe("A20: overrides are unsettled; pending scope is a property of the read"
     expect(state.title).toBe("t1"); // reverted (non-derived store: transaction-scoped)
     expect(isPending(() => state.title)).toBe(false);
     expect(isPending(() => state.author)).toBe(false);
+  });
+
+  it("store-wide mask: one optimistic write silences the whole derived store, untouched leaves included; the mask lifts with the override", async () => {
+    // The store is the primitive the mask covers. A refetch recomputes the
+    // whole authority, so it pends every leaf (A9); an optimistic write to
+    // ANY leaf decrees the whole store settled — "if I do
+    // setOptimisticFormOptions(x => x.cities.push('London')) then I expect
+    // the select to consider it settled", untouched siblings included,
+    // because the writer has taken over presenting this store's state. The
+    // mask is not a latch: it lives exactly as long as the override, so a
+    // later pure refresh pends again.
+    let resolveFetch!: (v: { title: string; author: string }) => void;
+    const [tick, setTick] = createSignal(0);
+    let state!: { title: string; author: string };
+    let setState!: (fn: (s: { title: string; author: string }) => void) => void;
+    createRoot(() => {
+      [state, setState] = createOptimisticStore(
+        () => {
+          tick();
+          return new Promise<{ title: string; author: string }>(r => (resolveFetch = r));
+        },
+        { title: "t0", author: "a0" }
+      );
+      createRenderEffect(
+        () => `${state.title}|${state.author}`,
+        () => {}
+      );
+    });
+    flush();
+    resolveFetch({ title: "t1", author: "a1" });
+    await settle();
+    expect(isPending(() => state.title)).toBe(false);
+
+    // Contrast (proves the probes are live): a pure refetch pends every leaf.
+    setTick(1);
+    flush();
+    expect(isPending(() => state.title)).toBe(true);
+    expect(isPending(() => state.author)).toBe(true);
+
+    // One optimistic write mid-refetch silences the WHOLE store — the very
+    // fetch that just read pending is now masked, untouched author included.
+    setState(s => {
+      s.title = "t-opt";
+    });
+    flush();
+    expect(state.title).toBe("t-opt");
+    expect(isPending(() => state.title)).toBe(false);
+    expect(isPending(() => state.author)).toBe(false);
+
+    // Fresh data lands: override consumed, still settled.
+    resolveFetch({ title: "t2", author: "a2" });
+    await settle();
+    expect(state.title).toBe("t2");
+    expect(isPending(() => state.title)).toBe(false);
+
+    // The mask lifted with the override: a later pure refresh pends again.
+    setTick(2);
+    flush();
+    expect(isPending(() => state.title)).toBe(true);
+    expect(isPending(() => state.author)).toBe(true);
+    resolveFetch({ title: "t3", author: "a3" });
+    await settle();
+    expect(isPending(() => state.title)).toBe(false);
   });
 });
 
@@ -924,13 +996,16 @@ describe("V1–V5: verdicts in and after the blocked-merged window (fixed 2026-0
     expect(isPending(data)).toBe(false);
   });
 
-  // V4 (A20 three-form algebra): `latest` strips COORDINATION. A firewall
-  // refetch seen from an optimistic store leaf with no unconfirmed edit is
-  // coordination-shaped (broad inheritance), so the latest form filters it
-  // while the plain form reports it — the community "refresh-noise" idiom.
-  // And once the refresh settles, the verdict clears (the firewall's status
-  // change pokes probed leaf companions — no more stuck-true companion).
-  it("V4/A20: latest-form on an optimistic store leaf filters a pure firewall refresh and clears at settle", async () => {
+  // V4 — RE-RULED 2026-07-07c: the latest-form filter is GONE. `latest`
+  // strips holds (a held value is its self-applied override — mask), never
+  // in-flight async: a leaf downstream of an in-flight firewall refetch is
+  // pending in BOTH forms ("true only if downstream of in-progress async"
+  // includes the refetch). The row-scoped quiet that the old filter provided
+  // is served by co-written data flags, not by verdict forms. What survives
+  // of V4 is the stuck-companion fix: once the refresh settles, both
+  // verdicts clear (the firewall's status change pokes probed leaf
+  // companions).
+  it("V4/A20: both forms report a pure firewall refresh on a resting leaf, and both clear at settle", async () => {
     let resolveFetch!: (n: number) => void;
     const [tick, setTick] = createSignal(0);
     let state!: { title: string };
@@ -953,12 +1028,12 @@ describe("V1–V5: verdicts in and after the blocked-merged window (fixed 2026-0
     await settle();
     expect(state.title).toBe("server1");
 
-    // Pure refresh: no optimistic edit anywhere. The plain form reports the
-    // broad refetch; the latest form filters it.
+    // Pure refresh: no optimistic edit anywhere, the fetch is in flight —
+    // both channels are superseded by it, so both forms report it.
     setTick(1);
     flush();
     expect(isPending(() => state.title)).toBe(true);
-    expect(isPending(() => latest(() => state.title))).toBe(false);
+    expect(isPending(() => latest(() => state.title))).toBe(true);
 
     resolveFetch(2);
     await settle();

@@ -97,6 +97,13 @@ export interface Computed<T> extends RawSignal<T>, Owner {
   _inFlight: PromiseLike<T> | AsyncIterable<T> | null;
   _child: FirewallSignal<any> | null;
   _notifyStatus?: (status?: number, error?: any) => void;
+  /**
+   * Store-wide optimistic mask (count of this firewall's store targets with
+   * live optimistic writes). Non-zero decrees the whole store settled for
+   * `isPending` — the store is the primitive the mask covers (A20 re-rule
+   * 2026-07-07c).
+   */
+  _optimisticMask?: number;
 }
 
 export interface Root extends Owner {

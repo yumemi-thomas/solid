@@ -20,6 +20,7 @@ import {
   createStoreProxy,
   getOverlayLayer,
   isWrappable,
+  maskStoreTarget,
   STORE_FIREWALL,
   STORE_LOOKUP,
   STORE_NODE,
@@ -110,7 +111,12 @@ export function createOptimisticStore<T extends object = {}>(
 // Clear optimistic override for a store and notify signals
 function clearOptimisticStore(store: any): void {
   const target = store[$TARGET] as StoreNode | undefined;
-  if (!target || !target[STORE_OPTIMISTIC_OVERRIDE]) return;
+  if (!target) return;
+  // The store-wide mask lives exactly as long as the target is registered
+  // for reversion — lift it even when the override layer itself is already
+  // gone (e.g. an equal-value write-back emptied it).
+  maskStoreTarget(target, false);
+  if (!target[STORE_OPTIMISTIC_OVERRIDE]) return;
 
   clearOptimisticOverride(target);
 }
@@ -118,6 +124,9 @@ function clearOptimisticStore(store: any): void {
 function clearOptimisticOverride(target: StoreNode): void {
   const override = target[STORE_OPTIMISTIC_OVERRIDE];
   if (!override) return;
+  // Fresh projected data consumes the overlay (wrapCommit path) — the
+  // store's optimistic state is gone, so the mask lifts with it.
+  maskStoreTarget(target, false);
   const nodes = target[STORE_NODE];
   delete target[STORE_OPTIMISTIC_OVERRIDE];
 

@@ -1998,7 +1998,11 @@ describe("isPending and latest with async upstream and downstream", () => {
   });
 
   // Test 1: latest(signal) with sync consumer - no phase 1
-  it("latest(signal) with sync consumer - isPending(() => latest(x)) tracks the transition like isPending(x)", async () => {
+  // Re-ruled 2026-07-07c (per-channel verdicts): a signal's held write IS the
+  // latest view's self-applied override — it exists from the instant of the
+  // set, so latest(signal) is never pending. Only the plain form (committed
+  // channel) reports the transition hold.
+  it("latest(signal) with sync consumer - latest(signal) is never pending; the plain form reports the hold", async () => {
     const [$x, setX] = createSignal(1);
     let asyncMemo: () => number;
     const pendingPairs: [boolean, number][] = [];
@@ -2030,10 +2034,11 @@ describe("isPending and latest with async upstream and downstream", () => {
     setX(2);
     flush();
 
-    // isPending(signal) goes true (held in transition)
+    // isPending(signal) goes true (held in transition — committed channel)
     expect(isPendingSignal.at(-1)).toBe(true);
-    // Active isPending reads through latest(signal)'s pending footprint.
-    expect(pendingPairs.at(-1)).toEqual([true, 2]);
+    // The latest form shows the held value AND reads settled: the held write
+    // is its self-override, and overrides mask (2026-07-07c).
+    expect(pendingPairs.at(-1)).toEqual([false, 2]);
 
     // After async resolves and transition commits
     await new Promise(r => setTimeout(r, 0));
@@ -2042,12 +2047,12 @@ describe("isPending and latest with async upstream and downstream", () => {
     expect($x()).toBe(2);
   });
 
-  // Test 2: latest(signal) consumed by async memo - override lane has downstream async
-  // When isPending(() => latest(x)) and latest(x) are in the SAME effect, the effect
-  // subscribes to both pendingSignal and pendingComputed, causing lane merging. The merged
-  // lane has pending async from the downstream consumer, so the effect is held until that
-  // async resolves. To observe isPending independently, use a SEPARATE effect.
-  it("latest(signal) consumed by async memo - isPending(() => latest(x)) true until downstream async resolves", async () => {
+  // Test 2: latest(signal) consumed by async memo.
+  // Re-ruled 2026-07-07c: downstream async consuming the latest view does not
+  // pend the signal's latest form — latest(signal) is never pending (its
+  // self-override exists from the set). The downstream async memo reports its
+  // own fetch; the plain signal form reports the transition hold.
+  it("latest(signal) consumed by async memo - latest form stays settled; downstream async reports itself", async () => {
     const [$id, setId] = createSignal(1);
     let mainAsync: () => number;
     let details: () => string;
@@ -2128,20 +2133,23 @@ describe("isPending and latest with async upstream and downstream", () => {
     setId(2);
     flush();
 
-    // The separate isPending effect observes true immediately (its lane has no async)
-    expect(isPendingValues.at(-1)).toBe(true);
+    // The latest form never pends for the signal — the held write is its
+    // self-override (mask). With no verdict change there is no companion
+    // sub-lane firing either: the combined effect stays lane-held on its
+    // pre-write pair (atomic reveal), while a separate verdict effect reads
+    // the settled false.
+    expect(isPendingValues.at(-1)).toBe(false);
+    expect(pendingPairs.at(-1)).toEqual([false, 1]);
 
-    // The latest value is visible, but downstream async that consumes it is pending.
-    expect(pendingPairs.at(-1)).toEqual([true, 2]);
-
-    // Resolve details (the async consuming latest($id))
+    // Resolve details (the async consuming latest($id)): the latest lane's
+    // own async is done, so the lane-held effects flush and reveal the fresh
+    // pair — settled, with the new value — while main is still in flight.
     resolveDetails!();
     await Promise.resolve();
     flush();
 
-    // The details lane is ready, but active isPending still sees mainAsync.
-    expect(pendingPairs.at(-1)).toEqual([true, 2]);
-    expect(isPendingValues.at(-1)).toBe(true);
+    expect(pendingPairs.at(-1)).toEqual([false, 2]);
+    expect(isPendingValues.at(-1)).toBe(false);
 
     // Resolve main async to complete transition
     resolveMain!();
@@ -2242,11 +2250,14 @@ describe("isPending and latest with async upstream and downstream", () => {
     resolveAsync!();
     await Promise.resolve();
     flush();
-    // Override present, lane has no downstream async → isPending false
+    // Own async done → the self-override exists → settled (2026-07-07c)
     expect(pairs.at(-1)).toEqual([false, 20]);
 
-    // Verify active latest pairs can expose the in-flight latest value while pending.
-    expect(pairs).toContainEqual([true, 20]);
+    // Per-channel atomicity: the latest form never pairs `pending` with the
+    // fresh value — true only ever accompanies the stale value it shows.
+    for (const [ip, val] of pairs) {
+      if (ip) expect(val).toBe(10);
+    }
   });
 
   // Test 5: Chained async - each [isPending(x), x()] pair tracks its own resolution
@@ -2385,12 +2396,14 @@ describe("isPending and latest with async upstream and downstream", () => {
     expect(pairsA.at(-1)).toEqual([true, 10]);
     expect(pairsB.at(-1)).toEqual([true, 11]);
 
-    // Resolve asyncA - latest exposes asyncA's new value, but active pending
-    // remains true while asyncB is still in flight.
+    // Resolve asyncA - its own async is done, so its latest form settles
+    // immediately ("false as soon as that async is done even if the same
+    // update has other async still running" — 2026-07-07c), while asyncB's
+    // fresh fetch (consuming 20) reports itself.
     resolveA!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([true, 20]);
+    expect(pairsA.at(-1)).toEqual([false, 20]);
     expect(pairsB.at(-1)).toEqual([true, 11]);
 
     // Resolve asyncB
@@ -2399,9 +2412,13 @@ describe("isPending and latest with async upstream and downstream", () => {
     flush();
     expect(pairsB.at(-1)).toEqual([false, 21]);
 
-    // Active latest pairs can expose asyncA's in-flight latest value while pending.
-    expect(pairsA).toContainEqual([true, 20]);
-    expect(pairsB).toContainEqual([true, 21]);
+    // Per-channel atomicity: true only ever pairs with the stale value.
+    for (const [ip, val] of pairsA) {
+      if (ip) expect(val).toBe(10);
+    }
+    for (const [ip, val] of pairsB) {
+      if (ip) expect(val).toBe(11);
+    }
   });
 
   // Test 7: Multiple independent async sources - one resolves first
@@ -2560,21 +2577,22 @@ describe("isPending and latest with async upstream and downstream", () => {
     expect(pairsB.at(-1)).toEqual([true, 100]);
     expect(pairsC.at(-1)).toEqual([true, 1000]);
 
-    // Resolve asyncC first. latest exposes the new value, but active pending
-    // remains true while sibling async work is still in flight.
+    // Resolve asyncC first. Its own async is done → its latest form settles
+    // with the new value even though siblings still hold the transition
+    // (2026-07-07c per-channel rule); the siblings keep reporting their own
+    // in-flight fetches.
     resolveC!();
     await Promise.resolve();
     flush();
-    expect(pairsC.at(-1)).toEqual([true, 2000]);
+    expect(pairsC.at(-1)).toEqual([false, 2000]);
     expect(pairsA.at(-1)).toEqual([true, 10]);
     expect(pairsB.at(-1)).toEqual([true, 100]);
 
-    // Resolve asyncA. latest exposes asyncA's new value, but active pending
-    // remains true while asyncB is still in flight.
+    // Resolve asyncA — same: settles its own latest form immediately.
     resolveA!();
     await Promise.resolve();
     flush();
-    expect(pairsA.at(-1)).toEqual([true, 20]);
+    expect(pairsA.at(-1)).toEqual([false, 20]);
     expect(pairsB.at(-1)).toEqual([true, 100]);
 
     // Resolve asyncB - all resolved, transition complete
@@ -2583,10 +2601,16 @@ describe("isPending and latest with async upstream and downstream", () => {
     flush();
     expect(pairsB.at(-1)).toEqual([false, 200]);
 
-    // Active latest pairs can expose each source's in-flight latest value while pending.
-    expect(pairsA).toContainEqual([true, 20]);
-    expect(pairsB).toContainEqual([true, 200]);
-    expect(pairsC).toContainEqual([true, 2000]);
+    // Per-channel atomicity: true only ever pairs with the stale value.
+    for (const [ip, val] of pairsA) {
+      if (ip) expect(val).toBe(10);
+    }
+    for (const [ip, val] of pairsB) {
+      if (ip) expect(val).toBe(100);
+    }
+    for (const [ip, val] of pairsC) {
+      if (ip) expect(val).toBe(1000);
+    }
   });
 });
 
