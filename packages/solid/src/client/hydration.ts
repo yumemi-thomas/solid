@@ -583,10 +583,10 @@ function hydratedCreateSignal(fn?: any, second?: any) {
   return coreSignal((prev: any) => readSerializedOrCompute(fn, prev), second);
 }
 
-function hydratedCreateErrorBoundary<U>(
-  fn: () => any,
+function hydratedCreateErrorBoundary<T, U>(
+  fn: () => T,
   fallback: (error: () => unknown, reset: () => void) => U
-): () => unknown {
+): Accessor<T | U> {
   if (!sharedConfig.hydrating) return coreErrorBoundary(fn, fallback);
   markTopLevelSnapshotScope();
   const parent = getOwner()!;
@@ -922,10 +922,10 @@ export const createSignal: {
  * @internal
  */
 export const createErrorBoundary = ((...args: any[]) =>
-  (_createErrorBoundary || coreErrorBoundary)(...args)) as <U>(
-  fn: () => any,
+  (_createErrorBoundary || coreErrorBoundary)(...args)) as <T, U>(
+  fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
-) => () => unknown;
+) => Accessor<T | U>;
 
 /**
  * Internal primitive that backs `<Reveal>` coordination of sibling loading
@@ -1362,11 +1362,11 @@ function scheduleResumeAfterAssets(
  *
  * @internal
  */
-export function createLoadingBoundary(
-  fn: () => any,
-  fallback: () => any,
+export function createLoadingBoundary<T, U>(
+  fn: () => T,
+  fallback: () => U,
   options?: { on?: () => any }
-): () => unknown {
+): Accessor<T | U> {
   if (!sharedConfig.hydrating) return coreLoadingBoundary(fn, fallback, options);
 
   let settledSerializationResumeQueued = false;
@@ -1494,7 +1494,7 @@ export function createLoadingBoundary(
       return undefined;
     }
     return coreLoadingBoundary(fn, fallback, options);
-  }) as unknown as () => unknown;
+  }) as unknown as Accessor<T | U>;
 }
 
 /**

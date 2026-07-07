@@ -368,10 +368,10 @@ export class CollectionQueue extends Queue {
 
 function createCollectionBoundary<T>(
   type: number,
-  fn: () => any,
-  fallback: (queue: CollectionQueue) => any,
+  fn: () => T,
+  fallback: (queue: CollectionQueue) => T,
   onFn?: () => any
-) {
+): Accessor<T> {
   if (__DEV__ && !getOwner()) {
     const message =
       "[NO_OWNER_BOUNDARY] Boundaries created outside a reactive context will never be disposed.";
@@ -410,14 +410,17 @@ function createCollectionBoundary<T>(
     controller.register(queue);
     cleanup(() => controller.unregister(queue));
   }
-  return accessor(
+  return accessor<T>(
     computed(
-      () => {
+      (): T => {
         if (!read(queue._disabled)) {
           const resolved = read(tree);
           if (!untrack(() => read(queue._disabled))) return ((queue._initialized = true), resolved);
         }
-        if (_revealUsed && read(queue._collapsed)) return undefined;
+        // Collapsed reveal slots suppress their own output entirely; the
+        // renderer treats the hole as empty, so the cast never leaks to users
+        // outside a `createRevealOrder` scope.
+        if (_revealUsed && read(queue._collapsed)) return undefined as T;
         return fallback(queue);
       },
       // Boundary structure, not a user source: its value is fallback-or-content and
@@ -452,12 +455,12 @@ function createCollectionBoundary<T>(
  * }
  * ```
  */
-export function createLoadingBoundary(
-  fn: () => any,
-  fallback: () => any,
+export function createLoadingBoundary<T, U>(
+  fn: () => T,
+  fallback: () => U,
   options?: { on?: () => any }
-) {
-  return createCollectionBoundary(STATUS_PENDING, fn, () => fallback(), options?.on);
+): Accessor<T | U> {
+  return createCollectionBoundary<T | U>(STATUS_PENDING, fn, () => fallback(), options?.on);
 }
 
 /**
@@ -483,11 +486,11 @@ export function createLoadingBoundary(
  * }
  * ```
  */
-export function createErrorBoundary<U>(
-  fn: () => any,
+export function createErrorBoundary<T, U>(
+  fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
-) {
-  return createCollectionBoundary(STATUS_ERROR, fn, queue => {
+): Accessor<T | U> {
+  return createCollectionBoundary<T | U>(STATUS_ERROR, fn, queue => {
     return fallback(accessor(queue._error!), () => {
       for (const source of queue._sources) recompute(source);
       schedule();

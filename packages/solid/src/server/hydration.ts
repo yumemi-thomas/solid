@@ -12,7 +12,7 @@ import {
 } from "./signals.js";
 import { sharedConfig, NoHydrateContext } from "./shared.js";
 import type { SSRTemplateObject, HydrationContext } from "./shared.js";
-import type { Context } from "./signals.js";
+import type { Accessor, Context } from "./signals.js";
 import type { Element as SolidElement } from "../types.js";
 
 export { sharedConfig, NoHydrateContext } from "./shared.js";
@@ -65,15 +65,26 @@ export function ssrHandleError(err: any) {
   throw err;
 }
 
-export function createLoadingBoundary(
-  fn: () => any,
-  fallback: () => any,
+export function createLoadingBoundary<T, U>(
+  fn: () => T,
+  fallback: () => U,
   options?: { on?: () => any }
-): () => unknown {
+): Accessor<T | U> {
   const currentCtx = sharedConfig.context;
   if (!currentCtx) {
     return coreLoadingBoundary(fn, fallback);
   }
+  // Under an SSR context the accessor yields resolved template fragments, not
+  // T/U — the declared signature is the isomorphic contract the renderer and
+  // client share; the SSR plumbing below is cast to it.
+  return ssrLoadingBoundary(currentCtx, fn, fallback) as unknown as Accessor<T | U>;
+}
+
+function ssrLoadingBoundary(
+  currentCtx: HydrationContext,
+  fn: () => any,
+  fallback: () => any
+): () => unknown {
   const ctx = currentCtx;
   const parent = getOwner();
   const parentHandler = parent && runWithOwner(parent, () => getContext(ErrorContext));

@@ -1584,10 +1584,10 @@ export function runWithBoundaryErrorContext<T>(
 
 export { NoHydrateContext };
 
-export function createErrorBoundary<U>(
-  fn: () => any,
+export function createErrorBoundary<T, U>(
+  fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
-): () => unknown {
+): Accessor<T | U> {
   const ctx = sharedConfig.context;
   const parent = getOwner();
   const owner = createOwner();
@@ -1653,11 +1653,11 @@ export function createErrorBoundary<U>(
   };
 }
 
-export function createLoadingBoundary(
-  fn: () => any,
-  fallback: () => any,
+export function createLoadingBoundary<T, U>(
+  fn: () => T,
+  fallback: () => U,
   options?: { on?: () => any }
-): () => unknown {
+): Accessor<T | U> {
   // On server, try to run fn. If NotReadyError is thrown, return fallback.
   // Full HydrationContext integration happens in the Loading component wrapper.
   try {
