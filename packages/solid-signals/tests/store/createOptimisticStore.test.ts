@@ -13,6 +13,7 @@ import {
   latest,
   mapArray,
   refresh,
+  snapshot,
   untrack,
   type Refreshable
 } from "../../src/index.js";
@@ -1541,6 +1542,108 @@ describe("createOptimisticStore", () => {
       await Promise.resolve();
       expect(state.b).toBe(2);
       expect("b" in state).toBe(true);
+    });
+  });
+
+  // #2850: snapshot()/deep() must agree with every other reader — an active
+  // optimistic overlay is THE value (A17), and snapshot's documented behavior
+  // on regular stores is to read the pending-write overlay synchronously. The
+  // optimistic overlay is the same concept under a different key.
+  describe("snapshot and deep see optimistic writes (#2850)", () => {
+    it("snapshot sees an optimistic write immediately", () => {
+      const [state, setState] = createOptimisticStore({ name: "John" });
+      setState(s => {
+        s.name = "Jake";
+      });
+      expect(state.name).toBe("Jake");
+      expect(snapshot(state).name).toBe("Jake");
+    });
+
+    it("snapshot shows the overlay during a transition and the committed value after revert", async () => {
+      const [state, setState] = createOptimisticStore({ count: 0, label: "a" });
+
+      const doAsync = action(function* () {
+        setState(s => {
+          s.count = 1;
+        });
+        yield Promise.resolve();
+      });
+
+      doAsync();
+      flush();
+      const during = snapshot(state);
+      expect(during).toEqual({ count: 1, label: "a" });
+      // Overlay present: snapshot allocates a fresh plain object, like a
+      // regular store with pending writes.
+      expect(during).not.toBe(snapshot(state));
+
+      await Promise.resolve();
+      expect(snapshot(state)).toEqual({ count: 0, label: "a" });
+    });
+
+    it("snapshot sees nested writes, array mutations, and deletes through the overlay", async () => {
+      const [state, setState] = createOptimisticStore<{
+        user: { name: string; tmp?: number };
+        todos: { id: number; text: string }[];
+      }>({
+        user: { name: "John", tmp: 1 },
+        todos: [{ id: 1, text: "one" }]
+      });
+
+      const doAsync = action(function* () {
+        setState(s => {
+          s.user.name = "Jake";
+          delete s.user.tmp;
+          s.todos.push({ id: 2, text: "two" });
+        });
+        yield Promise.resolve();
+      });
+
+      doAsync();
+      flush();
+      const snap = snapshot(state);
+      expect(snap.user).toEqual({ name: "Jake" });
+      expect("tmp" in snap.user).toBe(false);
+      expect(snap.todos).toEqual([
+        { id: 1, text: "one" },
+        { id: 2, text: "two" }
+      ]);
+
+      await Promise.resolve();
+      expect(snapshot(state)).toEqual({
+        user: { name: "John", tmp: 1 },
+        todos: [{ id: 1, text: "one" }]
+      });
+    });
+
+    it("deep() in a render effect re-runs on the optimistic write and again on revert", async () => {
+      const [state, setState] = createOptimisticStore({ count: 0 });
+      const values: number[] = [];
+
+      createRoot(() => {
+        createRenderEffect(
+          () => deep(state),
+          v => {
+            values.push(v.count);
+          }
+        );
+      });
+      flush();
+      expect(values).toEqual([0]);
+
+      const doAsync = action(function* () {
+        setState(s => {
+          s.count = 1;
+        });
+        yield Promise.resolve();
+      });
+
+      doAsync();
+      flush();
+      expect(values).toEqual([0, 1]);
+
+      await Promise.resolve();
+      expect(values).toEqual([0, 1, 0]);
     });
   });
 

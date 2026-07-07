@@ -181,6 +181,56 @@ We did **not** merge the PR because it also bundles a `map.ts` `_offset = 0` cha
 
 ---
 
+## #2850 — `snapshot()` / `deep()` ignore optimistic writes on `createOptimisticStore`
+
+- **Reporter:** brenelz
+- **State:** ENGINEERING DONE (July 7) — fix implemented (changeset `fix-snapshot-optimistic-overlay.md`), awaiting commit + response post.
+
+### Decision
+
+**Ruled (Ryan, July 7): include the overlay.** snapshot is primarily a reactive read feeding the front half of effects (which generally run post-settle anyway) — "sort of a deep untrack," and untrack strips tracking, not value selection. Supporting arguments that make it airtight:
+
+1. **A17 uniformity** — while an override is active every reader sees it, and *no* read form strips an override (`untrack` doesn't; even `latest` doesn't — A20 classifies overrides as confirmation-uncertainty). A committed-value-peeking snapshot would be the only mask-bypassing read in the system.
+2. **Regular-store precedent** — snapshot already reads the pending-write overlay synchronously (documented in `utilities.test.ts` as by-design). The optimistic overlay is the same concept under a different key; excluding it was the inconsistency.
+3. **Serialization wants it too** — serializing inside an action (POST body from draft state) needs the draft, not stale committed data.
+4. **Bounded divergence** — post-settle the overlay is gone and both answers agree; the window where this matters (transition) is exactly where lane render effects and action bodies read, and both want the optimistic view.
+
+No snapshot/deep split (same impl, same answer). Implementation: `mergedOverlay(target)` in `snapshotImpl` — optimistic over regular, the same order as every proxy trap and `reconcile`; merge allocates only in the rare both-layers case. Also landed the `snapshotImpl` specialized no-overlay walk deferred from PR #2756 (this ruling unblocked it). 4 regression tests (direct write, transition+revert, nested/array/delete, `deep()` re-run cycle) — all fail without the fix.
+
+Note: `unwrapStoreValue` (set-trap value extraction) still consults only `STORE_OVERRIDE` — deliberately untouched: writing another store's optimistic *guesses* into a target store's base data is a different semantic question than reading, and the guess would outlive its revert. Flag if it comes up.
+
+### Drafted response (NOT posted)
+
+> Good catch, and the framing in the root-cause section is exactly right — `snapshotImpl` was the one consumer of the three-layer store model that never learned about the optimistic overlay. Fixed on `next`: `snapshot()` and `deep()` now resolve values optimistic-overlay-first, the same order as the proxy traps and `reconcile`. The guiding rule is that an active optimistic write is *the* value for every reader — nothing in the read API peeks behind it — and snapshot on regular stores already read the pending-write overlay synchronously, so this brings optimistic stores in line with the documented behavior. Ships in the next beta.
+
+---
+
+## PR #2756 — perf: optimize signals hot paths
+
+- **Author:** brenelz
+- **State:** ENGINEERING DONE (July 7) — safe subset landed as `b7c03a7b`, re-implemented on the current tree (the June 12 diff predates `_pendingObserver` on links and two `setSignal` rewrites, so it no longer applied). The deferred `snapshotImpl` walk landed with the #2850 fix. Response drafted below, NOT posted; close the PR with credit when posted.
+
+### Decision
+
+Four optimizations reviewed individually:
+
+1. **Gen-stamp dep revalidation — TAKEN.** His flamegraph diagnosis was right: `isValidLink` scans the dep list from the head on every non-consecutive re-read of a dep within one recompute pass — O(n²), 51% of the deep-reconcile bench. Links now carry `_gen` stamped from the subscriber's `_depGen` pass counter (bumped at recompute start alongside the `_depsTail = null` reset, so prefix membership ⇔ stamped-this-pass). `isValidLink` deleted. Verified on the current tree: deep-tree reconcile all-paths ~18.9ms → ~2.6ms (**7.3x**), single `deep()` effect ~9.7ms → ~1.8ms (**5.3x**), creation paths within noise.
+2. **Reconcile/store allocation trims — TAKEN.** `getAllKeys` same-keys fast path, `unwrap` primitive early-return, `getKeys` untrack-closure skip for plain sources, cached bound effect runner (safe: `enqueue` has no identity dedupe and tracked effects already reuse one `_run`).
+3. **`notifyEpoch` skip-walk — DECLINED.** Global cache-invalidation scheme whose correctness requires enumerating every notification-consumption path; a missed path is silently stale UI. It was already accreting escape hatches in June (optimistic always walks, `_snapshotValue` bypass) and the machinery it must not break (lanes, holds, gated subs, transition stash) has been rebuilt since. Its headline 24x is on `update1to1000` — same-signal-written-1000-times, not a real workload. If that bench ever matters, re-derive the invalidation set against the current scheduler as its own designed change.
+4. **`snapshotImpl` specialized walk — DEFERRED.** Touches the function whose overlay semantics are pending the #2850 ruling; no point optimizing what may be rewritten.
+
+Size cost of the taken subset: +140B min / +63B gz (new link/node fields minus the deleted scan) — accepted for the asymptotic win on store-heavy workloads.
+
+### Drafted response (NOT posted)
+
+> Great find on `isValidLink` — the head-scan on non-consecutive dep re-reads was exactly the right diagnosis, and it's the dominant cost in store-heavy recomputes (your 51% flamegraph number reproduced on our end). We've landed the gen-stamp revalidation plus the reconcile/store allocation trims (`getAllKeys` fast path, `unwrap` primitive early-return, `getKeys` untrack skip, cached bound runner) on `next`, re-implemented against the current tree since the branch predates a couple of `link()`/`setSignal` rewrites — with your numbers verified: ~7x on deep-tree reconcile with all paths subscribed, ~5x on a `deep()` effect.
+>
+> The one piece we deliberately didn't take is the `notifyEpoch` skip-walk. It's a global invalidation scheme where correctness depends on catching every path that consumes a queued notification, and a missed one means silently stale UI — and the scheduler internals it has to track (optimistic lanes, transition holds, gated subscribers) have been substantially rebuilt since June. The bench it targets (writing one signal 1000× in a batch) is also not a shape real apps hit. If that path ever shows up in real workloads we'd want to re-derive the invalidation set against the current scheduler as its own change. The `snapshotImpl` specialized walk landed alongside the #2850 fix (it was waiting on that ruling, since it touches the same function).
+>
+> Closing since the taken parts are in — thanks, this was a genuinely valuable profile-driven find.
+
+---
+
 ## #2801 — "Many hydration bugs" (six-bug report)
 
 - **Reporter:** dangkyokhoang

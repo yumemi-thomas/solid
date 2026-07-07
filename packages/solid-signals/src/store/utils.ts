@@ -9,6 +9,7 @@ import {
   getPropertyDescriptor,
   isWrappable,
   ownEnumerableKeys,
+  STORE_OPTIMISTIC_OVERRIDE,
   STORE_OVERRIDE,
   STORE_LOOKUP,
   STORE_VALUE,
@@ -18,6 +19,18 @@ import {
   type Store,
   type StoreNode
 } from "./store.js";
+
+/**
+ * The write overlay a snapshot must read through: optimistic writes shadow
+ * regular pending writes, the same resolution order as every proxy trap and
+ * `reconcile` (#2850). Merging allocates only in the rare both-present case
+ * (a derived optimistic store with an in-flight projection commit).
+ */
+function mergedOverlay(target: StoreNode): Record<PropertyKey, any> | undefined {
+  const override = target[STORE_OVERRIDE];
+  const opt = target[STORE_OPTIMISTIC_OVERRIDE];
+  return override && opt ? { ...override, ...opt } : (opt ?? override);
+}
 
 function snapshotImpl<T>(
   item: any,
@@ -31,7 +44,7 @@ function snapshotImpl<T>(
   if (!map) map = new Map();
   if ((target = item[$TARGET] || lookup?.get(item)?.[$TARGET])) {
     if (track) trackSelf(target, $TRACK);
-    override = target[STORE_OVERRIDE];
+    override = mergedOverlay(target);
     isArray = Array.isArray(target[STORE_VALUE]);
     map.set(
       item,
@@ -56,13 +69,32 @@ function snapshotImpl<T>(
         result[i] = unwrapped;
       }
     }
+  } else if (!override) {
+    // Specialized walk for the common no-overlay case (from #2756): the own
+    // descriptor gives the value directly, so each property is read once with
+    // no overlay membership checks.
+    const keys = getKeys(item, undefined);
+    for (let i = 0, l = keys.length; i < l; i++) {
+      const prop = keys[i];
+      const desc = Object.getOwnPropertyDescriptor(item, prop)!;
+      if (desc.get) continue;
+      v = desc.value;
+      if (track && isWrappable(v)) wrap(v, target);
+      if ((unwrapped = snapshotImpl(v, track, map, lookup)) !== v || result) {
+        if (!result) {
+          result = Object.create(Object.getPrototypeOf(item)) as Record<PropertyKey, any>;
+          Object.assign(result, item);
+        }
+        result[prop] = unwrapped;
+      }
+    }
   } else {
     const keys = getKeys(item, override);
     for (let i = 0, l = keys.length; i < l; i++) {
       let prop = keys[i];
       const desc = getPropertyDescriptor(item, override, prop)!;
       if (desc.get) continue;
-      v = override && prop in override ? override[prop] : item[prop];
+      v = prop in override ? override[prop] : item[prop];
       if (track && isWrappable(v)) wrap(v, target);
       if ((unwrapped = snapshotImpl(v, track, map, lookup)) !== item[prop] || result) {
         if (!result) {
