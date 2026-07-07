@@ -1,5 +1,14 @@
 import { expect, it } from "vitest";
-import { createMemo, createRenderEffect, createRoot, createSignal, flush } from "../src/index.js";
+import {
+  createEffect,
+  createMemo,
+  createRenderEffect,
+  createRoot,
+  createSignal,
+  flush,
+  isPending,
+  latest
+} from "../src/index.js";
 import { REACTIVE_IN_HEAP, REACTIVE_IN_HEAP_HEIGHT } from "../src/core/constants.js";
 import { dirtyQueue, zombieQueue } from "../src/core/scheduler.js";
 import type { Computed } from "../src/core/types.js";
@@ -117,6 +126,57 @@ it("disposing a subtree with a stale height-adjust entry does not corrupt the di
   setRows([1, 2, 3]);
   flush();
   expect(view()).toBe("inner ready");
+
+  dispose();
+  flush();
+});
+
+/**
+ * A user effect watching `isPending(() => latest(asyncMemo))` — with no render
+ * effect subscribed to the memo anywhere (the masking condition) — spun the
+ * scheduler forever on the first post-settle refetch: the transition revert
+ * re-armed the companion's `true` override on every pass. Fixed structurally
+ * by the write-driven companion redesign (#2838); this pins the exact repro.
+ *
+ * @see https://github.com/solidjs/solid/issues/2843
+ */
+it("isPending(() => latest(x)) in a user effect does not loop on refetch (#2843)", async () => {
+  const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+  const [version, setVersion] = createSignal(0);
+  const states: boolean[] = [];
+  let dispose!: () => void;
+
+  createRoot(d => {
+    dispose = d;
+    const data = createMemo(async () => {
+      const v = version();
+      await delay(20);
+      return `payload v${v}`;
+    });
+    // `data` deliberately not read by any render effect
+    createEffect(
+      () => isPending(() => latest(data)),
+      pending => {
+        states.push(pending);
+      }
+    );
+  });
+
+  flush();
+  await delay(40);
+  flush();
+  expect(states.at(-1)).toBe(false); // settled -> idle
+
+  // the post-settle write that triggered the unbounded spin
+  setVersion(v => v + 1);
+  flush(); // threw "Potential Infinite Loop Detected." when broken
+  await delay(5);
+  flush();
+  expect(states.at(-1)).toBe(true); // revalidating
+
+  await delay(40);
+  flush();
+  expect(states.at(-1)).toBe(false); // back to idle
 
   dispose();
   flush();
