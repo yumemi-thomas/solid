@@ -346,6 +346,20 @@ function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
     // remove fallback
     if (this._len === 0 && this._nodes[0]) this._nodes[0].dispose();
 
+    // Disjoint windows have no rows to retain; replace them wholesale.
+    if (from >= prevTo || to <= this._offset) {
+      for (let i = 0; i < this._len; i++) this._nodes[i].dispose();
+      this._nodes = new Array(newLen);
+      this._mappings = new Array(newLen);
+      for (let i = 0; i < newLen; i++)
+        this._mappings[i] = runWithOwner<MappedItem>((this._nodes[i] = createOwner()), () =>
+          this._map(from + i)
+        );
+      this._offset = from;
+      this._len = newLen;
+      return;
+    }
+
     // clear the end
     for (let i = to; i < prevTo; i++) this._nodes[i - this._offset].dispose();
 
