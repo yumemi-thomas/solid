@@ -581,7 +581,11 @@ describe("reconcile with symbol-keyed properties", () => {
   });
 
   test("string and symbol keys on the same store both update", () => {
-    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1, label: "old", [META]: "old" });
+    const [state, setState] = createStore<Record<PropertyKey, any>>({
+      id: 1,
+      label: "old",
+      [META]: "old"
+    });
     let sawLabel: any, sawMeta: any;
     createRoot(() => {
       createEffect(
@@ -666,7 +670,10 @@ describe("reconcile with symbol-keyed properties", () => {
   });
 
   test("nested symbol-keyed value reconciles", () => {
-    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1, inner: { [META]: "old" } });
+    const [state, setState] = createStore<Record<PropertyKey, any>>({
+      id: 1,
+      inner: { [META]: "old" }
+    });
     let seen: any;
     createRoot(() => {
       createEffect(
