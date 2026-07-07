@@ -29,37 +29,21 @@ optimistic lanes.
 | A10 | `[isPending(x), x()]` read in one scope is atomic: a reader that observed the fresh value must not see `pending === true` for it. | #2831 finding 2 | `tests/latest-isPending-consistency.test.ts` |
 | A11 | Sync derivations of transition-held sources are visible through `latest()`/`isPending()` (held sync recompute is a write path like any other). | #2831 finding 3 | `tests/latest-isPending-consistency.test.ts` |
 | A12 | A resting optimistic node reports pending only via the async-in-flight check, exactly like a plain async memo (a reverting optimistic write is not a refetch). | #2799, #2806 | `tests/createOptimistic.test.ts` (#2806 cases) |
+| A13 | (was B1) A resting optimistic node (no active override) is observationally identical to a plain async memo for `read`/`latest`/`isPending` at every checkpoint of a refetch cycle — both before any override was written and after a full override cycle reverted. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
+| A14 | (was B2) `isPending`/`latest` companion nodes get child lanes that do not merge with the owner's lane: an `isPending` effect (spinner) fires while the owner's async is still in flight. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
+| A15 | (was B3) Transition entanglement is graph-driven: writes whose async work is observed by a shared reader settle as one unit (no tearing — nothing commits until all entangled async resolves); writes on fully disjoint graphs keep independent transitions and settle independently. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
+| A16 | (was B5) `isPending` never throws in untracked contexts — thunks that throw real errors or read uninitialized async sources yield `false`. Carve-out (B5a, pinned as current behavior): in *tracked* contexts the `NotReadyError` of an uninitialized source propagates so the reader participates in loading boundaries. | maintainer keep, 2026-07-06 | `tests/spec-async-semantics.test.ts` |
 
 ## Tier B (inferred — needs verdict)
 
 Mark each **keep** or **change**; on *keep* it gets a spec test and moves to
 Tier A.
 
-- [ ] **B1 — Resting optimistic ≡ plain node.** A resting optimistic node
-  (`_overrideValue === NOT_PENDING`, no active override) is observationally
-  identical to a plain signal/memo for *every* read path (`read`, `latest`,
-  `isPending`, boundary participation), not just the pending checks A12 covers.
-  *Inferred from #2806's "no divergence" language.*
-- [ ] **B2 — Companion lanes stay independent.** `isPending`/`latest` companion
-  nodes get child lanes that never merge with the owner's lane, so an
-  `isPending` effect can flush (show a spinner) while the owner's async is
-  still in flight. Merging happens only when the override clears while the
-  owner still has pending async. *Inferred from the `assignOrMergeLane`
-  parent/child carve-out and `updatePendingSignal`'s late merge.*
-- [ ] **B3 — Merged transitions are one unit.** Once two transitions merge,
-  every observer sees a single settle point: no effect that depends on
-  transition A's writes runs before transition B's async completes. *Inferred
-  from `mergeTransitionState` + single `activeTransition` design.*
 - [ ] **B4 — Override wins over async correction after user write.** If the
   user writes an optimistic override *after* its lane was created, a later
   async resolution must not clobber the override (`_overrideSinceLane`).
   The fresh value becomes the revert target instead. *Inferred from the
-  `_overrideSinceLane` machinery.*
-- [ ] **B5 — `isPending` never throws.** `isPending(fn)` returns a boolean for
-  any `fn`, including thunks that throw real errors or `NotReadyError`s from
-  uninitialized sources (it may *rethrow NotReady in tracked contexts* to keep
-  boundary participation — that specific carve-out is B5a and needs its own
-  verdict). *Inferred from the catch-all in `isPending`.*
+  `_overrideSinceLane` machinery.* — **VERDICT: undecided (2026-07-06), revisit.**
 
 ## Tier C (open — needs decision)
 

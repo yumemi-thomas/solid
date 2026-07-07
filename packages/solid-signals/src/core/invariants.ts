@@ -22,6 +22,11 @@ import type { Computed, Signal } from "./types.js";
 
 type AnyNode = Signal<any> | Computed<any>;
 
+// Plain signals carry no _flags; `undefined & N` is 0 (not disposed).
+function isDisposed(node: AnyNode): boolean {
+  return !!((node as Computed<any>)._flags & REACTIVE_DISPOSED);
+}
+
 /** Wired by core.ts at module init to avoid import cycles. */
 export const InvariantHooks: {
   pendingProbeActive: (() => boolean) | null;
@@ -113,7 +118,7 @@ export function devCheckMergedLaneEmpty(lane: OptimisticLane): void {
  */
 export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean): void {
   for (const node of heldPendingNodes) {
-    if (node._flags & REACTIVE_DISPOSED || node._pendingValue === NOT_PENDING) {
+    if (isDisposed(node) || node._pendingValue === NOT_PENDING) {
       heldPendingNodes.delete(node);
       continue;
     }
@@ -126,7 +131,7 @@ export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean)
   }
 
   for (const node of optimisticNodes) {
-    if (node._flags & REACTIVE_DISPOSED) {
+    if (isDisposed(node)) {
       optimisticNodes.delete(node);
       continue;
     }
@@ -138,7 +143,7 @@ export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean)
   }
 
   for (const node of companionOwners) {
-    if (node._flags & REACTIVE_DISPOSED) {
+    if (isDisposed(node)) {
       companionOwners.delete(node);
       continue;
     }
