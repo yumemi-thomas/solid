@@ -1,6 +1,6 @@
 # Issue Triage Log
 
-Tracks issues/PRs we've made decisions on, with the responses we posted (or drafted). Entries marked CLOSED/DONE have had their responses posted publicly; only #2801 remains open.
+Tracks issues/PRs we've made decisions on, with the responses we posted (or drafted). Entries marked CLOSED/DONE have had their responses posted publicly.
 
 > Working notes. Not part of the published package.
 
@@ -181,10 +181,24 @@ We did **not** merge the PR because it also bundles a `map.ts` `_offset = 0` cha
 
 ---
 
+## Closed July 7 (responses posted)
+
+- **#2850** — snapshot/deep optimistic overlay. Fixed `461b2423`. CLOSED with response (entry below).
+- **PR #2756** — signals hot-path perf. Safe subset landed. CLOSED with credit (entry below).
+- **#2801** — six-bug hydration report. All dispositioned; dom-expressions `0.50.0-next.16` published, dep bumped (`f6a35404`), link overrides dropped. CLOSED with per-bug summary.
+- **#2737** — spread + innerHTML after hydration. Verified never affected 2.0; pinned by `spread-innerhtml.spec.tsx` (`bad66625`). CLOSED (2.0 covered; 1.x critical-fixes-only).
+- **#2830 / #2832 / #2833** — fixes already on `next` with responses posted July 6; closed now that the `.16` runtime is published and depended on.
+- **#2828** — style differ (explicit-`undefined` removal, user-object mutation, shared-effect self-destruct). Fixed by dom-expressions#534 (`node._$styles` applied-record diff), shipped in `.16`. CLOSED with response crediting yumemi-thomas.
+- **#2843** — isPending/latest scheduler loop. Fixed structurally by the #2838 companion redesign; exact repro re-verified on current tree and pinned in `scheduler-livelock.test.ts` (`c24f5a53`). CLOSED with response.
+- **PR #2845** (yumemi-thomas) — `_deferRevert` approach to #2843. CLOSED with credit: 6 of 7 of its tests pass under the redesign without deferral machinery; the approach also violates the async-registration invariant. **Its 7th test flagged a real remaining edge: a source disposed mid-flight leaves its companion latched `true` — tracked, fix in-model (companion reverts on owner disposal).**
+- **#2838** — write-driven shadow (our tracking issue). Both stages landed (`7de51bea`, `b51bbcc2`). CLOSED with status summary. Noted remaining cleanup: the `_parentSource !== el` read-ternary exemption and the `NotReadyError` catch in `read()`'s latest branch survive; suite passes without the former (probe, reverted) — queued for the next code-reduction pass with proper analysis.
+
+---
+
 ## #2850 — `snapshot()` / `deep()` ignore optimistic writes on `createOptimisticStore`
 
 - **Reporter:** brenelz
-- **State:** ENGINEERING DONE (July 7) — fix implemented (changeset `fix-snapshot-optimistic-overlay.md`), awaiting commit + response post.
+- **State:** CLOSED July 7 — fix landed (`461b2423`, changeset `fix-snapshot-optimistic-overlay.md`), response posted, issue closed.
 
 ### Decision
 
@@ -208,7 +222,7 @@ Note: `unwrapStoreValue` (set-trap value extraction) still consults only `STORE_
 ## PR #2756 — perf: optimize signals hot paths
 
 - **Author:** brenelz
-- **State:** ENGINEERING DONE (July 7) — safe subset landed as `b7c03a7b`, re-implemented on the current tree (the June 12 diff predates `_pendingObserver` on links and two `setSignal` rewrites, so it no longer applied). The deferred `snapshotImpl` walk landed with the #2850 fix. Response drafted below, NOT posted; close the PR with credit when posted.
+- **State:** CLOSED July 7 — safe subset landed as `b7c03a7b`, re-implemented on the current tree (the June 12 diff predates `_pendingObserver` on links and two `setSignal` rewrites, so it no longer applied). The deferred `snapshotImpl` walk landed with the #2850 fix (`461b2423`). Response posted with credit, PR closed.
 
 ### Decision
 
@@ -234,7 +248,7 @@ Size cost of the taken subset: +140B min / +63B gz (new link/node fields minus t
 ## #2801 — "Many hydration bugs" (six-bug report)
 
 - **Reporter:** dangkyokhoang
-- **State:** ENGINEERING COMPLETE (July 3) — all real bugs fixed. Bug 2 landed as the **hole id scopes** design (dom-expressions: compiler `scope()` wrap keyed off the shared `dynamic` flag + runtime owner scopes; orderedInsert removed; ssr grouping restored). Bug 1's remaining pending-stream case fixed in dom-expressions runtime (`a92ddb53`): when a `$df` swap disconnects a hole's tracked nodes mid-hydration, `insert` re-claims the live region (parent children, or back to the matching `<!--$-->` for marker-bounded holes) so loose text re-claims positionally; `insert-refresh-drift.spec.tsx` `test.fails` flipped, `bounded-streamed-text` harness scenario added. Rust jsx-compiler ported (`1dbc91b6`): shared allocate/dynamic predicates, `scope()` emission in both generates, orderedInsert machinery dropped, fixtures re-blessed (note: local platform `.node` binaries from Jul 2 were stale and masking results — deleted; `jsx-compiler.node` debug build is authoritative locally). Streaming rendering example verified end-to-end (12/12 Playwright checks). Remaining: publish dom-expressions `next`, bump solid dep, drop the workspace link override, close the issue.
+- **State:** ENGINEERING COMPLETE (July 3) — all real bugs fixed. Bug 2 landed as the **hole id scopes** design (dom-expressions: compiler `scope()` wrap keyed off the shared `dynamic` flag + runtime owner scopes; orderedInsert removed; ssr grouping restored). Bug 1's remaining pending-stream case fixed in dom-expressions runtime (`a92ddb53`): when a `$df` swap disconnects a hole's tracked nodes mid-hydration, `insert` re-claims the live region (parent children, or back to the matching `<!--$-->` for marker-bounded holes) so loose text re-claims positionally; `insert-refresh-drift.spec.tsx` `test.fails` flipped, `bounded-streamed-text` harness scenario added. Rust jsx-compiler ported (`1dbc91b6`): shared allocate/dynamic predicates, `scope()` emission in both generates, orderedInsert machinery dropped, fixtures re-blessed (note: local platform `.node` binaries from Jul 2 were stale and masking results — deleted; `jsx-compiler.node` debug build is authoritative locally). Streaming rendering example verified end-to-end (12/12 Playwright checks). Release steps done: dom-expressions `0.50.0-next.16` published, solid dep bumped, workspace link override dropped (`f6a35404`). CLOSED July 7 with per-bug summary.
 
 ### Per-bug disposition
 
