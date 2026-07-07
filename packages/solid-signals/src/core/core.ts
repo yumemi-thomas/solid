@@ -1206,7 +1206,9 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
     return true;
   // Downstream: async in flight with previous value (not initial load)
   // STATUS_UNINITIALIZED is cleared on first successful completion
-  const pending = !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+  const pending = !!(
+    comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)
+  );
   if (
     __DEV__ &&
     !pending &&
