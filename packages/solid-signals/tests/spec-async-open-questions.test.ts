@@ -103,81 +103,15 @@ async function enterBlockedWindow(kind: "plain" | "optimistic", prime: boolean) 
   };
 }
 
-describe("B4 (undecided): user override vs async correction", () => {
-  // Current behavior in the simple (unentangled) graph: the override is
-  // visible from the write until its transition completes; async resolution
-  // does not clobber it; at completion the node reverts to the FRESH async
-  // value (20), not the pre-write value (10).
-  it("override visible until completion, then reverts to the fresh async value", async () => {
-    const [id, setId] = createSignal(1);
-    const fetcher = deferredFetcher((t: number) => t * 10);
-    const valueLog: number[] = [];
+// B4 was ruled 2026-07-07 ("overrides clear when their async source resolves")
+// and promoted to A18 in spec-async-semantics.test.ts: an override's lifetime
+// is bound to its own async source, not its transition — unrelated async in a
+// merged transition must not delay the correction (or the async it triggers).
 
-    let data!: SourceAccessor<number>;
-    let setData!: (v: number) => void;
-    createRoot(() => {
-      [data, setData] = createOptimistic(() => fetcher.fetch(id()));
-      createRenderEffect(data, v => {
-        valueLog.push(v);
-      });
-    });
-    flush();
-    fetcher.resolveAll();
-    await settle();
-    expect(valueLog).toEqual([10]);
-    valueLog.length = 0;
-
-    // Refetch + user override written while the fetch is in flight.
-    setId(2);
-    setData(99);
-    flush();
-    expect(data()).toBe(99); // ambient read sees the override (simple graph)
-    expect(valueLog).toEqual([99]);
-
-    fetcher.resolveAll();
-    await settle();
-    // Transition completed: reverts to the fresh async value.
-    expect(data()).toBe(20);
-    expect(valueLog).toEqual([99, 20]);
-  });
-});
-
-describe("C1 (open): isPending after the transition completed but async still in flight", () => {
-  // Pure-signals graph (no render effects): the transition completes
-  // immediately on flush, while the refetch is still in flight and latest()
-  // still shows the stale value. Current behavior: an existing isPending
-  // companion keeps its lane-scoped verdict — FALSE — even though data is
-  // being refetched. (A fresh computePendingState would say true; whether
-  // that should win is the C1 decision.)
-  it("pure-signals graph: isPending stays false during the post-transition refetch window", async () => {
-    const [tick, setTick] = createSignal(1);
-    const fetcher = deferredFetcher((t: number) => t * 10);
-
-    let data!: SourceAccessor<number>;
-    createRoot(() => {
-      data = createMemo(() => fetcher.fetch(tick()));
-    });
-
-    // Companion exists before the write (C1 is about an existing companion).
-    expect(isPending(data)).toBe(false); // uninitialized — not pending (A16)
-    fetcher.resolveAll();
-    await settle();
-    expect(latest(data)).toBe(10);
-    expect(isPending(data)).toBe(false);
-
-    setTick(2);
-    flush();
-    // The stale value is still what latest() shows...
-    expect(latest(data)).toBe(10);
-    // ...but isPending reports false: no transition holds a view anymore.
-    expect(isPending(data)).toBe(false);
-
-    fetcher.resolveAll();
-    await settle();
-    expect(latest(data)).toBe(20);
-    expect(isPending(data)).toBe(false);
-  });
-});
+// C1 was ruled 2026-07-07 and promoted to A19: isPending is data-centric —
+// "isPending is about data and not boundaries" — reversing the earlier
+// boundary-semantics decision. The ruled behavior is pinned below as V3
+// (expected failure until the #2838 shadow/companion redesign lands).
 
 // C4 was ruled 2026-07-06 ("override should always be read if present") and
 // promoted to A17 in spec-async-semantics.test.ts, together with the fix:
@@ -211,6 +145,46 @@ describe("known violations in the blocked-merged window (expected failures)", ()
       expect(w.data()).toBe(10);
       expect(isPending(w.data)).toBe(true); // currently false
       await w.finish();
+    }
+  );
+
+  // V3 — VIOLATION of A19 (ruled 2026-07-07): isPending is data-centric —
+  // cause (ii) of non-finality (own async in flight) must survive the
+  // transition's death. In pure-signals graphs (no render-effect reporters)
+  // the transition completes on the first flush while the refetch is still in
+  // flight and latest() still shows the stale value; an existing companion
+  // keeps its transition-scoped verdict FALSE through the window. The
+  // observable value is not final, so A19 says TRUE. Root cause: the
+  // companion caches a boundary/transition-scoped verdict instead of deriving
+  // from the data's own state — same design family as V1/V2 (#2838 redesign).
+  it.fails(
+    "A19/V3 violation: isPending must stay true during the post-transition refetch window (currently false)",
+    async () => {
+      const [tick, setTick] = createSignal(1);
+      const fetcher = deferredFetcher((t: number) => t * 10);
+
+      let data!: SourceAccessor<number>;
+      createRoot(() => {
+        data = createMemo(() => fetcher.fetch(tick()));
+      });
+
+      isPending(data); // companion exists before the write
+      fetcher.resolveAll();
+      await settle();
+      expect(latest(data)).toBe(10);
+      expect(isPending(data)).toBe(false);
+
+      setTick(2);
+      flush();
+      // Transition already completed (no reporters), refetch in flight, the
+      // observable value is the stale 10 — not final, so pending must be true.
+      expect(latest(data)).toBe(10);
+      expect(isPending(data)).toBe(true); // currently false
+
+      fetcher.resolveAll();
+      await settle();
+      expect(latest(data)).toBe(20);
+      expect(isPending(data)).toBe(false);
     }
   );
 

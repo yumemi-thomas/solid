@@ -154,12 +154,9 @@ two findings — one real defect, one wrong assumption of mine:
 
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
-- `[open — from INV-4 narrowing]` When async is in flight on a node whose
-  transition already completed (pure-signals graphs; no render-effect
-  reporters), should `isPending` report `true` (data is refetching) or `false`
-  (no transition holds a stale view)? Current behavior: the companion keeps its
-  last lane-scoped verdict (`false` after revert) while a *fresh*
-  `computePendingState` would say `true`.
+- `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose
+  transition already completed: `isPending` must report `true` — the
+  observable value is not final. See decision log and SPEC A19.
 
 - `[assumed]` A resting optimistic node (`_overrideValue === NOT_PENDING`) is
   semantically identical to a plain node for every read/pending computation
@@ -171,17 +168,39 @@ two findings — one real defect, one wrong assumption of mine:
 - `[open]` When two transitions merge, should `isPending` observers of a source
   in transition A report pending for async that only transition B is waiting
   on? (Current behavior: yes, merged transitions are one unit.)
-- `[open]` `resolveOptimisticNodes` fires `insertSubs(node, true)` (optimistic
-  propagation) when the reverted value differs — but with lane already cleared,
-  `insertSubs` takes the "reversion" branch and clears subscriber lanes. Is a
-  subscriber that belongs to a *different, still-live* lane allowed to lose its
-  lane here?
-- `[open]` `transitionComplete` deletes reporters as it prunes — if a reporter
-  re-blocks later (new read of the same source), it re-registers via notify.
-  Confirmed path? (Only if a render effect re-notifies; a pure memo re-read
-  does not.)
+- `[RULED 2026-07-07 → C2]` A revert may only clear lane assignments that
+  resolve to the reverting node's own lane — reverts do not trump other live
+  lanes. `insertSubs`'s blanket reversion clear is wrong in principle
+  (unobservable today); fix + assertion queued for the #2838 redesign.
+- `[RULED 2026-07-07 → C3, closed by A19]` Early transition completion after
+  reporter pruning is by design — transitions coordinate rendered commits
+  only. Verdict correctness in the leftover window is A19's job (V3).
 
 ## 7. Decision log
+
+- 2026-07-07: C2 ruled — reverts do not trump other live lanes; a revert
+  releases only members of the reverting node's own lane. Fix + INV-8-style
+  assertion ("live lane members are only released by their own lane's
+  resolution") queued for the #2838 redesign.
+- 2026-07-07: C3 closed by A19 — early transition completion in reporter-less
+  graphs is legal; verdicts must not depend on it (V3 pins the symptom).
+- 2026-07-07: C1 → A19 — `isPending(x)` ≡ "the observable value of x is not
+  final". Three causes with independent lifetimes: (i) transition-held write
+  (ends at commit), (ii) own async in flight (ends at resolution), (iii)
+  fresh value held uncommitted by an entangled transition (ends at commit).
+  Uninitialized async is loading, not pending; its initial NotReady plays to
+  boundaries for SSR/hydration (A16). Partially reverses the earlier
+  boundary-scoped framing, which was cause (i) wrongly generalized to
+  (ii)/(iii). Verdicts must not depend on reporters/graph topology. Causes
+  (ii)/(iii) land with the #2838 redesign — pinned as V3/V1 expected
+  failures until then.
+- 2026-07-07: B4 → A18 — an override's lifetime is bound to its own async
+  source, not its transition. Own-source resolution clears/corrects the
+  override immediately (fresh value, never the pre-write value); unrelated
+  async in a merged transition must not delay the correction or the async it
+  triggers. Together with A17: the override holds while its own fetch is in
+  flight (transition can't complete and drop it), and yields the moment the
+  authoritative value arrives.
 
 - 2026-07-06: C4 → A17 — an active optimistic override is THE value for every
   reader (ambient and tracked), regardless of entanglement, until its owning

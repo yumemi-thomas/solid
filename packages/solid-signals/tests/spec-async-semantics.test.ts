@@ -452,3 +452,205 @@ describe("A17 (was C4): an active override is THE value — every reader, until 
     expect(data()).toBe(20);
   });
 });
+
+describe("A18 (was B4): an override's lifetime is bound to its own async source, not its transition", () => {
+  // Maintainer ruling (2026-07-07): "overrides clear when their async source
+  // resolves.. otherwise unrelated parts of a transition can get held up
+  // waiting for other async to resolve, especially if the optimistic value
+  // needs correction and triggers further async." The authoritative value
+  // wins the moment it arrives; the correction cascade (and any async it
+  // triggers) must not wait for strangers in a merged transition.
+  it("entangled: own-source resolution clears the override while an unrelated fetch is still pending", async () => {
+    const [id, setId] = createSignal(1);
+    const [other, setOther] = createSignal(1);
+    const dataFetch = deferredFetcher((t: number) => t * 10);
+    const otherFetch = deferredFetcher((t: number) => t * 100);
+    const log: string[] = [];
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => dataFetch.fetch(id()));
+      const mOther = createMemo(() => otherFetch.fetch(other()));
+      const joined = createMemo(() => `${data()}|${mOther()}`);
+      createRenderEffect(joined, v => {
+        log.push(v);
+      });
+    });
+    flush();
+    dataFetch.resolveAll();
+    otherFetch.resolveAll();
+    await settle();
+    log.length = 0;
+
+    // Entangled refetches + user override.
+    setId(2);
+    setOther(2);
+    setData(99);
+    flush();
+    expect(data()).toBe(99); // override active while own fetch is in flight (A17)
+
+    // Own source resolves: the fresh value wins NOW — the override must not be
+    // held hostage by the still-pending unrelated fetch in the merged transition.
+    dataFetch.resolveAll();
+    await settle();
+    expect(data()).toBe(20);
+
+    otherFetch.resolveAll();
+    await settle();
+    expect(data()).toBe(20);
+    expect(log[log.length - 1]).toBe("20|200");
+  });
+
+  // In the simple (unentangled) graph, own-source resolution and transition
+  // completion coincide — the override is visible from the write until the
+  // refetch lands, then corrects to the fresh value (never the pre-write one).
+  it("simple graph: override visible until its own refetch lands, then corrects to the fresh value", async () => {
+    const [id, setId] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+    const valueLog: number[] = [];
+
+    let data!: SourceAccessor<number>;
+    let setData!: (v: number) => void;
+    createRoot(() => {
+      [data, setData] = createOptimistic(() => fetcher.fetch(id()));
+      createRenderEffect(data, v => {
+        valueLog.push(v);
+      });
+    });
+    flush();
+    fetcher.resolveAll();
+    await settle();
+    expect(valueLog).toEqual([10]);
+    valueLog.length = 0;
+
+    // Refetch + user override written while the fetch is in flight.
+    setId(2);
+    setData(99);
+    flush();
+    expect(data()).toBe(99);
+    expect(valueLog).toEqual([99]);
+
+    fetcher.resolveAll();
+    await settle();
+    // Own async source resolved: corrected to the fresh value, not the
+    // pre-write value.
+    expect(data()).toBe(20);
+    expect(valueLog).toEqual([99, 20]);
+  });
+});
+
+describe("A19 (was C1): isPending(x) = the observable value of x is not final", () => {
+  // Ruling (2026-07-07): three causes of non-finality — (i) write held by a
+  // transition (ends at commit), (ii) own async in flight (ends at
+  // resolution), (iii) fresh value held uncommitted by an entangled
+  // transition (ends at that commit). Pending while any cause holds, final
+  // the moment none does. Uninitialized async is loading, not pending —
+  // the initial NotReady plays to boundaries (SSR/hydration), see A16.
+  // These tests pin the cause-(i) half and the boundary interplay, which the
+  // implementation already gets right. Causes (ii)/(iii) — verdicts that must
+  // survive the transition's death — are pinned as expected failures V3/V1 in
+  // spec-async-open-questions.test.ts until the #2838 redesign.
+
+  it("cause (i): a held trigger write is pending until commit, final at commit", async () => {
+    const [tick, setTick] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+
+    let data!: SourceAccessor<number>;
+    createRoot(() => {
+      data = createMemo(() => fetcher.fetch(tick()));
+      createRenderEffect(data, () => {});
+    });
+    flush();
+    fetcher.resolveAll();
+    await settle();
+    expect(isPending(tick)).toBe(false);
+
+    setTick(2);
+    flush();
+    // The write is held: the observable tick() is still 1 — not final.
+    expect(tick()).toBe(1);
+    expect(isPending(tick)).toBe(true);
+    expect(isPending(data)).toBe(true); // its refetch is in flight too
+
+    fetcher.resolveAll();
+    await settle();
+    // Commit: everything observable is final.
+    expect(tick()).toBe(2);
+    expect(isPending(tick)).toBe(false);
+    expect(isPending(data)).toBe(false);
+  });
+
+  it("initialized refetch under a nested loading boundary: content holds, verdicts stay pending until resolution", async () => {
+    const [tick, setTick] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+    let rendered: unknown;
+
+    let data!: SourceAccessor<number>;
+    createRoot(() => {
+      data = createMemo(() => fetcher.fetch(tick()));
+      const boundary = createLoadingBoundary(
+        () => `v:${data()}`,
+        () => "loading"
+      );
+      createRenderEffect(
+        () => (rendered = boundary()),
+        () => {}
+      );
+    });
+    flush();
+    fetcher.resolveAll();
+    await settle();
+    expect(rendered).toBe("v:10");
+
+    setTick(2);
+    flush();
+    // Initialized refetch: no fallback — the boundary holds the old content
+    // (fallbacks are for initial loads), and both verdicts report non-final.
+    expect(rendered).toBe("v:10");
+    expect(isPending(tick)).toBe(true);
+    expect(isPending(data)).toBe(true);
+
+    fetcher.resolveAll();
+    await settle();
+    expect(rendered).toBe("v:20");
+    expect(isPending(tick)).toBe(false);
+    expect(isPending(data)).toBe(false);
+  });
+
+  it("nav revealing an uninitialized async: trigger pending until the new view can show, data is loading (not pending)", async () => {
+    const [location, setLocation] = createSignal(1);
+    const fetcher = deferredFetcher((t: number) => t * 10);
+    let rendered: unknown;
+
+    // page2's data is only read once we navigate — uninitialized until then.
+    createRoot(() => {
+      const page2Data = createMemo(() => fetcher.fetch(location()));
+      const boundary = createLoadingBoundary(
+        () => (location() === 2 ? `page2:${page2Data()}` : "page1"),
+        () => "fallback"
+      );
+      createRenderEffect(
+        () => (rendered = boundary()),
+        () => {}
+      );
+    });
+    flush();
+    expect(rendered).toBe("page1");
+
+    setLocation(2);
+    flush();
+    // The nav can't land yet (page2's data is uninitialized): old view holds,
+    // the trigger's observable value is not final.
+    expect(rendered).toBe("page1");
+    expect(location()).toBe(1);
+    expect(isPending(location)).toBe(true);
+
+    fetcher.resolveAll();
+    await settle();
+    // The new view can show its landed value: nothing is pending anymore.
+    expect(rendered).toBe("page2:20");
+    expect(location()).toBe(2);
+    expect(isPending(location)).toBe(false);
+  });
+});
