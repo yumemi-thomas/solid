@@ -94,6 +94,58 @@ describe("createEffect error phases (#2839)", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it("handler receives the thrown error's identity, not the internal wrapper (#2840)", () => {
+    class MyError extends Error {}
+    const boom = new MyError("boom-identity");
+    const [armed, setArmed] = createSignal(false);
+    let received: unknown;
+
+    createRoot(() => {
+      createEffect(
+        () => {
+          if (armed()) throw boom;
+          return 0;
+        },
+        {
+          effect: () => {},
+          error: err => {
+            received = err;
+          }
+        }
+      );
+    });
+    flush();
+
+    setArmed(true);
+    flush();
+    // The exact object the user threw — instanceof works, no StatusError
+    // wrapper, no internal `.source`, matching createErrorBoundary's fallback.
+    expect(received).toBe(boom);
+    expect(received).toBeInstanceOf(MyError);
+    expect(received && typeof received === "object" && "source" in received).toBe(false);
+  });
+
+  it("unhandled compute-phase error is logged unwrapped (#2840)", () => {
+    class MyError extends Error {}
+    const boom = new MyError("boom-log");
+    const [armed, setArmed] = createSignal(false);
+
+    createRoot(() => {
+      createEffect(
+        () => {
+          if (armed()) throw boom;
+          return 0;
+        },
+        () => {}
+      );
+    });
+    flush();
+
+    setArmed(true);
+    flush();
+    expect(errorSpy).toHaveBeenCalledWith(boom);
+  });
+
   it("handler rethrow escalates to the nearest error boundary", () => {
     const log: string[] = [];
     const [armed, setArmed] = createSignal(false);

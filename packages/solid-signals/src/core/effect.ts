@@ -84,7 +84,11 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
   const actualStatus = status !== undefined ? status : this._statusFlags;
   const actualError = error !== undefined ? error : this._error;
   if (actualStatus & STATUS_ERROR) {
-    let err = actualError;
+    // Hand user code the error it threw, not the internal StatusError wrapper
+    // used for source tracking — mirrors createErrorBoundary's unwrap (#2840).
+    // The node keeps the wrapper: boundary notification reads `_error` itself.
+    let err =
+      actualError instanceof StatusError ? (actualError.cause ?? actualError) : actualError;
     this._queue.notify(this, STATUS_PENDING, 0);
     if (this._type === EFFECT_USER) {
       try {
