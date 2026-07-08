@@ -651,6 +651,66 @@ describe("deep", () => {
 });
 
 describe("snapshot", () => {
+  test("preserves array length when a trailing index was deleted", () => {
+    const [state, setState] = createStore<(string | undefined)[]>(["a", "b", "c"]);
+    setState(s => {
+      delete s[2];
+    });
+    flush();
+    expect(state.length).toBe(3); // proxy: plain-JS delete semantics
+
+    const copy = snapshot(state);
+    expect(copy.length).toBe(3); // the copy must agree with the store
+    expect(2 in copy).toBe(false); // and keep the hole a hole, not undefined
+    expect(JSON.stringify(copy)).toBe('["a","b",null]');
+  });
+
+  test("deep() preserves array length for trailing holes too", () => {
+    const [state, setState] = createStore<(string | undefined)[]>(["a", "b", "c"]);
+    setState(s => {
+      delete s[2];
+    });
+    flush();
+    createRoot(dispose => {
+      const copy = deep(state);
+      expect(copy.length).toBe(3);
+      expect(2 in copy).toBe(false);
+      dispose();
+    });
+  });
+
+  test("preserves length for nested arrays and multi-hole runs", () => {
+    const [state, setState] = createStore<{ list: (string | undefined)[] }>({
+      list: ["a", "b", "c", "d"]
+    });
+    setState(s => {
+      delete s.list[2];
+      delete s.list[3];
+    });
+    flush();
+    const copy = snapshot(state);
+    expect(copy.list.length).toBe(4);
+    expect(JSON.stringify(copy.list)).toBe('["a","b",null,null]');
+  });
+
+  test("middle holes and length truncation keep working (controls)", () => {
+    const [mid, setMid] = createStore<(string | undefined)[]>(["a", "b", "c"]);
+    setMid(s => {
+      delete s[1];
+    });
+    flush();
+    expect(JSON.stringify(snapshot(mid))).toBe('["a",null,"c"]');
+    expect(snapshot(mid).length).toBe(3);
+
+    const [cut, setCut] = createStore<string[]>(["a", "b", "c"]);
+    setCut(s => {
+      s.length = 2;
+    });
+    flush();
+    expect(snapshot(cut).length).toBe(2);
+    expect(JSON.stringify(snapshot(cut))).toBe('["a","b"]');
+  });
+
   test("returns same object if unchanged", () => {
     const ref = { a: 1, b: 2 };
     const [state, setState] = createStore(ref);

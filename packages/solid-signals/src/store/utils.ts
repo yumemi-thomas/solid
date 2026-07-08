@@ -69,6 +69,9 @@ function snapshotImpl<T>(
         result[i] = unwrapped;
       }
     }
+    // Deleted trailing slots are skipped above, so restore length to preserve
+    // holes instead of truncating the copy (#2846) — mirrors unwrapStoreValue.
+    if (result) result.length = len;
   } else if (!override) {
     // Specialized walk for the common no-overlay case (from #2756): the own
     // descriptor gives the value directly, so each property is read once with

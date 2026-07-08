@@ -274,7 +274,11 @@ function getNode<T>(
           // Drop the symbol-record mark once the last user symbol node is
           // gone, so reconcile's fast path stops probing a now string-only
           // record. Runs only on symbol-node cleanup (cold), never on reconcile.
-          if (typeof property === "symbol" && property !== $TRACK && symbolKeyedRecords.has(nodes)) {
+          if (
+            typeof property === "symbol" &&
+            property !== $TRACK &&
+            symbolKeyedRecords.has(nodes)
+          ) {
             const syms = Object.getOwnPropertySymbols(nodes);
             let hasUserSymbol = false;
             for (let i = 0, len = syms.length; i < len; i++) {
