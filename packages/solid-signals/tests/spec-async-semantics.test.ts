@@ -15,9 +15,11 @@ import {
   createMemo,
   createOptimistic,
   createOptimisticStore,
+  createProjection,
   createRenderEffect,
   createRoot,
   createSignal,
+  createStore,
   flush,
   isPending,
   latest,
@@ -849,6 +851,190 @@ describe("A20: the mask — an override is certainty by decree; pending follows 
     resolveFetch({ title: "t3", author: "a3" });
     await settle();
     expect(isPending(() => state.title)).toBe(false);
+  });
+});
+
+describe("A22: pending is per-node — store-wide is only the firewall's own work (A9/A21)", () => {
+  const tick = () => new Promise(r => setTimeout(r, 0));
+
+  it("a plain store written in a transition pends exactly the touched leaves", async () => {
+    const [x, setX] = createStore({ count: 0, foo: 0 });
+    let resolveDownstream!: () => void;
+
+    const dispose = createRoot(d => {
+      const downstream = createMemo(async () => {
+        const v = x.count;
+        if (v > 0) await new Promise<void>(r => (resolveDownstream = r));
+        return v;
+      });
+      createRenderEffect(
+        () => downstream(),
+        () => {}
+      );
+      createRenderEffect(
+        () => [x.count, x.foo],
+        () => {}
+      );
+      return d;
+    });
+    flush();
+    await tick();
+
+    // Write (all writes are transitions): downstream async holds the commit.
+    setX(s => {
+      s.count++;
+    });
+    flush();
+    expect(x.count).toBe(0); // held
+    expect(isPending(() => x.count)).toBe(true); // the touched leaf
+    expect(isPending(() => x.foo)).toBe(false); // untouched sibling
+    expect(isPending(() => x)).toBe(false); // proxy-level read: nothing
+
+    resolveDownstream();
+    await tick();
+    flush();
+    expect(x.count).toBe(1);
+    expect(isPending(() => x.count)).toBe(false);
+    dispose();
+  });
+
+  it("a projection write held by downstream async pends only the written leaf", async () => {
+    const [$src, setSrc] = createSignal(1);
+    let resolveDownstream!: () => void;
+    let proj!: { a: number; b: number };
+
+    const dispose = createRoot(d => {
+      proj = createProjection(
+        (s: { a: number; b: number }) => {
+          s.a = $src() * 10;
+        },
+        { a: 0, b: 0 }
+      );
+      const downstream = createMemo(async () => {
+        const v = proj.a;
+        if (v > 10) await new Promise<void>(r => (resolveDownstream = r));
+        return v;
+      });
+      createRenderEffect(
+        () => downstream(),
+        () => {}
+      );
+      createRenderEffect(
+        () => [proj.a, proj.b],
+        () => {}
+      );
+      return d;
+    });
+    flush();
+    await tick();
+
+    setSrc(2);
+    flush();
+    expect(proj.a).toBe(10); // held at the stale committed value
+    expect(isPending(() => proj.a)).toBe(true);
+    expect(isPending(() => proj.b)).toBe(false);
+
+    resolveDownstream();
+    await tick();
+    flush();
+    expect(proj.a).toBe(20);
+    expect(isPending(() => proj.a)).toBe(false);
+    dispose();
+  });
+
+  it("verdicts never inherit consumers' in-flight state: leaves settle at commit even under a downstream hold", async () => {
+    const [$id, setId] = createSignal(1);
+    let resolveFetch!: () => void;
+    let resolveDownstream!: () => void;
+    let gate = false;
+    let store!: { data: number; other: number };
+
+    const dispose = createRoot(d => {
+      [store] = createStore(
+        async (s: { data: number; other: number }) => {
+          const id = $id();
+          if (gate) await new Promise<void>(r => (resolveFetch = r));
+          s.data = id * 10;
+        },
+        { data: 0, other: 0 }
+      );
+      const downstream = createMemo(async () => {
+        const v = store.data;
+        if (v > 10) await new Promise<void>(r => (resolveDownstream = r));
+        return v;
+      });
+      createRenderEffect(
+        () => downstream(),
+        () => {}
+      );
+      createRenderEffect(
+        () => [store.data, store.other],
+        () => {}
+      );
+      return d;
+    });
+    flush();
+    await tick();
+    gate = true;
+
+    // Phase 1 — the firewall's own fetch in flight: store-wide (A9).
+    setId(2);
+    flush();
+    expect(isPending(() => store.data)).toBe(true);
+    expect(isPending(() => store.other)).toBe(true);
+
+    // Phase 2 — fetch commits; downstream async still holds the effect-level
+    // reveal, but the data-level commit is immediate: leaves show the landed
+    // value and read settled (companions probe from their own lane, A14).
+    resolveFetch();
+    await tick();
+    expect(store.data).toBe(20);
+    expect(isPending(() => store.data)).toBe(false);
+    expect(isPending(() => store.other)).toBe(false);
+
+    resolveDownstream();
+    await tick();
+    flush();
+    expect(isPending(() => store.data)).toBe(false);
+    dispose();
+  });
+});
+
+describe("A23: the isPending probe is reads-only — returns are never inspected", () => {
+  const tick = () => new Promise(r => setTimeout(r, 0));
+
+  it("returning the store proxy reads nothing; reads are what report", async () => {
+    const [$id, setId] = createSignal(1);
+    let store!: { data: number };
+
+    const dispose = createRoot(d => {
+      [store] = createStore(
+        async (s: { data: number }) => {
+          const id = $id();
+          await Promise.resolve();
+          s.data = id * 10;
+        },
+        { data: 0 }
+      );
+      createRenderEffect(
+        () => store.data,
+        () => {}
+      );
+      return d;
+    });
+    flush();
+    await tick();
+
+    // Firewall refetch in flight:
+    setId(2);
+    flush();
+    expect(isPending(() => store.data)).toBe(true); // leaf read reports (A9)
+    expect(isPending(() => ({ ...store }))).toBe(true); // spread reads report
+    expect(isPending(() => store)).toBe(false); // the return value means nothing
+
+    await tick();
+    expect(isPending(() => store.data)).toBe(false);
+    dispose();
   });
 });
 
