@@ -1,5 +1,5 @@
 ---
-"@solidjs/signals": minor
+"@solidjs/signals": patch
 ---
 
 The effect bundle `error` handler is now the error arm of the effect phase (#2840)

@@ -1,5 +1,38 @@
 # @solidjs/web
 
+## 2.0.0-beta.16
+
+### Patch Changes
+
+- 5dd2949: Update dom-expressions to 0.50.0-next.15 under the new `@dom-expressions` npm scope (`@dom-expressions/runtime`, `@dom-expressions/babel-plugin-jsx`, `@dom-expressions/hyperscript`, `@dom-expressions/tagged-jsx`). Includes the upstream fix where awaited `renderToStream` now waits out blocked root holes (#2779) and the server `mergeProps` sourcing fix (#2815). `@solidjs/html`'s runtime shim follows the upstream SLD → Tagged JSX rename (`createTaggedJSXRuntime` / `TaggedJSXInstance`).
+- be9a07a: Server `dynamic()` now supports Promise sources (#2779). A Promise component/tag source previously fell through the sync function/string checks and rendered nothing. It now follows `lazy()`'s SSR contract: block async renderers and throw `NotReadyError` from a sync memo until the promise lands, so the streaming engine captures the position as a retry hole. Requires `@dom-expressions/runtime` 0.50.0-next.15, where awaited `renderToStream` waits out blocked root holes.
+- 06e45e8: Fix `Portal` stranding one empty text node in its mount target per unmount: the cleanup removed the nodes in `[startMarker, endMarker)` but never `endMarker` itself, which the same effect run had appended. Toggling a Portal (the modal open/close pattern) accumulated one node per cycle, unbounded — invisible to `innerHTML` checks but breaking `:empty` selectors and `childNodes` counts on the mount target. The removal range is now inclusive of `endMarker`.
+- 098876d: Fix hydration key mismatches when async holes defer past eager siblings
+  (#2801 bug 2). New `ssrScope` (server): reserves one hydration id slot at
+  registration and evaluates the hole — including async retries — under the
+  reserved id with a zeroed child counter (a virtual scope in the style of
+  mapArray's row-owner elision, so no owner allocation on the hot path). On
+  the client, `@solidjs/web`'s `effect` wrapper now honors a `scope: true`
+  option (set by the dom-expressions `insert` for compiler-tagged hole
+  accessors) that makes the outer insert render effect non-transparent, giving
+  the same hole its own id scope. Hole content ids gain one nesting level
+  identically on both sides, so deferral timing can no longer shift sibling
+  hydration keys.
+- f6a3540: Update dom-expressions to 0.50.0-next.16. Pulls in: per-slot insertion markers so adjacent expression slots no longer destroy nodes migrating between them (#2830), delegated events reaching outer roots across nested render roots (#2832), recovery from module preload failures during hydration plus manifest asset URL normalization (#2817), non-destructive style object diffing with explicit-undefined removal (#2828), preserved JS value semantics for wrapped `&&` conditions, and the hole id scope hydration fixes (#2801).
+- Updated dependencies [4b5272f]
+- Updated dependencies [f8f992d]
+- Updated dependencies [f658824]
+- Updated dependencies [088f97e]
+- Updated dependencies [4608539]
+- Updated dependencies [f14e3e3]
+- Updated dependencies [8b6c298]
+- Updated dependencies [5bc9080]
+- Updated dependencies [0e8672a]
+- Updated dependencies [1458907]
+- Updated dependencies [098876d]
+- Updated dependencies [f6a3540]
+  - solid-js@2.0.0-beta.16
+
 ## 2.0.0-beta.15
 
 ### Patch Changes

@@ -1,5 +1,25 @@
 # @solidjs/universal
 
+## 2.0.0-beta.16
+
+### Patch Changes
+
+- 5dd2949: Update dom-expressions to 0.50.0-next.15 under the new `@dom-expressions` npm scope (`@dom-expressions/runtime`, `@dom-expressions/babel-plugin-jsx`, `@dom-expressions/hyperscript`, `@dom-expressions/tagged-jsx`). Includes the upstream fix where awaited `renderToStream` now waits out blocked root holes (#2779) and the server `mergeProps` sourcing fix (#2815). `@solidjs/html`'s runtime shim follows the upstream SLD → Tagged JSX rename (`createTaggedJSXRuntime` / `TaggedJSXInstance`).
+- f6a3540: Update dom-expressions to 0.50.0-next.16. Pulls in: per-slot insertion markers so adjacent expression slots no longer destroy nodes migrating between them (#2830), delegated events reaching outer roots across nested render roots (#2832), recovery from module preload failures during hydration plus manifest asset URL normalization (#2817), non-destructive style object diffing with explicit-undefined removal (#2828), preserved JS value semantics for wrapped `&&` conditions, and the hole id scope hydration fixes (#2801).
+- Updated dependencies [4b5272f]
+- Updated dependencies [f8f992d]
+- Updated dependencies [f658824]
+- Updated dependencies [088f97e]
+- Updated dependencies [4608539]
+- Updated dependencies [f14e3e3]
+- Updated dependencies [8b6c298]
+- Updated dependencies [5bc9080]
+- Updated dependencies [0e8672a]
+- Updated dependencies [1458907]
+- Updated dependencies [098876d]
+- Updated dependencies [f6a3540]
+  - solid-js@2.0.0-beta.16
+
 ## 2.0.0-beta.15
 
 ### Patch Changes

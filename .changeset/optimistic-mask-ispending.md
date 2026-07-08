@@ -1,5 +1,5 @@
 ---
-"@solidjs/signals": minor
+"@solidjs/signals": patch
 ---
 
 Optimistic overrides now mask `isPending` — an active optimistic write is "certainty by decree" (#2844, #2728)

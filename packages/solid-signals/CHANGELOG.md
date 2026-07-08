@@ -1,5 +1,172 @@
 # @solidjs/signals
 
+## 2.0.0-beta.16
+
+### Patch Changes
+
+- 4b5272f: `createErrorBoundary` and `createLoadingBoundary` now return a properly typed `Accessor<T | U>` (content union fallback) instead of `() => unknown`, with the same external signature across the core, client hydration, and server layers.
+- a2c9de1: Add an opt-in companion-vs-oracle census (test-mode, `COMPANION_CENSUS` env var): a non-asserting diff logger that compares every live isPending/latest companion against a fresh oracle at the end of each flush. Census findings (nine divergence fingerprints, all pending divergences one-directional under-reporting) are recorded in INTERNALS-ASYNC-STATE.md and define the write-driven companion redesign's update points.
+- 7de51be: Redesign isPending/latest companion updates to be write-driven (#2838): verdicts derive from data state and survive transition completion. Fixes the four pinned spec violations — V1 (resting optimistic node reported not-pending while an entangled refetch held its fresh value; the #2799 carve-out is removed since resting nodes never hold revert targets), V2 (an early probe froze latest() at the stale value for the whole blocked window), V3 (isPending read false during a post-transition refetch), and V4 (the latest-form on an untouched optimistic store leaf failed to filter a pure firewall refresh and its companion stuck true forever). Companions now re-derive at settlement checkpoints (commit/revert), firewall status changes poke probed leaf companions, and the resting async hold syncs companions like every other write path.
+- 822a5a6: Add dev-mode invariant assertions and a spec test suite for the async/transition/lane machinery (probe leaks, companion coherence, override/pending leaks at quiescence, merged-lane routing, out-of-band async-reporter registration). Assertions throw under test, log in dev, and fully tree-shake from production builds. Enabling them surfaced and fixed a real leak: `mergeLanes` copied the merged lane's pending-async set and effect queues into the root without clearing the originals, retaining node references for the lane's lifetime.
+- c45b6f7: Effect-returned cleanups now fire at the effect node's own disposal (unwind order) instead of via a hook registered on the parent's disposal list. Removes a retention edge — early-disposed effects no longer leave dead closures in the parent's disposal array — and makes final effect cleanup ordering identical between dev and prod through the dev component wrapper.
+- c2b7aed: The effect bundle `error` handler is now the error arm of the effect phase (#2840)
+
+  Previously the handler fired synchronously mid-propagation, inside an owned
+  scope — signal writes (the natural "set error state" pattern) tripped
+  `REACTIVE_WRITE_IN_OWNED_SCOPE`, and it could fire for speculative computes
+  under a held transition. It now queues like the `effect` function and runs
+  on the same schedule, in the same imperative writable scope, with the same
+  throw escalation (nearest boundary, else halt). Consequences: the handler
+  observes settled outcomes — an error that recovers before the effect phase
+  runs the `effect` arm instead, and a held transition defers the handler
+  exactly as it defers `effect`. The no-handler `console.error` fallback moves
+  to the same schedule. Render effects are unchanged.
+
+- 57b92a1: Fix the effect bundle `error` handler receiving the internal `StatusError` wrapper instead of the thrown error (#2840)
+
+  `notifyStatus` wraps compute-phase errors in `StatusError` for source
+  tracking. `createErrorBoundary` already unwrapped before exposing the error
+  to its fallback, but `notifyEffectStatus` passed the raw wrapper to the
+  bundle's `error` handler — breaking `instanceof` and class-based branching
+  on the documented recovery path. The handler (and the no-handler
+  `console.error` fallback, and the no-boundary halt rethrow) now receive the
+  user's original error; the node keeps the wrapper internally for boundary
+  notification.
+
+- b51bbcc: Eliminate optimistic revert targets: `_pendingValue` now has exactly one meaning (a pending commit) and `_value` changes only at commit points. Authoritative values arriving under an active override hold like any other transition write and elevate on their own transition's schedule — unobservably, since every reader sees the override (A17); reverting an override is a pure drop that commits nothing. Fixes a data-loss bug (V5) where a first optimistic write clobbered a refetch value held in the blocked-merged window, resurrecting stale data at revert. Refines A18 (2026-07-07b re-rule): an override's lifetime is bound to its own transition; in merged transitions corrections reveal atomically with the merged completion (pending true throughout) while still propagating internally on arrival — no waterfalls, only the reveal is gated.
+- 5efe089: `action()` now awaits yielded object thenables, not just native `Promise` instances. Yielding a Promise-like object that is not `instanceof Promise` (a custom thenable, cache wrapper, or cross-realm promise) previously resumed the generator immediately with the raw object instead of its settled value. Yield handling now uses an object-thenability check (`typeof value === "object" && typeof value.then === "function"`), shared with the async runtime's thenable detection (#2765).
+- 0e81199: Fix uncaught errors in async-generator `action()`s freezing the JS thread (#2841)
+
+  A rejected iterator-result promise from an async generator means the error
+  already escaped the generator body (it is completed) — throwing back in via
+  `it.throw()` just rejected again forever, starving the event loop in a
+  microtask loop. The runner now settles the action instead: the returned
+  promise rejects, the iterator is removed from the transition's `_actions`,
+  and the transition can complete. `try`/`catch` around `yield`/`await` inside
+  async generators is unaffected, as is the sync-generator throw path.
+
+- bb750d1: Dev: the `ASYNC_OUTSIDE_LOADING_BOUNDARY` warning now fires consistently when a pending async read escapes without a `Loading` ancestor, even under an `Errored` boundary (#2822). Enforcement previously re-notified the boundary chain with an error status, which both suppressed the warning and routed the pending to the error boundary — showing the error fallback in dev only, a dev/prod divergence. Pending is not an error: the mount defers identically in dev and prod, and the diagnostic is informational.
+- f658824: Fix `createProjection` seed typing so readonly store seeds do not override inference from the projection function return type.
+- e2ebc11: Errors thrown by a user `equals` comparator now route through the node's error status like compute-phase throws, so error boundaries contain them (previously they unwound the scheduler flush, bypassing every boundary and silently wedging the queue). Applies to sync recompute, direct writes during async resolution, and lane-routed async writes. Also documented the createEffect error contract: the `EffectBundle.error` handler intercepts compute-phase (reactivity) errors only; effect-phase throws are the user's own imperative code and escalate to the nearest error boundary (#2837, #2839).
+- 26f443f: Fix `isPending` on an async source that errors (#2790). `isPending` reading an
+  errored source now resolves to `false` (both synchronously and asynchronously)
+  instead of livelocking or surfacing an unhandled rejection. Three layered changes:
+  - Async propagation: the link an `isPending` read creates is tagged as a
+    pending-observer. When the source errors, `notifyStatus` re-runs the observer
+    (so `isPending` re-evaluates to not-pending) instead of forwarding the error
+    through it — preventing the error from escaping (e.g. out of an `<Errored>`
+    fallback, which its own boundary cannot catch) as an unhandled rejection.
+  - `isPending` observation: the errored-retry in `read` is gated behind
+    `!pendingCheckActive`, so a pending check observes the errored status (the
+    stored error is thrown and swallowed by `isPending`) rather than re-running the
+    async body — which would re-fetch, flip the source back to pending, and livelock
+    on a source that keeps failing.
+  - Retry policy: the errored-retry in `read` is additionally gated behind
+    `tracking`. An errored async source only retries when re-read from an
+    owned/tracked scope (a reactive recomputation) in a later cycle. Naked/ownerless
+    reads — events, `untrack`, an effect's side-effect phase — surface the stored
+    error without re-fetching.
+
+- aace71e: Fix `isPending` not reporting pending during a `refresh()`/refetch of an async `createOptimistic` accessor (#2799). A resting optimistic node (no active override) now reports pending exactly like a plain async memo while a refetch is in flight with stale data; muting pending remains the job of an active optimistic override only.
+- 536bea5: Fix `latest()` / `isPending(() => latest(x))` on async memos (#2829). Three related defects in the latest-shadow computed's lifecycle: (1) after the initial load resolved, `latest(x)` regressed to `undefined` because the shadow recomputed mid-transition under a stale/lane read context and cached the committed (still-undefined) value; (2) the first refresh after settling never reported pending because the shadow stayed `STATUS_UNINITIALIZED` forever (the optimistic-node resolution path committed its first value without clearing the flag), so the pending probe mis-classified the refresh as an initial load and suspended the reader before collecting pending sources; (3) `latest()` now never suspends a reader once the source has a value — it falls back to the stale committed value, and only suspends on a true initial load where there is nothing stale to show.
+- 16c861e: Fix `latest()`/`isPending()` consistency gaps (#2831): store-leaf reads now report the firewall's refetch as pending; `[isPending(x), x()]` can no longer pair pending with the fresh in-flight value for non-stale readers; and sync derivations of transition-held sources (a memo over a held signal) are now visible to `latest()` and `isPending()` — the transition-held sync recompute path maintains the same companion nodes as `setSignal` and async writes.
+- 219e30c: Fix infinite loop when an async memo is read inside `Loading > Errored` (#2809). Boundaries no longer re-throw a foreign status (pending through an `Errored`, errors through a `Loading`) to reactive readers; the status is propagated exclusively through the boundary queue chain to whichever boundary handles it. Boundary trees notify both status dimensions like render effects do, foreign flags are cleared from the tree's reader-visible state, and boundary result computeds are excluded from hydration snapshot capture (they previously relied on the leaked pending flag to be skipped).
+- 45df105: `onSettled` no longer runs a returned cleanup eagerly when it fires from an unowned scope (an event handler, a tracked effect, or another `onSettled`). A cleanup is only meaningful when `onSettled` runs in an owned scope, where it fires on owner disposal. In an out-of-band fire there is no owner lifecycle to bind to, so previously the cleanup was invoked immediately in the same flush — tearing down setup-with-teardown helpers the instant they installed. Returning a cleanup from such a scope is now a dev-mode error (`SETTLED_CLEANUP_UNOWNED`) guiding the call into an owned scope, and is dropped in production. The out-of-band one-shot fire itself (no cleanup) is unchanged.
+- 2d07c8d: Fix optimistic overrides being silently dropped when their transition is entangled with other async work. `transitionComplete` excluded a node pending on its own fetch from blocking completion, so a merged transition could complete on the first flush and revert the override while its async was still in flight. An active override is now held for every reader (ambient and tracked) until the owning transition truly settles (ruled as spec A17).
+- 9a55a4d: Fix `reconcile()` leaving stale per-index and `has` nodes on array resize (#2823). After a shrink, tracked reads of removed indices now update to `undefined` and untracked reads agree with `length` instead of serving the removed row from the leftover node; `in` checks update in both directions (removed indices report `false`, indices added by growth report `true`). Node sync is membership-based (`key in next`), so sparse holes and named array properties are unaffected.
+- 6cef1c1: reconcile: force wholesale replacement when nested value type changes between array and object
+- bc92d00: Fix keyed `reconcile` crashing on non-object array entries (#2772): a keyed `reconcile(..., key)` threw when an array held `null`/`undefined`/primitive entries, because the keyed diff passed them to `keyFn` (which assumes an object) or to `wrap()` (which assumes a wrappable value). The keyed paths now guard every match/key/wrap site, so non-object slots are preserved or replaced wholesale (object→primitive and back).
+- cfe6c8f: Fix `reconcile()` mishandling store proxies held as values (#2825). The diff's `unwrap` helper read the internal signal-node record (`STORE_NODE`) instead of the store's value, so reconciling data containing store proxies leaked internal Signal records into store reads (breaking `JSON.stringify` with a circular-structure error) or silently dropped keyless swaps; keyed reorder of an array whose items are store proxies crashed with a stack overflow. Proxies are now normalized to their raw value at the diff entry, restoring identity-preserving merges across the proxy boundary.
+- 54b2175: reconcile: notify ownKeys subscribers on pure keyed trailing removal
+- c4ba526: Fix `resolve()` never settling (and leaking its root) when the async source rejects (#2842)
+
+  `resolve()` was built on a bare, subscriber-less computed: a pending source
+  that _resolved_ re-enqueued it, but a _rejection_ only marked it errored for
+  a pull that never came — the promise hung forever and the internal root was
+  never disposed. Rebuilt on a user effect, whose error-notification channel is
+  actively told about rejections: the promise now rejects with the user's
+  original error (unwrapped from the internal `StatusError`, matching error
+  boundaries) and the root is disposed on every terminal state.
+
+- d7e382a: A resting `createOptimistic` async source (no active override) now commits its async completion through the same pending-node commit path as a plain async memo, instead of writing its value directly. The direct write skipped the commit that clears `STATUS_UNINITIALIZED`, so when `isPending(() => data())` was the _only_ consumer (the `disabled={isPending(data)}` shape, with no value-observer to drive the commit), the flag was never cleared and the first `refresh()` was misread as an initial load — `isPending` never reported `true`. Routing the resting completion through the shared commit makes a resting optimistic node indistinguishable from a non-optimistic one, removing the divergence rather than special-casing it.
+- 461b242: `snapshot()` and `deep()` now read through the optimistic overlay on `createOptimisticStore` (#2850), agreeing with every other reader: an active optimistic write is THE value (A17), and snapshot's documented behavior on regular stores is already to read the pending-write overlay synchronously. Resolution order matches the proxy traps and `reconcile` (optimistic over regular). Also lands the specialized no-overlay snapshot walk deferred from #2756.
+- 5894f2a: store: fix two proxy invariant bugs — non-configurable property descriptor and stale indices after array truncation
+- bc92d00: Store key-handling fixes, plus a follow-up to the #2797 array-truncation fix:
+  - **Array truncation notifies tracked reads** (#2768): #2797 clears the truncated indices from `has`/`ownKeys`/index reads; this additionally calls `notifyStoreProperty` for each dropped index, so a reactive read tracking `store[i]` re-runs instead of holding the stale value.
+  - **Symbol-keyed properties** (#2769): writing a symbol key on an array store threw (`parseInt` on a symbol), and several helper/replacement paths dropped symbol keys because they enumerated with `Object.keys`. Array writes now treat symbols as metadata (not indices), and `storeSetter`, `storePath`, and `merge`/`omit` enumerate own enumerable keys including symbols.
+  - **Null-prototype objects** (#2771): reading a function-valued property off an `Object.create(null)` store crashed (`storeValue.hasOwnProperty` is undefined). The check now uses `Object.prototype.hasOwnProperty.call`.
+
+- 5efe089: Surface synchronously-rejecting thenables. A memo returning a Promise-like thenable that invoked its rejection handler synchronously during `.then()` (e.g. a cache that already knows it failed) had its error dropped and stayed stuck on the pending path forever — `<Loading>` never gave way to `<Errored>`. The thenable branch now captures a synchronous rejection (mirroring the existing sync-resolve handling) and settles it, so the error reaches the boundary the same way an async rejection does (#2764).
+- 90238e7: Detach effect cleanups before invoking them so a throwing cleanup is never re-run on later passes and its error takes the standard effect error path (catchable by error boundaries) (#2813)
+- 936b098: Gate the async/transition invariant assertions behind `__TEST__` instead of `__DEV__`. The per-write tracking and per-flush quiescence sweep regressed dev-build performance by 5-21% across the benchmark suite; dev builds now pay nothing for them and they run only under the test suite's defines.
+- 90238e7: An error that escapes every error boundary now permanently halts the reactive system instead of leaving it in a partially-updated state (#2761, #2762). The error still throws through as an uncaught exception; after that, further writes and flushes are ignored and a `REACTIVITY_HALTED` message is logged. Handle errors with `createErrorBoundary`/`<Errored>`, or treat an uncaught error as an app crash. `resetErrorHalt()` is exposed for tests and dev tooling.
+- cdbe95d: Add the INV-2 test-mode assertion (an active optimistic override must hold a revert target and stay registered for reversion) and characterization tests for the open async semantics questions (B4, C1, C4), including two known ruled-spec violations in the blocked-merged-transition window pinned as expected failures.
+- 233e7b0: Ineffective optimistic store writes no longer arm the store-wide isPending mask or entangle the transition. Previously the mask armed on any write-trap fire before the equality short-circuit, so `setStore(s => ({ ...s }))` (which replays every key with equal values) and same-value property writes silently decreed the store settled while the semantically identical `setStore(s => s)` did not. The mask and reversion tracking now arm only when data actually changes, matching the signal path where an equal-value first optimistic write creates no override.
+- 77f6d18: Optimistic overrides now mask `isPending` — an active optimistic write is "certainty by decree" (#2844, #2728)
+  - An active optimistic override reads `isPending === false` for its whole
+    lifetime, on every node kind and in both probe forms. `isPending` is
+    reserved for data being updated by machinery the reader did not decree
+    (refetches, transition-held commits) — never for the provisional nature of
+    an override. Action affordances ("Saving…") belong in the data as
+    co-written flags or a separate `createOptimistic(false)`.
+  - For derived optimistic stores the mask is store-wide: while any optimistic
+    write on the store is live, the entire store (written leaves, untouched
+    siblings, structural reads, the firewall's own refetch) reads settled. The
+    mask lifts when the store's optimistic state clears. Background polling
+    falls out: `refresh(store); setStore(s => …reassert…)` revalidates silently.
+  - `isPending(() => latest(x))` now follows `x`'s own in-flight async only:
+    `latest` acts as a self-applied override the moment a held value exists, so
+    transition holds no longer read pending through it; it is never pending on
+    signals or sync computeds.
+  - Store leaves report a firewall refetch in both probe forms (the old
+    latest-form filter is gone; the store-wide mask is the only silencer).
+  - Companion verdicts now revert when their owner is disposed (no
+    latched-`true` spinner for a dead source — the #2845 edge).
+  - Dev/test invariants INV-9 (disposal) and INV-10 (mask, both node- and
+    store-scoped arms) enforce the new semantics; dead lane-merge and probe
+    special-case paths were removed.
+
+  See `SPEC-ASYNC-SEMANTICS.md` (A8/A9/A19/A20/A21 re-rulings, 2026-07-07c) and
+  `INTERNALS-ASYNC-STATE.md` §5f for the full ruling and implementation notes.
+
+- a6d83f1: Extend test-mode invariant machinery for the async/companion redesign pre-work: INV-8 pending-hold provenance (every held `_pendingValue` is tagged as an optimistic revert target or a transition/refetch hold, and the #2799 resting carve-out is probed for muting refetch holds — the V1 root cause), INV-9 (a disposed owner's isPending companion must not report a phantom `true` at quiescence). Rule and pin A20 semantics: an active optimistic override reads `isPending === true` uniformly (overrides mask stale content, not settlement), pending scope follows the read, and `latest` strips coordination but never confirmation — with the latest-form store-leaf filter pinned as expected failure V4.
+- b7c03a7: perf: O(1) dependency revalidation and reconcile allocation trims (from #2756)
+  - Replace the `isValidLink` dep-list scan with a per-recompute generation stamp
+    on links, eliminating O(n²) behavior when a computation re-reads a dependency
+    it already saw during the same pass (deep-tree reconcile with all paths
+    subscribed: ~7x faster)
+  - Reconcile: reuse the existing key array when key sets match in `getAllKeys`,
+    and skip symbol lookups on primitive leaves in `unwrap`
+  - Avoid the `untrack` closure in `getKeys` for plain (non-proxy) sources
+  - Cache one bound effect runner per effect instead of allocating per update
+
+- e73ccae: Code reduction pass over the optimistic machinery. Remove dead override-correction paths made unreachable by the hold model (`_overrideSinceLane` flag, the non-lane recompute correction, setSignal equal-write re-propagation). Consolidate the store's three-layer value resolution behind `getOverlayLayer`/`visibleNodeValue` chokepoints so every proxy trap resolves optimistic → override → base identically.
+- b9f2737: Fix `reconcile()` never notifying symbol-keyed store nodes (#2851)
+
+  The remaining variant of #2769: reconcile's diff loops enumerated with
+  `Object.keys`, so symbol-keyed nodes were never diffed — tracked reads and
+  `in` checks of `state[SYM]` were not notified, and the stale node shadowed
+  the reconciled value even for untracked reads. Symbol keys are now diffed
+  like string keys: `getAllKeys` appends enumerable symbols (with override
+  deletes still winning), and node-record loops enumerate symbols only for
+  records that currently hold a user symbol node (tracked via a WeakSet mark
+  maintained by `getNode`/`unobserved`), keeping the symbol-free hot path on
+  `Object.keys`.
+
+- 4e81e9c: Fix `repeat()` / `<Repeat>` leaking live row scopes and crashing on disjoint window jumps. When a reactive `from` moves the window to indices that don't overlap the previous window, the shift-and-fill update walked `_nodes` at negative local indices: a forward jump larger than the window created every gap row and left them alive (owners, effects, and `onCleanup`s never disposed), and a backward disjoint jump threw `Cannot read properties of undefined (reading 'dispose')` and froze the list. The first render with a nonzero `from` mapped the whole `0..from+count` prefix for the same reason. Disjoint windows are now detected and replaced wholesale; overlapping slides (the #2784 fix) are unchanged.
+- 76fc7e6: Streamline the isPending()/latest() internals: remove a dead branch in `computePendingState`, consolidate the tripled companion-node bookkeeping (setSignal / async resolution / transition-held recompute) into a single `syncCompanions` helper, collapse the four isPending probe globals into one probe object, and deduplicate node preparation in `read()`. No behavior change; slightly smaller bundle.
+- faf78eb: Fix `snapshot()` and `deep()` shrinking an array's length when trailing indices were deleted (#2846)
+
+  `delete arr[i]` on a store leaves a hole without changing `length` — plain
+  JS semantics, and every proxy-side read agrees — but `snapshotImpl`'s array
+  branch skipped `$DELETED` slots without restoring the result's length, so
+  trailing holes truncated the copy (at any nesting depth, for either API).
+  The array branch now restores the length after the loop, mirroring
+  `unwrapStoreValue`, so deleted slots stay holes (`i in copy === false`,
+  serialized as `null`).
+
+- c165ec2: Fix store property descriptors reporting stale values after `setStore` writes. `Object.getOwnPropertyDescriptor(store, key)` and `Object.getOwnPropertyDescriptors(store)` now agree with proxy reads for written string and symbol keys while preserving the source descriptor's flags. Writes over prototype-inherited properties now also report an own descriptor and no longer crash `snapshot()`.
+
 ## 2.0.0-beta.15
 
 ### Patch Changes

@@ -1,5 +1,83 @@
 # solid-js
 
+## 2.0.0-beta.16
+
+### Patch Changes
+
+- 4b5272f: `createErrorBoundary` and `createLoadingBoundary` now return a properly typed `Accessor<T | U>` (content union fallback) instead of `() => unknown`, with the same external signature across the core, client hydration, and server layers.
+- f8f992d: A rejected chunk preload no longer hangs boundary hydration forever (#2817 layer 3). Every asset-wait path in `createLoadingBoundary` now handles rejection: the error is reported via console and the boundary resumes with a fresh client render (`shouldHydrate=false`), letting `lazy()`'s own `import()` retry or fail through normal error channels.
+- f658824: Fix `createProjection` seed typing so readonly store seeds do not override inference from the projection function return type.
+- 088f97e: fix(server): serialize chained async memo values resolved after a nested Loading boundary commits
+
+  A chained async memo reached through a synchronous derived memo (e.g. `a` async → `m = createMemo(() => a()[0])` → `b = createMemo(() => fetchItems(m()))`) resolves only after its dependency, so inside a nested `<Loading>` boundary it serializes _after_ the surrounding boundary has already flushed and committed. That late serialization landed in a buffer that never flushed again, so the value was dropped — only the dependency's value survived. On the client the memo then re-ran its compute and orphaned the server-streamed fragment ("Hydration completed with N unclaimed server-rendered node(s)"). This is the shape produced when route content is nested in a root layout's boundary (e.g. TanStack Start).
+
+  Once a boundary has flushed, later serializations now write through to the parent context instead of being buffered into a buffer that will never flush again.
+
+- 4608539: Release the Reveal group slot when a streamed boundary errors so sequential/together frontiers don't stall and later resolved siblings still activate (#2776)
+- f14e3e3: Stop pending async reads in server effects from throwing through the render. An effect compute reading a not-yet-ready async source previously propagated `NotReadyError` out of the effect, forcing the surrounding `Loading` boundary to rebuild its whole subtree on every settle — re-creating the async work each time in an infinite discovery loop (#2801). Now render effects register the pending source with the stream (holding flush like top-level JSX async) and retry once it settles so the effect function runs with the resolved value, matching how render effects drive boundaries on the client. Plain `createEffect` is swallowed outright — it never impacts boundaries even on the client.
+- 8b6c298: Server render effects now respect `defer: true` — the compute still runs for parity, but the initial side-effect run is skipped like on the client (#2811)
+- 5bc9080: Loading boundaries whose serialized state is already settled now hydrate straight through to content instead of rendering the fallback for a microtask. The fallback only hydrates when it is actually what the server left showing (i.e. the streamed fragment has not swapped in yet). The phantom fallback pass created detached client DOM and poisoned insert's node bookkeeping, causing async values beside siblings at fragment root to duplicate instead of update on post-hydration refresh (#2801).
+- 0e8672a: Fix streamed SSR infinite loop when async work is created inside an `Errored` boundary (#2809 follow-up). The server error boundary discarded its partial template when children went async and disposed + re-ran them on every retry pull, recreating the async computation (and its fetch) each pass so the render never completed. The boundary now stashes the pending template and resumes its surviving holes across retries, matching how `Loading` already resumes.
+- 1458907: Fix hydration key drift when a compiler-emitted expression memo reads a pending async source during streamed SSR (#2801). The server's lean sync memo re-runs its compute on every pull after a `NotReadyError`, but did so without resetting the owner's child state — each failed pull leaked the child-id slots it consumed (e.g. the inner condition memo of `{data().value && <h4>...</h4>}`), so hydration keys produced by the eventual successful pull drifted ahead of the client's single successful compute and the affected nodes went unclaimed (duplicated in prod, "unclaimed server-rendered node" warning in dev). The sync memo now disposes children and resets `_childCount` before each re-pull, mirroring how the client resets an owner on recompute, so every pull emits the same ids.
+- 098876d: Fix hydration key mismatches when async holes defer past eager siblings
+  (#2801 bug 2). New `ssrScope` (server): reserves one hydration id slot at
+  registration and evaluates the hole — including async retries — under the
+  reserved id with a zeroed child counter (a virtual scope in the style of
+  mapArray's row-owner elision, so no owner allocation on the hot path). On
+  the client, `@solidjs/web`'s `effect` wrapper now honors a `scope: true`
+  option (set by the dom-expressions `insert` for compiler-tagged hole
+  accessors) that makes the outer insert render effect non-transparent, giving
+  the same hole its own id scope. Hole content ids gain one nesting level
+  identically on both sides, so deferral timing can no longer shift sibling
+  hydration keys.
+- f6a3540: Update dom-expressions to 0.50.0-next.16. Pulls in: per-slot insertion markers so adjacent expression slots no longer destroy nodes migrating between them (#2830), delegated events reaching outer roots across nested render roots (#2832), recovery from module preload failures during hydration plus manifest asset URL normalization (#2817), non-destructive style object diffing with explicit-undefined removal (#2828), preserved JS value semantics for wrapped `&&` conditions, and the hole id scope hydration fixes (#2801).
+- Updated dependencies [4b5272f]
+- Updated dependencies [a2c9de1]
+- Updated dependencies [7de51be]
+- Updated dependencies [822a5a6]
+- Updated dependencies [c45b6f7]
+- Updated dependencies [c2b7aed]
+- Updated dependencies [57b92a1]
+- Updated dependencies [b51bbcc]
+- Updated dependencies [5efe089]
+- Updated dependencies [0e81199]
+- Updated dependencies [bb750d1]
+- Updated dependencies [f658824]
+- Updated dependencies [e2ebc11]
+- Updated dependencies [26f443f]
+- Updated dependencies [aace71e]
+- Updated dependencies [536bea5]
+- Updated dependencies [16c861e]
+- Updated dependencies [219e30c]
+- Updated dependencies [45df105]
+- Updated dependencies [2d07c8d]
+- Updated dependencies [9a55a4d]
+- Updated dependencies [6cef1c1]
+- Updated dependencies [bc92d00]
+- Updated dependencies [cfe6c8f]
+- Updated dependencies [54b2175]
+- Updated dependencies [c4ba526]
+- Updated dependencies [d7e382a]
+- Updated dependencies [461b242]
+- Updated dependencies [5894f2a]
+- Updated dependencies [bc92d00]
+- Updated dependencies [5efe089]
+- Updated dependencies [90238e7]
+- Updated dependencies [936b098]
+- Updated dependencies [90238e7]
+- Updated dependencies [cdbe95d]
+- Updated dependencies [233e7b0]
+- Updated dependencies [77f6d18]
+- Updated dependencies [a6d83f1]
+- Updated dependencies [b7c03a7]
+- Updated dependencies [e73ccae]
+- Updated dependencies [b9f2737]
+- Updated dependencies [4e81e9c]
+- Updated dependencies [76fc7e6]
+- Updated dependencies [faf78eb]
+- Updated dependencies [c165ec2]
+  - @solidjs/signals@2.0.0-beta.16
+
 ## 2.0.0-beta.15
 
 ### Patch Changes

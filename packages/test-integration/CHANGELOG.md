@@ -1,5 +1,75 @@
 # test-integration
 
+## 2.0.0-beta.16
+
+### Patch Changes
+
+- Updated dependencies [4b5272f]
+- Updated dependencies [a2c9de1]
+- Updated dependencies [7de51be]
+- Updated dependencies [822a5a6]
+- Updated dependencies [5dd2949]
+- Updated dependencies [c45b6f7]
+- Updated dependencies [c2b7aed]
+- Updated dependencies [57b92a1]
+- Updated dependencies [b51bbcc]
+- Updated dependencies [5efe089]
+- Updated dependencies [f8f992d]
+- Updated dependencies [0e81199]
+- Updated dependencies [bb750d1]
+- Updated dependencies [f658824]
+- Updated dependencies [e2ebc11]
+- Updated dependencies [26f443f]
+- Updated dependencies [aace71e]
+- Updated dependencies [536bea5]
+- Updated dependencies [16c861e]
+- Updated dependencies [219e30c]
+- Updated dependencies [088f97e]
+- Updated dependencies [45df105]
+- Updated dependencies [2d07c8d]
+- Updated dependencies [9a55a4d]
+- Updated dependencies [6cef1c1]
+- Updated dependencies [bc92d00]
+- Updated dependencies [cfe6c8f]
+- Updated dependencies [54b2175]
+- Updated dependencies [c4ba526]
+- Updated dependencies [d7e382a]
+- Updated dependencies [4608539]
+- Updated dependencies [be9a07a]
+- Updated dependencies [f14e3e3]
+- Updated dependencies [8b6c298]
+- Updated dependencies [5bc9080]
+- Updated dependencies [461b242]
+- Updated dependencies [0e8672a]
+- Updated dependencies [1458907]
+- Updated dependencies [5894f2a]
+- Updated dependencies [bc92d00]
+- Updated dependencies [5efe089]
+- Updated dependencies [90238e7]
+- Updated dependencies [936b098]
+- Updated dependencies [90238e7]
+- Updated dependencies [cdbe95d]
+- Updated dependencies [233e7b0]
+- Updated dependencies [77f6d18]
+- Updated dependencies [a6d83f1]
+- Updated dependencies [b7c03a7]
+- Updated dependencies [e73ccae]
+- Updated dependencies [06e45e8]
+- Updated dependencies [b9f2737]
+- Updated dependencies [4e81e9c]
+- Updated dependencies [76fc7e6]
+- Updated dependencies [faf78eb]
+- Updated dependencies [098876d]
+- Updated dependencies [c165ec2]
+- Updated dependencies [f6a3540]
+  - @solidjs/signals@2.0.0-beta.16
+  - solid-js@2.0.0-beta.16
+  - babel-preset-solid@2.0.0-beta.16
+  - @solidjs/web@2.0.0-beta.16
+  - @solidjs/h@2.0.0-beta.16
+  - @solidjs/html@2.0.0-beta.16
+  - @solidjs/universal@2.0.0-beta.16
+
 ## 2.0.0-beta.15
 
 ### Patch Changes

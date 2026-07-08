@@ -3,7 +3,7 @@
 "@solidjs/web": patch
 "babel-preset-solid": patch
 "@solidjs/h": patch
-"solid-html": patch
+"@solidjs/html": patch
 "@solidjs/universal": patch
 ---
 
