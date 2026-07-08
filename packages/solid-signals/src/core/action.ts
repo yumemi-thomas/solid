@@ -8,6 +8,13 @@ import {
   type Transition
 } from "./scheduler.js";
 import { isThenable } from "./async.js";
+import { getOwner } from "./owner.js";
+import { CONFIG_CHILDREN_FORBIDDEN } from "./constants.js";
+import { emitDiagnostic } from "./dev.js";
+
+const ACTION_CALLED_IN_OWNED_SCOPE_MESSAGE =
+  "[ACTION_CALLED_IN_OWNED_SCOPE] Calling an action inside an owned scope (component, computation) is not allowed. " +
+  "Call it from an event handler or another imperative scope.";
 
 function restoreTransition<T>(transition: Transition, fn: () => T): T {
   globalQueue.initTransition(transition);
@@ -53,8 +60,30 @@ function restoreTransition<T>(transition: Transition, fn: () => T): T {
 export function action<Args extends any[], Y, R>(
   genFn: (...args: Args) => Generator<Y, R, any> | AsyncGenerator<Y, R, any>
 ) {
-  return (...args: Args): Promise<R> =>
-    new Promise((resolve, reject) => {
+  return (...args: Args): Promise<R> => {
+    // Invoking an action starts a transaction — like a write, it is invalid
+    // synchronously inside an owned scope. The write guard can't catch this
+    // at the real hazard point: post-await writes run with no ambient owner,
+    // and a computation tracking what its action writes livelocks (every
+    // write retriggers the compute, which fires a fresh invocation whose
+    // transition supersedes the last — the value never commits). Same scope
+    // test as setSignal: leaf imperative scopes (tracked effects, onSettled)
+    // stay legal.
+    if (__DEV__) {
+      const owner = getOwner();
+      if (owner && !(owner._config & CONFIG_CHILDREN_FORBIDDEN)) {
+        emitDiagnostic({
+          code: "ACTION_CALLED_IN_OWNED_SCOPE",
+          kind: "write",
+          severity: "error",
+          message: ACTION_CALLED_IN_OWNED_SCOPE_MESSAGE,
+          ownerId: owner.id,
+          ownerName: (owner as any)._name
+        });
+        throw new Error(ACTION_CALLED_IN_OWNED_SCOPE_MESSAGE);
+      }
+    }
+    return new Promise((resolve, reject) => {
       const it = genFn(...args);
       globalQueue.initTransition();
       let ctx = activeTransition!;
@@ -95,4 +124,5 @@ export function action<Args extends any[], Y, R>(
 
       step();
     });
+  };
 }

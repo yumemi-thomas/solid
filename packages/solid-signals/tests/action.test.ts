@@ -1,4 +1,12 @@
-import { action, createRenderEffect, createRoot, createSignal, flush } from "../src/index.js";
+import {
+  action,
+  createEffect,
+  createMemo,
+  createRenderEffect,
+  createRoot,
+  createSignal,
+  flush
+} from "../src/index.js";
 
 afterEach(() => flush());
 
@@ -1284,6 +1292,95 @@ describe("action", () => {
 
       await myAction();
       expect($x()).toBe(3);
+    });
+  });
+
+  // Invoking an action is starting a transaction — like a write, it is not
+  // allowed synchronously inside an owned scope (component body, computation).
+  // Without the guard the write guard can't catch it either: post-await writes
+  // run with no ambient owner, and a computation that tracks what its action
+  // writes livelocks (each write retriggers the compute, which fires a fresh
+  // invocation whose transition supersedes the last — the value never lands).
+  describe("calling an action in an owned scope is a dev error", () => {
+    it("throws synchronously when called inside a computation", () => {
+      const [$x, setX] = createSignal(0);
+      let caught: unknown;
+      const myAction = action(async function* () {
+        yield Promise.resolve();
+        setX(1);
+      });
+
+      createRoot(() => {
+        const memo = createMemo(() => {
+          try {
+            myAction();
+          } catch (e) {
+            caught = e;
+          }
+          return $x();
+        });
+        createRenderEffect(memo, () => {});
+      });
+      flush();
+
+      expect(String(caught)).toMatch(/ACTION_CALLED_IN_OWNED_SCOPE/);
+      expect($x()).toBe(0);
+    });
+
+    it("throws synchronously when called in a root/component body", () => {
+      const myAction = action(function* () {});
+      let caught: unknown;
+      createRoot(() => {
+        try {
+          myAction();
+        } catch (e) {
+          caught = e;
+        }
+      });
+      expect(String(caught)).toMatch(/ACTION_CALLED_IN_OWNED_SCOPE/);
+    });
+
+    it("allowed with no ambient owner (event-handler shape)", async () => {
+      const [$x, setX] = createSignal(0);
+      const myAction = action(function* () {
+        setX(1);
+      });
+      await myAction();
+      flush();
+      expect($x()).toBe(1);
+    });
+
+    it("allowed from a user effect callback", async () => {
+      const [$x, setX] = createSignal(0);
+      const [$y] = createSignal(0);
+      let p: Promise<void> | undefined;
+      const myAction = action(function* () {
+        setX(1);
+      });
+
+      createRoot(() => {
+        createEffect($y, () => {
+          p = myAction();
+        });
+      });
+      flush();
+      await p;
+      flush();
+      expect($x()).toBe(1);
+    });
+
+    it("allowed from inside another action", async () => {
+      const [$x, setX] = createSignal(0);
+      const inner = action(function* () {
+        setX(5);
+      });
+      const outer = action(async function* () {
+        yield Promise.resolve();
+        yield inner();
+      });
+      await outer();
+      flush();
+      expect($x()).toBe(5);
     });
   });
 });
