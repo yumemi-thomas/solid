@@ -23,7 +23,6 @@ import {
   untrack
 } from "./core/index.js";
 import { emitDiagnostic, registerGraph } from "./core/dev.js";
-import { StatusError } from "./core/error.js";
 import { globalQueue } from "./core/scheduler.js";
 
 /**
@@ -144,6 +143,12 @@ export type EffectBundle<Prev, Next extends Prev = Prev> = {
    * Intercepts compute-phase errors (thrown by the compute function or arriving
    * from upstream sources). Effect-phase throws are NOT routed here — they are
    * your own imperative code and escalate to the nearest error boundary.
+   *
+   * This is the error arm of the effect phase: it runs on the same queue and
+   * in the same imperative, writable scope as `effect` (signal writes are
+   * legal), receives the error the user code threw, and observes settled
+   * outcomes — an error that recovers before the effect phase runs the
+   * `effect` arm instead, and a held transition defers it like `effect`.
    */
   error: (err: unknown, cleanup: () => void) => void;
 };
@@ -360,10 +365,16 @@ export function createMemo<T>(
  * Pass an `EffectBundle` (`{ effect, error }`) instead of a plain function to
  * intercept **compute-phase** errors — errors thrown by `compute` or arriving
  * from upstream reactive sources (including async rejections), which your own
- * code has no frame to `try/catch`. Without an `error` handler a compute-phase
- * error is logged and the effect simply skips that run — a non-render effect's
- * reactivity failing does not crash the app. Rethrowing from `error` escalates
- * it to the nearest error boundary (halting the system if none exists).
+ * code has no frame to `try/catch`. The `error` handler is the error arm of
+ * the effect phase: it runs on the same schedule and in the same imperative,
+ * writable scope as `effect` (setting error state via signals is fine), and
+ * only for *settled* errors — a transient error that recovers before the
+ * effect phase runs `effect` with the recovered value instead, and a held
+ * transition defers it exactly as it defers `effect`. Without an `error`
+ * handler a compute-phase error is logged and the effect simply skips that
+ * run — a non-render effect's reactivity failing does not crash the app.
+ * Rethrowing from `error` escalates it to the nearest error boundary
+ * (halting the system if none exists).
  *
  * The **effect phase is different**: it is your own imperative code, so handle
  * failures with `try/catch` where they occur. An uncaught effect-phase throw
@@ -625,9 +636,9 @@ export function resolve<T>(fn: () => T): Promise<T> {
           dispose();
         },
         err => {
-          // Compute-phase errors arrive wrapped for source tracking; reject
-          // with the user's original error like error boundaries do.
-          rej(err instanceof StatusError ? (err.cause ?? err) : err);
+          // The error arm already unwraps StatusError (#2840) — `err` is the
+          // user's original error, matching what error boundaries expose.
+          rej(err);
           dispose();
         },
         { user: true }

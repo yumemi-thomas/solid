@@ -36,6 +36,7 @@ export interface Effect<T> extends Computed<T>, Owner {
   _modified: boolean;
   _prevValue: T | undefined;
   _type: number;
+  _boundRunEffect?: () => void;
 }
 
 /**
@@ -84,28 +85,26 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
   const actualStatus = status !== undefined ? status : this._statusFlags;
   const actualError = error !== undefined ? error : this._error;
   if (actualStatus & STATUS_ERROR) {
-    // Hand user code the error it threw, not the internal StatusError wrapper
-    // used for source tracking — mirrors createErrorBoundary's unwrap (#2840).
-    // The node keeps the wrapper: boundary notification reads `_error` itself.
-    let err =
-      actualError instanceof StatusError ? (actualError.cause ?? actualError) : actualError;
     this._queue.notify(this, STATUS_PENDING, 0);
     if (this._type === EFFECT_USER) {
-      try {
-        return this._errorFn
-          ? this._errorFn(err, () => {
-              const prevCleanup = this._cleanup;
-              this._cleanup = undefined;
-              prevCleanup?.();
-            })
-          : console.error(err);
-      } catch (e) {
-        err = e;
+      // The error handler is the error arm of the effect phase (#2840 ruling):
+      // queue it like the effect function. It runs in the same imperative,
+      // writable scope, throws escalate the same way, and a held transition
+      // (or optimistic lane) defers it exactly as it defers the success arm.
+      // No payload is queued — the node already carries `_statusFlags`/`_error`,
+      // and the runner dispatches on them, so a recovery before the effect
+      // phase takes the success arm instead. Blocked forwards (explicit
+      // `status` arg without node-state writes) don't queue: the status
+      // re-propagates unblocked at commit.
+      if (this._statusFlags & STATUS_ERROR) {
+        this._modified = true;
+        this._queue.enqueue(this._type, (this._boundRunEffect ??= runEffect.bind(null, this)));
       }
+      return;
     }
     if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) {
       haltReactivity();
-      throw err;
+      throw actualError;
     }
   } else if (this._type === EFFECT_RENDER) {
     this._queue.notify(this, STATUS_PENDING | STATUS_ERROR, actualStatus, actualError);
@@ -133,6 +132,36 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
 
 function runEffect(node: Effect<any>): void {
   if (!node._modified || node._flags & REACTIVE_DISPOSED) return;
+  // Error arm (#2840), user effects only: a compute-phase error that is still
+  // the node's settled state at effect time runs the bundle's error handler in
+  // this same imperative, writable scope. Unwrap the StatusError used for
+  // source tracking — user code gets the error it threw, as boundaries do. No
+  // handler: log and keep the system alive (the run was skipped). A handler
+  // (or logging) consumes the error; a handler throw falls to the shared
+  // catch below and escalates boundary-or-halt like any effect-phase throw.
+  // Render effects bypass: their errors route to boundaries synchronously in
+  // notifyEffectStatus, and a runner queued by an earlier valueChanged in the
+  // same flush must not be hijacked by a later-arriving error status.
+  if (node._statusFlags & STATUS_ERROR && node._type === EFFECT_USER) {
+    const err = node._error instanceof StatusError ? (node._error.cause ?? node._error) : node._error;
+    node._prevValue = node._value;
+    node._modified = false;
+    try {
+      node._errorFn
+        ? node._errorFn(err, () => {
+            const prevCleanup = node._cleanup;
+            node._cleanup = undefined;
+            prevCleanup?.();
+          })
+        : console.error(err);
+    } catch (error) {
+      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
+        haltReactivity();
+        throw error;
+      }
+    }
+    return;
+  }
   let prevStrictRead: string | false = false;
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
