@@ -105,8 +105,7 @@ describe("effect cleanup ordering through the dev component wrapper", () => {
         );
         return null;
       };
-      const call = (name: string) =>
-        wrap ? createComponent(Child, { name }) : Child({ name });
+      const call = (name: string) => (wrap ? createComponent(Child, { name }) : Child({ name }));
 
       createRoot(dispose => {
         createEffect(

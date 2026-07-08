@@ -8,13 +8,7 @@ import {
   STATUS_ERROR,
   STATUS_PENDING
 } from "./constants.js";
-import {
-  computed,
-  createEffectNode,
-  recompute,
-  setStrictRead,
-  staleValues
-} from "./core.js";
+import { computed, createEffectNode, recompute, setStrictRead, staleValues } from "./core.js";
 import { emitDiagnostic } from "./dev.js";
 import { StatusError } from "./error.js";
 import {
