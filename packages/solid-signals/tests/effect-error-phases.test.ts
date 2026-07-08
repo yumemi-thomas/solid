@@ -282,15 +282,12 @@ describe("createEffect error phases (#2839)", () => {
         if (!armed()) return "ok";
         await new Promise((_, rej) => (reject = rej));
       });
-      createEffect(
-        () => data(),
-        {
-          effect: () => {},
-          error: err => {
-            received = err;
-          }
+      createEffect(() => data(), {
+        effect: () => {},
+        error: err => {
+          received = err;
         }
-      );
+      });
     });
     flush();
     await Promise.resolve();

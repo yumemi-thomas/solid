@@ -143,7 +143,8 @@ function runEffect(node: Effect<any>): void {
   // notifyEffectStatus, and a runner queued by an earlier valueChanged in the
   // same flush must not be hijacked by a later-arriving error status.
   if (node._statusFlags & STATUS_ERROR && node._type === EFFECT_USER) {
-    const err = node._error instanceof StatusError ? (node._error.cause ?? node._error) : node._error;
+    const err =
+      node._error instanceof StatusError ? (node._error.cause ?? node._error) : node._error;
     node._prevValue = node._value;
     node._modified = false;
     try {
