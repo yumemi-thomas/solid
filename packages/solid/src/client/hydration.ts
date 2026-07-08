@@ -1023,7 +1023,7 @@ export const createOptimistic: {
  */
 export const createProjection: <T extends object = {}>(
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-  initialValue: T,
+  initialValue: Partial<T> | Store<NoFn<T>>,
   options?: ProjectionOptions
 ) => Refreshable<Store<T>> = ((...args: any[]) =>
   (_createProjection || coreProjection)(...args)) as any;

@@ -1151,7 +1151,7 @@ function createPendingProxy<T extends object>(
 
 export function createProjection<T extends object>(
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-  initialValue: Partial<T>,
+  initialValue: Partial<T> | Store<T>,
   options?: ServerSsrOptions
 ): Store<T> {
   const ctx = sharedConfig.context;
