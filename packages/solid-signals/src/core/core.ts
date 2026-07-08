@@ -527,7 +527,6 @@ export function createEffectNode<T>(
     _effectFn: effectFn,
     _errorFn: errorFn,
     _cleanup: undefined as (() => void) | undefined,
-    _cleanupRegistered: false,
     _type: type,
     _notifyStatus: notifyStatus
   } as any;

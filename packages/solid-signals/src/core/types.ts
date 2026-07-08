@@ -67,6 +67,8 @@ export interface Owner {
   id?: string;
   _config: number;
   _snapshotScope?: boolean;
+  /** Effect-returned cleanup; managed across reruns, invoked at true disposal */
+  _cleanup?: () => void;
   _disposal: Disposable | Disposable[] | null;
   _parent: Owner | null;
   _context: Record<symbol | string, unknown>;

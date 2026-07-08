@@ -265,6 +265,30 @@ it("should throw on invalid cleanup values", () => {
   resetErrorHalt();
 });
 
+it("should run the final returned cleanup at the node's own disposal", () => {
+  // Same rule as createEffect: the final cleanup fires when the tracked
+  // effect node itself disposes (unwind order), not via a hook on the parent.
+  const [$x, setX] = createSignal(0);
+  const cleanup = vi.fn();
+
+  const dispose = createRoot(dispose => {
+    createTrackedEffect(() => {
+      $x();
+      return cleanup;
+    });
+    return dispose;
+  });
+  flush();
+  expect(cleanup).toHaveBeenCalledTimes(0);
+
+  setX(1);
+  flush();
+  expect(cleanup).toHaveBeenCalledTimes(1); // previous run's cleanup
+
+  dispose();
+  expect(cleanup).toHaveBeenCalledTimes(2); // final cleanup, exactly once
+});
+
 it("should work with dynamic conditional tracking", () => {
   const [$type, setType] = createSignal<"a" | "b">("a");
   const [$valueA, setValueA] = createSignal("Alice");

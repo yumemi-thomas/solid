@@ -113,6 +113,13 @@ export function disposeChildren(node: Owner, self: boolean = false, zombie?: boo
     node._prevSibling = null;
   }
   runDisposal(node, zombie);
+  // Final effect-returned cleanup fires at true disposal, after `_disposal`
+  // to mirror rerun ordering (compute-phase teardown first, cleanup last).
+  if (self && node._cleanup) {
+    const effectCleanup = node._cleanup;
+    node._cleanup = undefined;
+    effectCleanup();
+  }
 }
 
 function runDisposal(node: Owner, zombie?: boolean): void {

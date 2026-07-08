@@ -12,13 +12,11 @@ import {
   computed,
   createEffectNode,
   recompute,
-  runWithOwner,
   setStrictRead,
   staleValues
 } from "./core.js";
 import { emitDiagnostic } from "./dev.js";
 import { StatusError } from "./error.js";
-import { cleanup } from "./owner.js";
 import {
   _hitUnhandledAsync,
   GlobalQueue,
@@ -31,8 +29,6 @@ import type { Computed, NodeOptions, Owner } from "./types.js";
 export interface Effect<T> extends Computed<T>, Owner {
   _effectFn: (val: T, prev: T | undefined) => void | (() => void);
   _errorFn?: (err: unknown, cleanup: () => void) => void;
-  _cleanup?: () => void;
-  _cleanupRegistered?: boolean;
   _modified: boolean;
   _prevValue: T | undefined;
   _type: number;
@@ -177,11 +173,8 @@ function runEffect(node: Effect<any>): void {
         `${node._name || "effect"} callback returned an invalid cleanup value. Return a cleanup function or undefined.`
       );
     }
+    // The final cleanup is invoked by disposeChildren at true disposal.
     node._cleanup = nextCleanup as (() => void) | undefined;
-    if (node._cleanup && !node._cleanupRegistered) {
-      node._cleanupRegistered = true;
-      runWithOwner(node._parent, () => cleanup(() => node._cleanup?.()));
-    }
   } catch (error) {
     node._error = new StatusError(node, error);
     node._statusFlags |= STATUS_ERROR;
@@ -199,7 +192,6 @@ function runEffect(node: Effect<any>): void {
 GlobalQueue._runEffect = runEffect as (el: Computed<unknown>) => void;
 
 export interface TrackedEffect extends Computed<void> {
-  _cleanup?: () => void;
   _modified: boolean;
   _type: number;
   _run: () => void;
@@ -255,8 +247,6 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
   };
   node._run = run;
   node._queue.enqueue(EFFECT_USER, run);
-
-  cleanup(() => node._cleanup?.());
 
   if (__DEV__ && !node._parent) {
     const message =

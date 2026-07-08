@@ -84,6 +84,56 @@ describe("devComponent metadata", () => {
   });
 });
 
+describe("effect cleanup ordering through the dev component wrapper", () => {
+  // Effect-returned cleanups fire at the effect node's structural position
+  // (unwind order). The transparent devComponent root adds a nesting level at
+  // the same position, so DFS unwind order relative to siblings is identical
+  // with and without the wrapper — dev matches prod for the idiomatic 2.0
+  // cleanup form. (Raw onCleanup in a component body still lands on the
+  // wrapper and is a known dev divergence — see #1561/#2710 assessment.)
+  // Disposal order is not a documented guarantee; this pins implementation
+  // behavior so changes to it are deliberate.
+  test("effect-returned cleanups order the same with and without the wrapper", () => {
+    const run = (wrap: boolean) => {
+      const order: string[] = [];
+      const [s] = createSignal(0);
+
+      const Child = (props: { name: string }) => {
+        createEffect(
+          () => s(),
+          () => () => order.push(`child:${props.name}`)
+        );
+        return null;
+      };
+      const call = (name: string) =>
+        wrap ? createComponent(Child, { name }) : Child({ name });
+
+      createRoot(dispose => {
+        createEffect(
+          () => s(),
+          () => () => order.push("sibling:before")
+        );
+        call("A");
+        call("B");
+        createEffect(
+          () => s(),
+          () => () => order.push("sibling:after")
+        );
+        flush();
+        dispose();
+      });
+      flush();
+      return order;
+    };
+
+    const dev = run(true);
+    const prod = run(false);
+    expect(dev).toEqual(prod);
+    // Children unwind newest-first at their structural positions.
+    expect(dev).toEqual(["sibling:after", "child:B", "child:A", "sibling:before"]);
+  });
+});
+
 describe("$DEVCOMP marking", () => {
   test("devComponent marks component function with $DEVCOMP", () => {
     createRoot(() => {

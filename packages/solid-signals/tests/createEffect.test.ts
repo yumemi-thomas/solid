@@ -602,3 +602,96 @@ describe("schedule option", () => {
     expect(received).toEqual([1]);
   });
 });
+
+// The final effect-returned cleanup fires at the effect node's own disposal
+// (unwind order, at its structural position in the owner tree), not via a
+// hook registered on the parent's disposal list. Between reruns the previous
+// cleanup still runs at the start of the next effect phase.
+//
+// NOTE: these tests pin implementation ordering so changes are deliberate —
+// disposal order is NOT a documented guarantee to end users.
+describe("final returned cleanup runs at the effect's own disposal", () => {
+  it("runs once at disposal, after per-rerun cleanups", () => {
+    const [$x, setX] = createSignal(0);
+    const cleanup = vi.fn();
+
+    const dispose = createRoot(dispose => {
+      createEffect($x, () => cleanup);
+      return dispose;
+    });
+    flush();
+    expect(cleanup).toHaveBeenCalledTimes(0);
+
+    setX(1);
+    flush();
+    expect(cleanup).toHaveBeenCalledTimes(1); // previous run's cleanup
+
+    dispose();
+    expect(cleanup).toHaveBeenCalledTimes(2); // final cleanup, exactly once
+
+    setX(2);
+    flush();
+    expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it("fires in unwind order at the effect's structural position", () => {
+    const order: string[] = [];
+    const [$x] = createSignal(0);
+
+    const dispose = createRoot(dispose => {
+      onCleanup(() => order.push("onCleanup:before"));
+      createEffect($x, () => () => order.push("effect:A"));
+      createEffect($x, () => () => order.push("effect:B"));
+      onCleanup(() => order.push("onCleanup:after"));
+      return dispose;
+    });
+    flush();
+    dispose();
+
+    // Children unwind newest-first at their positions, then the owner's own
+    // disposal list runs FIFO. Under the old parent-registration scheme the
+    // effect cleanups landed in that FIFO list instead (before, A, B, after).
+    expect(order).toEqual(["effect:B", "effect:A", "onCleanup:before", "onCleanup:after"]);
+  });
+
+  it("early individual disposal fires the cleanup once; outer disposal does not re-run it", () => {
+    const [$x] = createSignal(0);
+    const cleanup = vi.fn();
+
+    let disposeInner!: () => void;
+    const disposeOuter = createRoot(dispose => {
+      createRoot(d => {
+        disposeInner = d;
+        createEffect($x, () => cleanup);
+      });
+      return dispose;
+    });
+    flush();
+
+    disposeInner();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+
+    // Old scheme: the hook registered on the inner root's disposal list kept
+    // a closure over the effect node; here the outer teardown finds nothing.
+    disposeOuter();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("render effect final cleanup follows the same rule", () => {
+    const [$x, setX] = createSignal(0);
+    const cleanup = vi.fn();
+
+    const dispose = createRoot(dispose => {
+      createRenderEffect($x, () => cleanup);
+      return dispose;
+    });
+    flush();
+
+    setX(1);
+    flush();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+
+    dispose();
+    expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+});
