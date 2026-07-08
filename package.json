@@ -61,7 +61,7 @@
     "vitest": "^4.1.6"
   },
   "simple-git-hooks": {
-    "pre-commit": "pnpm run format"
+    "pre-commit": "sh scripts/pre-commit.sh"
   },
   "engines": {
     "pnpm": ">=11.0.0"
