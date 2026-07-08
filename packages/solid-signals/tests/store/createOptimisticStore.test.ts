@@ -1733,6 +1733,101 @@ describe("createOptimisticStore", () => {
       expect(isPending(() => state!.data)).toBe(false);
     });
 
+    // The mask is armed by effective writes (data actually changed), not by
+    // trap fires: `s => s`, `s => ({ ...s })` (replays every key with equal
+    // values), same-value property writes, and deletes of absent properties
+    // are all no-ops and must not decree the store settled or entangle it.
+    describe("ineffective optimistic writes do not arm the mask", () => {
+      async function setup() {
+        const [$id, setId] = createSignal(1);
+        let state!: { data: number };
+        let setState!: (fn: (s: { data: number }) => any) => void;
+
+        createRoot(() => {
+          [state, setState] = createOptimisticStore(
+            async (s: { data: number }) => {
+              const id = $id();
+              await Promise.resolve();
+              s.data = id * 10;
+            },
+            { data: 0 }
+          );
+          createRenderEffect(
+            () => state.data,
+            () => {}
+          );
+        });
+
+        flush();
+        await new Promise(r => setTimeout(r, 0));
+        expect(state.data).toBe(10);
+
+        // Refetch in flight: the leaf pends (live-probe baseline).
+        setId(2);
+        flush();
+        expect(isPending(() => state.data)).toBe(true);
+
+        return { state, setState };
+      }
+
+      async function finish(state: { data: number }) {
+        await new Promise(r => setTimeout(r, 0));
+        expect(state.data).toBe(20);
+        expect(isPending(() => state.data)).toBe(false);
+      }
+
+      it("pure no-op setter (s => s) leaves the refetch pending", async () => {
+        const { state, setState } = await setup();
+        setState(s => s);
+        expect(isPending(() => state.data)).toBe(true); // not masked pre-flush either
+        flush();
+        expect(isPending(() => state.data)).toBe(true);
+        await finish(state);
+      });
+
+      it("same-value property write leaves the refetch pending", async () => {
+        const { state, setState } = await setup();
+        setState(s => {
+          s.data = s.data;
+        });
+        expect(isPending(() => state.data)).toBe(true);
+        flush();
+        expect(isPending(() => state.data)).toBe(true);
+        await finish(state);
+      });
+
+      it("returned shallow copy leaves the refetch pending", async () => {
+        const { state, setState } = await setup();
+        setState(s => ({ ...s }));
+        expect(isPending(() => state.data)).toBe(true);
+        flush();
+        expect(isPending(() => state.data)).toBe(true);
+        await finish(state);
+      });
+
+      it("delete of an absent property leaves the refetch pending", async () => {
+        const { state, setState } = await setup();
+        setState(s => {
+          delete (s as any).missing;
+        });
+        expect(isPending(() => state.data)).toBe(true);
+        flush();
+        expect(isPending(() => state.data)).toBe(true);
+        await finish(state);
+      });
+
+      it("control: a real write mid-refetch masks", async () => {
+        const { state, setState } = await setup();
+        setState(s => {
+          s.data = 999;
+        });
+        flush();
+        expect(state.data).toBe(999);
+        expect(isPending(() => state.data)).toBe(false);
+        await finish(state);
+      });
+    });
+
     it("isPending preserves async optimistic store overrides", async () => {
       const [$id, setId] = createSignal(1);
       let state: { data: number };

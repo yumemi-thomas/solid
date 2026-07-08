@@ -422,11 +422,20 @@ function prepareStoreWrite(target: StoreNode, store: any, property: PropertyKey)
   }
   const useOptimistic = target[STORE_OPTIMISTIC] && !projectionWriteActive;
   const overrideKey = useOptimistic ? STORE_OPTIMISTIC_OVERRIDE : STORE_OVERRIDE;
-  if (useOptimistic) {
+  return { base, overrideKey, state };
+}
+
+/**
+ * Registers the store for transition reversion and arms the store-wide
+ * isPending mask (A21). Called only once a write is known to be effective —
+ * ineffective writes (same value, delete of an absent property) are no-ops
+ * and must not decree the store settled or entangle it.
+ */
+function armOptimisticStoreWrite(target: StoreNode, store: any): void {
+  if (target[STORE_OPTIMISTIC] && !projectionWriteActive) {
     trackOptimisticStore(store);
     maskStoreTarget(target, true);
   }
-  return { base, overrideKey, state };
 }
 
 function upsertStoreNode(
@@ -643,6 +652,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         const nextLength = isArrayIndexWrite && nextIndex > len ? nextIndex : undefined;
 
         if (prev === value && nextLength === undefined) return true;
+        armOptimisticStoreWrite(target, store);
         if (value !== undefined && value === base && nextLength === undefined)
           delete target[overrideKey]?.[property];
         else {
@@ -698,6 +708,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (writeOnly(store)) {
       untrack(() => {
         const { base, overrideKey } = prepareStoreWrite(target, store, property);
+        armOptimisticStoreWrite(target, store);
         const normalizedDescriptor =
           "value" in descriptor
             ? {
@@ -734,19 +745,16 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       untrack(() => {
         const useOptimistic = target[STORE_OPTIMISTIC] && !projectionWriteActive;
         const overrideKey = useOptimistic ? STORE_OPTIMISTIC_OVERRIDE : STORE_OVERRIDE;
-        // Track store for reversion when writing optimistically
-        if (useOptimistic) {
-          trackOptimisticStore(target[$PROXY]);
-          maskStoreTarget(target, true);
-        }
         const prevLayer = getOverlayLayer(target, property);
         const prev = prevLayer ? prevLayer[property] : target[STORE_VALUE][property];
         if (
           property in target[STORE_VALUE] ||
           (target[STORE_OVERRIDE] && property in target[STORE_OVERRIDE])
         ) {
+          armOptimisticStoreWrite(target, target[$PROXY]);
           (target[overrideKey] || (target[overrideKey] = Object.create(null)))[property] = $DELETED;
         } else if (target[overrideKey] && property in target[overrideKey]) {
+          armOptimisticStoreWrite(target, target[$PROXY]);
           delete target[overrideKey][property];
         } else return true;
         notifyStoreProperty(target, property, "delete", undefined, prev, true);
