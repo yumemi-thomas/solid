@@ -380,6 +380,16 @@ and store benchmarks flat within noise (best-of-3 isolated runs).
 
 ## 7. Decision log
 
+- 2026-07-08: two open items carried out of the retired issue-triage log:
+  (1) **queued cleanup from #2838** — the `_parentSource !== el` read-ternary
+  exemption and the `NotReadyError` catch in `read()`'s latest branch
+  survive the redesign; the suite passes without the former (probed,
+  reverted) — take both in the next code-reduction pass with proper
+  analysis. (2) **watch-item from #2850** — `unwrapStoreValue` (set-trap
+  value extraction) deliberately consults only `STORE_OVERRIDE`, not the
+  optimistic overlay: writing another store's optimistic *guesses* into a
+  target store's base data is a different semantic question than reading
+  (the guess would outlive its revert). Flag if it comes up.
 - 2026-07-07c: **A20 re-ruled — the mask** (supersedes the previous day's
   "overrides are unsettled" entry below; GabbeV model adopted after the
   #2844/#2728 discussions and the todos-example precedent). An active
