@@ -1,5 +1,6 @@
-import { setSignal } from "../core/index.js";
+import { setSignal, untrack } from "../core/index.js";
 import {
+  $DELETED,
   $PROXY,
   $TARGET,
   $TRACK,
@@ -13,8 +14,24 @@ import {
   STORE_VALUE,
   notifySelf,
   storeLookup,
+  symbolKeyedRecords,
   wrap
 } from "./store.js";
+
+// Enumerate a node record's keys. Keeps the common string-key path on the
+// `Object.keys` fast path; only records currently holding a user symbol node
+// (marked by `getNode`) pay for symbol enumeration. `$TRACK` is the only
+// internal symbol a node record can hold and callers handle it separately.
+function nodeKeys(nodes: Record<PropertyKey, any>): PropertyKey[] {
+  const keys: PropertyKey[] = Object.keys(nodes);
+  if (symbolKeyedRecords.has(nodes)) {
+    const syms = Object.getOwnPropertySymbols(nodes);
+    for (let i = 0, len = syms.length; i < len; i++) {
+      if (syms[i] !== $TRACK) keys.push(syms[i]);
+    }
+  }
+  return keys;
+}
 
 function unwrap(value: any) {
   // Primitives can't be store proxies; skip the symbol lookups (which box the
@@ -23,28 +40,56 @@ function unwrap(value: any) {
   return value[$TARGET]?.[STORE_VALUE] ?? value;
 }
 
-function getOverrideValue(value: any, override: any, key: string, optOverride?: any) {
+function getOverrideValue(value: any, override: any, key: PropertyKey, optOverride?: any) {
   if (optOverride && key in optOverride) return optOverride[key];
   return override && key in override ? override[key] : value[key];
 }
 
-function getAllKeys(value, override, next) {
-  const keys = getKeys(value, override) as string[];
-  const nextKeys = Object.keys(next);
-  // Fast path: identical key sets in identical order (the overwhelmingly
-  // common shape during reconcile) — no Set, no copies.
-  if (keys.length === nextKeys.length) {
-    let same = true;
-    for (let i = 0; i < keys.length; i++) {
-      if (keys[i] !== nextKeys[i]) {
-        same = false;
-        break;
-      }
-    }
-    if (same) return keys;
+// Append `o`'s *enumerable* own symbol keys from a pre-fetched symbol list.
+function addEnumSymbols(o: any, syms: symbol[], keys: Set<PropertyKey>) {
+  for (let i = 0, len = syms.length; i < len; i++) {
+    if (Object.prototype.propertyIsEnumerable.call(o, syms[i])) keys.add(syms[i]);
   }
-  const set = new Set(keys);
+}
+
+function getAllKeys(value, override, next) {
+  const keys = getKeys(value, override) as PropertyKey[];
+  const nextKeys = Object.keys(next);
+  // `value` can be a wrapped store (store-in-store) whose ownKeys trap tracks;
+  // mirror `getKeys` and enumerate its symbols untracked in that case.
+  const valueSyms = (value as any)[$TARGET]
+    ? untrack(() => Object.getOwnPropertySymbols(value))
+    : Object.getOwnPropertySymbols(value);
+  const nextSyms = Object.getOwnPropertySymbols(next);
+  // Symbol-free diff (the overwhelmingly common case) stays on the exact
+  // pre-#2851 path, including the identical-key-sets fast path from #2756.
+  if (valueSyms.length === 0 && nextSyms.length === 0) {
+    if (keys.length === nextKeys.length) {
+      let same = true;
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i] !== nextKeys[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return keys;
+    }
+    const set = new Set(keys);
+    for (let i = 0; i < nextKeys.length; i++) set.add(nextKeys[i]);
+    return Array.from(set);
+  }
+  // Symbol-aware diff (#2851): base symbols join the set, then override
+  // adds/deletes are re-applied so a `$DELETED` symbol stays deleted, then
+  // `next`'s keys (a key present in next is never deleted by the diff).
+  const set = new Set<PropertyKey>(keys);
+  addEnumSymbols(value, valueSyms, set);
+  if (override) {
+    for (const key of Reflect.ownKeys(override)) {
+      override[key] === $DELETED ? set.delete(key) : set.add(key);
+    }
+  }
   for (let i = 0; i < nextKeys.length; i++) set.add(nextKeys[i]);
+  addEnumSymbols(next, nextSyms, set);
   return Array.from(set);
 }
 
@@ -71,14 +116,14 @@ function keyedMatch(a: any, b: any, keyFn: (item: NonNullable<any>) => any) {
 function syncArrayNodeMembership(target: any, next: any) {
   let nodes = target[STORE_NODE];
   if (nodes) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       key in next || setSignal(nodes[key], undefined);
     }
   }
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);
@@ -229,7 +274,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
   let nodes = target[STORE_NODE];
   if (nodes) {
     const tracked = nodes[$TRACK];
-    const keys = tracked ? getAllKeys(previous, undefined, next) : Object.keys(nodes);
+    const keys = tracked ? getAllKeys(previous, undefined, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       const node = nodes[key];
@@ -251,7 +296,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
   // has
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);
@@ -381,7 +426,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
   // values
   if (nodes) {
     const tracked = nodes[$TRACK];
-    const keys = tracked ? getAllKeys(previous, override, next) : Object.keys(nodes);
+    const keys = tracked ? getAllKeys(previous, override, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       const node = nodes[key];
@@ -403,7 +448,7 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
   // has
   if ((nodes = target[STORE_HAS])) {
-    const keys = Object.keys(nodes);
+    const keys = nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
       setSignal(nodes[key], key in next);

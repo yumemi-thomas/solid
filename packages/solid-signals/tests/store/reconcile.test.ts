@@ -537,6 +537,160 @@ describe("setState with reconcile", () => {
     expect(selectedName).toBe("b");
   });
 });
+
+describe("reconcile with symbol-keyed properties", () => {
+  const META = Symbol("meta");
+
+  test("notifies an effect tracking a symbol-keyed property", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1, [META]: "old" });
+    let seen: any;
+    createRoot(() => {
+      createEffect(
+        () => state[META],
+        v => {
+          seen = v;
+        }
+      );
+    });
+    flush();
+    expect(seen).toBe("old");
+
+    setState(reconcile({ id: 1, [META]: "new" }, "id"));
+    flush();
+    expect(state[META]).toBe("new"); // value reachable, not shadowed by a stale node
+    expect(seen).toBe("new"); // subscriber notified
+  });
+
+  test("string control updates through the identical path", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1, meta: "old" });
+    let seen: any;
+    createRoot(() => {
+      createEffect(
+        () => state.meta,
+        v => {
+          seen = v;
+        }
+      );
+    });
+    flush();
+
+    setState(reconcile({ id: 1, meta: "new" }, "id"));
+    flush();
+    expect(state.meta).toBe("new");
+    expect(seen).toBe("new");
+  });
+
+  test("string and symbol keys on the same store both update", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({
+      id: 1,
+      label: "old",
+      [META]: "old"
+    });
+    let sawLabel: any, sawMeta: any;
+    createRoot(() => {
+      createEffect(
+        () => state.label,
+        v => {
+          sawLabel = v;
+        }
+      );
+      createEffect(
+        () => state[META],
+        v => {
+          sawMeta = v;
+        }
+      );
+    });
+    flush();
+
+    setState(reconcile({ id: 1, label: "new", [META]: "new" }, "id"));
+    flush();
+    expect(sawLabel).toBe("new");
+    expect(sawMeta).toBe("new");
+  });
+
+  test("a symbol key removed by reconcile notifies as undefined", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1, [META]: "old" });
+    let seen: any = "unset";
+    createRoot(() => {
+      createEffect(
+        () => state[META],
+        v => {
+          seen = v;
+        }
+      );
+    });
+    flush();
+
+    setState(reconcile({ id: 1 }, "id"));
+    flush();
+    expect(state[META]).toBeUndefined();
+    expect(seen).toBeUndefined();
+  });
+
+  test("a symbol `in` check updates when reconcile adds the key", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({ id: 1 });
+    let has: boolean | undefined;
+    createRoot(() => {
+      createEffect(
+        () => META in state,
+        v => {
+          has = v;
+        }
+      );
+    });
+    flush();
+    expect(has).toBe(false);
+
+    setState(reconcile({ id: 1, [META]: "added" }, "id"));
+    flush();
+    expect(has).toBe(true);
+  });
+
+  test("perf invariant: symbol-record mark is set while tracked and cleared once unobserved", async () => {
+    // Guards the fast-path optimization: only records that currently hold a
+    // user symbol node are enumerated for symbols on reconcile. Asserts the
+    // internal mark rather than behavior (the mark is invisible to behavior).
+    const { symbolKeyedRecords, $TARGET, STORE_NODE } = await import("../../src/store/store.js");
+    const [store] = createStore<Record<PropertyKey, any>>({ id: 1, [META]: "x" });
+    let dispose!: () => void;
+    createRoot(d => {
+      dispose = d;
+      createEffect(
+        () => store[META],
+        () => {}
+      );
+    });
+    flush();
+    const nodes = (store as any)[$TARGET][STORE_NODE];
+    expect(symbolKeyedRecords.has(nodes)).toBe(true);
+    dispose();
+    flush();
+    expect(symbolKeyedRecords.has(nodes)).toBe(false); // no monotonic leak
+  });
+
+  test("nested symbol-keyed value reconciles", () => {
+    const [state, setState] = createStore<Record<PropertyKey, any>>({
+      id: 1,
+      inner: { [META]: "old" }
+    });
+    let seen: any;
+    createRoot(() => {
+      createEffect(
+        () => state.inner[META],
+        v => {
+          seen = v;
+        }
+      );
+    });
+    flush();
+
+    setState(reconcile({ id: 1, inner: { [META]: "new" } }, "id"));
+    flush();
+    expect(state.inner[META]).toBe("new");
+    expect(seen).toBe("new");
+  });
+});
 // type tests
 
 // reconcile
