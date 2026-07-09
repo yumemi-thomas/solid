@@ -924,6 +924,69 @@ it("catches an async rejection at the inner Errored (Errored > Loading > Errored
 });
 
 /**
+ * Dimension-independent routing pins (remap removal follow-up to #2856): a sync
+ * error inside a `Loading` with NO inner `Errored` must forward on the ERROR
+ * dimension past the `Loading` to the outer `Errored` natively — the queue
+ * chain consumes only each boundary's own dimension, so no explicit
+ * notify-through rule is needed. Pinned for both the uninitialized boundary
+ * (throw in the mounting flush) and the committed one (reactive throw), the two
+ * paths the old remap intercepted.
+ */
+it("routes a sync mount error past a Loading to the outer Errored (Errored > Loading > content)", () => {
+  let rendered: unknown;
+  const dispose = createRoot(dispose => {
+    const outer = createErrorBoundary(
+      () =>
+        createLoadingBoundary(
+          () => {
+            throw new Error("boom on mount");
+          },
+          () => "loading"
+        )(),
+      () => "outer caught"
+    );
+    createRenderEffect(
+      () => (rendered = outer()),
+      () => {}
+    );
+    return dispose;
+  });
+  flush();
+  expect(rendered).toBe("outer caught");
+  dispose();
+});
+
+it("routes a reactive sync error past a committed Loading to the outer Errored (Errored > Loading > content)", () => {
+  const [$boom, setBoom] = createSignal(false);
+  let rendered: unknown;
+  const dispose = createRoot(dispose => {
+    const outer = createErrorBoundary(
+      () =>
+        createLoadingBoundary(
+          () => {
+            if ($boom()) throw new Error("boom");
+            return "ok";
+          },
+          () => "loading"
+        )(),
+      () => "outer caught"
+    );
+    createRenderEffect(
+      () => (rendered = outer()),
+      () => {}
+    );
+    return dispose;
+  });
+  flush();
+  expect(rendered).toBe("ok");
+
+  setBoom(true);
+  flush();
+  expect(rendered).toBe("outer caught");
+  dispose();
+});
+
+/**
  * #2809 hydration interaction: with snapshot capture active (as during
  * `hydrate()`), boundary computeds must not become snapshot sources. The tree no
  * longer carries the foreign PENDING flag (see above), so capture can't rely on

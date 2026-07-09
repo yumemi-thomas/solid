@@ -301,24 +301,16 @@ export class CollectionQueue extends Queue {
       }
     }
 
-    // Notify-through: a real error inside a `Loading` is not this boundary's to
-    // handle — remap it to ERROR and forward toward the `Errored` that catches it.
-    // This must run before the initialized passthrough below so the error still
-    // reaches its catcher after this boundary has committed. Guarded on the ERROR
-    // dimension still being live in `type`: an `Errored` nested below this
-    // `Loading` consumes ERROR from the mask when it catches, and remapping off
-    // the node's raw `flags` alone would resurrect that consumed error and route
-    // it past the boundary that already handled it (the Loading > Errored >
-    // content composition escape).
-    // The mirror case (pending inside an `Errored`) needs no explicit rule: the
-    // PENDING dimension survives `type &= ~collectionType` below and reaches the
-    // outer `Loading` natively, while a pending already caught by an inner
-    // `Loading` arrives here as a bare ERROR-dimension remainder and is correctly
-    // swallowed.
-    if (this._collectionType & STATUS_PENDING && type & STATUS_ERROR && flags & STATUS_ERROR) {
-      return super.notify(node, STATUS_ERROR, flags, error);
-    }
-
+    // Routing is dimension-independent: each boundary consumes only its own
+    // status dimension from the mask (`type &= ~collectionType` below) and
+    // forwards the remainder up the queue chain. An error inside a `Loading`
+    // needs no special rule — the ERROR dimension survives consumption here and
+    // reaches the `Errored` that catches it natively, and `flags & collectionType`
+    // keeps this boundary from collecting a node that isn't actually pending.
+    // Symmetrically, a pending inside an `Errored` forwards on the PENDING
+    // dimension, while a status already caught by an inner boundary arrives with
+    // its dimension consumed from the mask and is correctly not re-routed
+    // (the Loading > Errored > content composition escape, #2856).
     if (this._collectionType & STATUS_PENDING && this._initialized)
       return super.notify(node, type, flags, error);
 
