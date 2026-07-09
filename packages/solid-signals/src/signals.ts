@@ -1,4 +1,4 @@
-import type { Disposable, Refreshable } from "./core/index.js";
+import type { Disposable, Owner, Refreshable } from "./core/index.js";
 import {
   $REFRESH,
   cleanup,
