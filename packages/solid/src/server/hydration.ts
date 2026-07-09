@@ -109,7 +109,14 @@ function ssrLoadingBoundary(
     if (flushed) ctx.serialize(id, value, deferStream);
     else serializeBuffer.push([id, value, deferStream]);
   };
-  bufferedCtx._currentBoundaryId = id;
+  // Asset attribution (`_currentBoundaryId`) is NOT set here. The property is
+  // an accessor inherited from the root context over a single shared tracking
+  // slot — assigning it through `bufferedCtx` would mutate that shared state
+  // with no restore, leaking this boundary's id to later document-order
+  // siblings (a root-level lazy() after this boundary would file its module
+  // under this boundary's already-serialized asset map, #2860). Every render
+  // phase already scopes the id correctly: `runLoadingPhase` passes it to
+  // `runWithBoundaryErrorContext`, which sets and restores it around the run.
 
   function flushSerializeBuffer() {
     for (const args of serializeBuffer) ctx.serialize(args[0], args[1], args[2]);

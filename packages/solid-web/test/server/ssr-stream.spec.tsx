@@ -1423,6 +1423,63 @@ describe("SSR Streaming — Asset Discovery", () => {
     expect(html).toContain("./Inner.tsx");
     expect(html).toContain("/assets/inner.js");
   });
+
+  /**
+   * #2860: a pending Loading leaked its asset-attribution scope to later
+   * document-order siblings — the boundary set the shared boundary id at
+   * creation (through the tracking accessor inherited from the root context)
+   * and never restored it, so a root-level lazy() after the boundary filed
+   * its module under the boundary's already-serialized map instead of the
+   * root `_assets` map. The HTML and modulepreload looked fine, but the
+   * client had no usable module mapping and the island never hydrated.
+   */
+  test("root-level lazy after a pending Loading serializes into the root asset map (#2860)", async () => {
+    const manifest = {
+      "./Route.tsx": { file: "assets/route.js" },
+      "./Widget.tsx": { file: "assets/widget.js" }
+    };
+
+    const Route = () => {
+      const product = createMemo(async () => asyncValue("Trail Pack", 20));
+      return <main data-page="product">{product()}</main>;
+    };
+    const Widget = () => <aside data-widget="support">Chat with support</aside>;
+    const LazyRoute = lazy(() => asyncValue({ default: Route }), "./Route.tsx");
+    const LazyWidget = lazy(() => asyncValue({ default: Widget }), "./Widget.tsx");
+    await LazyRoute.preload!();
+    await LazyWidget.preload!();
+
+    function App() {
+      return (
+        <html>
+          <head>
+            <title>Test</title>
+          </head>
+          <body>
+            <Loading fallback={<p>Loading product...</p>}>
+              <LazyRoute />
+            </Loading>
+            {/* Root-level lazy sibling after the pending boundary. */}
+            <LazyWidget />
+          </body>
+        </html>
+      );
+    }
+
+    const html = await renderComplete(() => <App />, { manifest });
+    expect(html).toContain('data-widget="support"');
+    expect(html).toContain("/assets/widget.js");
+
+    // The sibling's module belongs to the root map...
+    const rootAssets = html.match(/_\$HY\.r\["_assets"\]=[^;]*/g) || [];
+    expect(rootAssets.some(s => s.includes("./Widget.tsx"))).toBe(true);
+    // ...and not to the boundary's map.
+    const boundaryAssets = html.match(/_\$HY\.r\["[^"]+_assets"\]=[^;]*/g) || [];
+    for (const map of boundaryAssets) {
+      if (map.startsWith('_$HY.r["_assets"]')) continue;
+      expect(map).not.toContain("./Widget.tsx");
+    }
+  });
 });
 
 // ============================================================================
