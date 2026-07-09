@@ -388,6 +388,10 @@ interface ServerComputation<T = any> {
   value: T;
   compute: ComputeFunction<any, T>;
   error: unknown;
+  // Error presence is a flag, not a truthiness test on `error` — a rejection
+  // with a falsy value (undefined, null, "", 0, false) is still a rejection
+  // and must throw on read like any other (#2857).
+  errored: boolean;
   computed: boolean;
   disposed: boolean;
 }
@@ -449,6 +453,14 @@ function createDeferredPromise<T>(): DeferredPromise<T> {
       rejectPromise(error);
     }
   };
+}
+
+// Object-thenable detection (Promises/A+ shape) — mirrors the client async
+// runtime (`isThenable` in @solidjs/signals core/async.ts). Custom thenables,
+// cache wrappers, and cross-realm promises must take the async path like
+// native Promises (#2858).
+function isThenable<T>(value: any): value is PromiseLike<T> {
+  return value != null && typeof value === "object" && typeof value.then === "function";
 }
 
 function subscribePendingRetry(error: any, retry: () => void): boolean {
@@ -567,6 +579,7 @@ export function createMemo<T>(
     value: undefined as any,
     compute: compute as ComputeFunction<any, T>,
     error: undefined,
+    errored: false,
     computed: false,
     disposed: false
   };
@@ -584,6 +597,7 @@ export function createMemo<T>(
       runWithOwner(owner, () => runWithObserver(comp, () => comp.compute(comp.value)));
     try {
       comp.error = undefined;
+      comp.errored = false;
       const result = run();
       comp.computed = true;
       processResult(comp, result, owner, ctx, options?.deferStream, options?.ssrSource, run);
@@ -592,6 +606,7 @@ export function createMemo<T>(
         subscribePendingRetry(err, update);
       }
       comp.error = err;
+      comp.errored = true;
       comp.computed = true;
     }
   }
@@ -609,7 +624,7 @@ export function createMemo<T>(
     if (!comp.computed) {
       update();
     }
-    if (comp.error) {
+    if (comp.errored) {
       throw comp.error;
     }
     return comp.value;
@@ -652,6 +667,8 @@ function createSyncMemo<T>(
   const owner = createOwner();
   let value: T | undefined;
   let error: unknown;
+  // Presence flag for `error` — a falsy thrown value is still an error (#2857).
+  let errored = false;
   // True iff the next read should return cached state (success or real error).
   // Stays false while `value` reflects a previous successful run AND a later
   // pull is needed (initial: never run; after `NotReadyError`: needs retry).
@@ -676,11 +693,13 @@ function createSyncMemo<T>(
     try {
       value = compute(value) as T;
       error = undefined;
+      errored = false;
       cached = true;
       return value;
     } catch (err) {
       if (err instanceof NotReadyError) throw err; // don't latch — engine re-pulls
       error = err;
+      errored = true;
       cached = true;
       throw err;
     } finally {
@@ -698,7 +717,7 @@ function createSyncMemo<T>(
 
   return (() => {
     if (cached) {
-      if (error !== undefined) throw error;
+      if (errored) throw error;
       return value;
     }
     return pull();
@@ -798,14 +817,21 @@ function processResult<T>(
   const id = owner.id;
   const noHydrate = getContext(NoHydrateContext, owner);
 
-  if (result instanceof Promise) {
+  // Async-iterable takes precedence over thenable, mirroring the client
+  // runtime's detection order (`handleAsync` in @solidjs/signals core/async.ts).
+  if (
+    typeof (result as any)?.[Symbol.asyncIterator] !== "function" &&
+    isThenable<T>(result)
+  ) {
     if ((result as any).s === 1) {
       comp.value = (result as any).v;
       comp.error = undefined;
+      comp.errored = false;
       return;
     }
     if ((result as any).s === 2) {
       comp.error = (result as any).v;
+      comp.errored = true;
       return;
     }
     const deferred = createDeferredPromise<T>();
@@ -820,16 +846,19 @@ function processResult<T>(
         (result as any).v = value;
         comp.value = value;
         comp.error = undefined;
+        comp.errored = false;
         return value;
       },
       (error: any) => {
         (result as any).s = 2;
         (result as any).v = error;
         comp.error = error;
+        comp.errored = true;
       },
       () => comp.disposed
     );
     comp.error = new NotReadyError(deferred.promise);
+    comp.errored = true;
     return;
   }
 
@@ -859,16 +888,19 @@ function processResult<T>(
         (value: T) => {
           comp.value = value;
           comp.error = undefined;
+          comp.errored = false;
           return value;
         },
         (error: any) => {
           comp.error = error;
+          comp.errored = true;
         },
         () => comp.disposed
       );
       if (ctx?.async && ctx.serialize && id && !noHydrate)
         ctx.serialize(id, deferred.promise, deferStream);
       comp.error = new NotReadyError(deferred.promise);
+      comp.errored = true;
     } else {
       // Full streaming ("server" or default): eagerly start the first iteration.
       // Tapped wrapper replays first value, then delegates to iter for the rest.
@@ -902,10 +934,12 @@ function processResult<T>(
             comp.value = resolved.value;
           }
           comp.error = undefined;
+          comp.errored = false;
           return undefined;
         },
         (error: any) => {
           comp.error = error;
+          comp.errored = true;
         },
         () => comp.disposed
       );
@@ -933,6 +967,7 @@ function processResult<T>(
         ctx.serialize(id, tapped, deferStream);
       }
       comp.error = new NotReadyError(deferred.promise);
+      comp.errored = true;
     }
     return;
   }
@@ -967,6 +1002,7 @@ function serverEffect<T>(
     value: undefined as any,
     compute: compute as ComputeFunction<any, T>,
     error: undefined,
+    errored: false,
     computed: true,
     disposed: false
   };
@@ -1030,6 +1066,7 @@ function serverEffect<T>(
     // `createErrorBoundary` / `<Errored>` can catch instead of the error
     // vanishing into the void (#2777).
     comp.error = err;
+    comp.errored = true;
     throw err;
   }
 }
@@ -1327,7 +1364,7 @@ export function createProjection<T extends object>(
     }
   }
 
-  if (result instanceof Promise) {
+  if (isThenable<T>(result)) {
     const deferred = createDeferredPromise<T>();
     const [pending, markReady] = createPendingProxy(state, deferred.promise);
     settleServerAsync(

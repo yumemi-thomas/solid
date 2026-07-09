@@ -3860,3 +3860,193 @@ describe("lazy() single-render in Loading", () => {
     expect([...fragmentResults.values()][0]).toContain("details");
   });
 });
+
+/**
+ * #2857: an async memo that rejects with a falsy value (`undefined`, `null`,
+ * `""`, `0`, `false`) was treated as resolved by the SSR read path — the memo
+ * read gated on `if (comp.error)` truthiness, so the success branch rendered
+ * while the serializer (which tracks rejection as a state, not a value) still
+ * shipped "rejected" to the client. Error presence must be a flag, not a
+ * truthiness test on the error value.
+ */
+describe("falsy async rejections render the Errored fallback (#2857)", () => {
+  let savedContext: any;
+  beforeEach(() => {
+    savedContext = sharedConfig.context;
+  });
+  afterEach(() => {
+    sharedConfig.context = savedContext;
+  });
+
+  test.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["empty string", ""],
+    ["zero", 0],
+    ["false", false]
+  ])("rejection with %s is caught by Errored inside Loading", async (_label, falsyError) => {
+    const { context, fragmentResults, fragmentErrors } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const d = deferred<string>();
+
+    createRoot(
+      () => {
+        Loading({
+          fallback: "Loading...",
+          get children() {
+            return Errored({
+              fallback: "Error caught!",
+              get children() {
+                const data = createMemo(() => d.promise);
+                return ssr(["<div>", "</div>"], () => data()) as any;
+              }
+            }) as any;
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    d.reject(falsyError);
+    await tick();
+
+    expect(fragmentResults.size).toBe(1);
+    expect([...fragmentResults.values()][0]).toBe("Error caught!");
+    expect(fragmentErrors.size).toBe(0);
+  });
+
+  test("truthy Error control still renders the fallback", async () => {
+    const { context, fragmentResults } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const d = deferred<string>();
+
+    createRoot(
+      () => {
+        Loading({
+          fallback: "Loading...",
+          get children() {
+            return Errored({
+              fallback: "Error caught!",
+              get children() {
+                const data = createMemo(() => d.promise);
+                return ssr(["<div>", "</div>"], () => data()) as any;
+              }
+            }) as any;
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    d.reject(new Error("boom"));
+    await tick();
+
+    expect(fragmentResults.size).toBe(1);
+    expect([...fragmentResults.values()][0]).toBe("Error caught!");
+  });
+});
+
+/**
+ * #2858: the server async detection was `result instanceof Promise`, so a
+ * non-Promise thenable (PromiseLike) returned from a memo was stored as a
+ * sync render value and skipped by the renderer. The client async path
+ * accepts PromiseLike (object-thenable, Promises/A+ shape) — SSR must match:
+ * treat thenables as async sources under a boundary, and surface the same
+ * pending state (NotReadyError) without one.
+ */
+describe("non-Promise thenables are treated as async sources (#2858)", () => {
+  let savedContext: any;
+  beforeEach(() => {
+    savedContext = sharedConfig.context;
+  });
+  afterEach(() => {
+    sharedConfig.context = savedContext;
+  });
+
+  function thenable<T>(promise: Promise<T>): PromiseLike<T> {
+    return {
+      then(onFulfilled: any, onRejected: any) {
+        return promise.then(onFulfilled, onRejected);
+      }
+    };
+  }
+
+  test("thenable under Loading resolves through hole re-execution", async () => {
+    const { context, fragmentResults } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const d = deferred<string>();
+    let result: any;
+
+    createRoot(
+      () => {
+        result = Loading({
+          fallback: "Loading...",
+          get children() {
+            const data = createMemo(() => thenable(d.promise));
+            return ssr(["<div>", "</div>"], () => data()) as any;
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    expect(result().t[0]).toContain("Loading...");
+
+    d.resolve("ThenableValue");
+    await tick();
+
+    expect(fragmentResults.size).toBe(1);
+    expect([...fragmentResults.values()][0]).toBe("<div>ThenableValue</div>");
+  });
+
+  test("thenable rejection routes to Errored inside Loading", async () => {
+    const { context, fragmentResults } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const d = deferred<string>();
+
+    createRoot(
+      () => {
+        Loading({
+          fallback: "Loading...",
+          get children() {
+            return Errored({
+              fallback: "Error caught!",
+              get children() {
+                const data = createMemo(() => thenable(d.promise));
+                return ssr(["<div>", "</div>"], () => data()) as any;
+              }
+            }) as any;
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    d.reject(new Error("thenable boom"));
+    await tick();
+
+    expect(fragmentResults.size).toBe(1);
+    expect([...fragmentResults.values()][0]).toBe("Error caught!");
+  });
+
+  test("thenable read without a boundary throws NotReadyError like a native Promise", () => {
+    const { context } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const d = deferred<string>();
+
+    createRoot(
+      () => {
+        const fromPromise = createMemo(() => d.promise);
+        const fromThenable = createMemo(() => thenable(d.promise));
+        expect(fromPromise).toThrowError(NotReadyError);
+        expect(fromThenable).toThrowError(NotReadyError);
+      },
+      { id: "t" }
+    );
+  });
+});
