@@ -570,11 +570,22 @@ export function createReaction(
   let cl: (() => void) | undefined = undefined;
   cleanup(() => cl?.());
   const owner = getOwner();
+  // The currently armed effect node. `track()` replaces the previous
+  // subscription (1.x semantics): without disposing the superseded arm, its
+  // sources stayed live (firing the callback for replaced dependencies), each
+  // accumulated arm delivered its own fire, and un-fired arms leaked as live
+  // effect nodes until the owner disposed (#2861).
+  let arm: Owner | undefined;
   return (tracking: () => void) => {
+    if (arm) {
+      dispose(arm as any);
+      arm = undefined;
+    }
     runWithOwner(owner!, () => {
       effect(
-        () => (tracking(), getOwner()!),
+        () => (tracking(), (arm = getOwner()!)),
         node => {
+          arm = undefined;
           cl?.();
           const cleanup = ((effectFn as any).effect || effectFn)?.();
           if (__DEV__ && cleanup !== undefined && typeof cleanup !== "function") {
