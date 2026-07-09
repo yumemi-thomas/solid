@@ -80,7 +80,7 @@ export function lazy<T extends Component<any>>(
   fn: () => Promise<{ default: T }>,
   moduleUrl?: string
 ): T & { preload: () => Promise<{ default: T }>; moduleUrl?: string } {
-  let p: Promise<{ default: T }> & { v?: T; error?: unknown };
+  let p: Promise<{ default: T }> & { v?: T; error?: unknown; errored?: boolean };
   let load = () => {
     if (!p) {
       p = fn() as any;
@@ -93,8 +93,10 @@ export function lazy<T extends Component<any>>(
           // `<Errored>` instead of leaving p.v `undefined` forever (which
           // would keep throwing `NotReadyError` and look like the module is
           // still loading) and instead of leaking the rejection as a
-          // process-level `unhandledRejection` (#2780).
+          // process-level `unhandledRejection` (#2780). Presence is a flag —
+          // a falsy rejection value is still a rejection (#2857).
           p.error = err;
+          p.errored = true;
         }
       );
     }
@@ -120,13 +122,19 @@ export function lazy<T extends Component<any>>(
     }
     load();
     const ctx = sharedConfig.context;
-    if (!ctx?.registerAsset || !ctx.resolveAssets || !moduleUrl) return;
-    const assets = ctx.resolveAssets(moduleUrl);
-    if (assets) {
-      for (let i = 0; i < assets.css.length; i++) ctx.registerAsset("style", assets.css[i]);
-      if (!noHydrate) {
-        for (let i = 0; i < assets.js.length; i++) ctx.registerAsset("module", assets.js[i]);
-        ctx.registerModule?.(moduleUrl, assets.js[0]);
+    // Asset registration is separate from rendering: the moduleUrl/manifest
+    // guards above are waived for no-hydrate zones (nothing hydrates, so no
+    // assets are needed), and those zones must still render their resolved
+    // module. Fusing this into an early return dropped the content entirely
+    // for exactly the waived cases (#2859).
+    if (ctx?.registerAsset && ctx.resolveAssets && moduleUrl) {
+      const assets = ctx.resolveAssets(moduleUrl);
+      if (assets) {
+        for (let i = 0; i < assets.css.length; i++) ctx.registerAsset("style", assets.css[i]);
+        if (!noHydrate) {
+          for (let i = 0; i < assets.js.length; i++) ctx.registerAsset("module", assets.js[i]);
+          ctx.registerModule?.(moduleUrl, assets.js[0]);
+        }
       }
     }
     if (ctx?.async) {
@@ -145,7 +153,7 @@ export function lazy<T extends Component<any>>(
     }
     return createMemo(
       () => {
-        if (p.error) throw p.error;
+        if (p.errored) throw p.error;
         if (!p.v) throw new NotReadyError(p);
         return p.v(props);
       },

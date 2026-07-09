@@ -522,6 +522,92 @@ describe("NoHydration / Hydration (server)", () => {
     }).toThrow("lazy() used in SSR without a moduleUrl");
   });
 
+  /**
+   * #2859: the moduleUrl/manifest guards are explicitly waived for no-hydrate
+   * zones (nothing hydrates, so no assets are needed) — but the early return
+   * that gated asset registration also gated the render memo, so exactly those
+   * waived cases rendered nothing: the component returned `undefined` and the
+   * lazy content silently vanished from the SSR output. Asset registration and
+   * rendering must be decoupled — the memo is always created.
+   */
+  test("lazy() inside NoHydration without moduleUrl renders its content (#2859)", async () => {
+    const { context } = createMockSSRContext({ async: true });
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "static lazy content" as any }));
+    await LazyComp.preload();
+
+    let result: any;
+    createRoot(
+      () => {
+        NoHydration({
+          get children() {
+            result = (LazyComp as any)({});
+            return "x";
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    expect(typeof result).toBe("function");
+    expect(result()).toBe("static lazy content");
+  });
+
+  test("lazy() inside NoHydration with moduleUrl but no manifest renders its content (#2859)", async () => {
+    const { context } = createMockSSRContext({ async: true });
+    delete context.resolveAssets;
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(
+      () => Promise.resolve({ default: () => "static lazy content" as any }),
+      "lazy-module.js"
+    );
+    await LazyComp.preload();
+
+    let result: any;
+    createRoot(
+      () => {
+        NoHydration({
+          get children() {
+            result = (LazyComp as any)({});
+            return "x";
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    expect(typeof result).toBe("function");
+    expect(result()).toBe("static lazy content");
+  });
+
+  test("lazy() inside NoHydration is pending (NotReadyError) until the module resolves (#2859)", () => {
+    const { context } = createMockSSRContext({ async: true });
+    sharedConfig.context = context;
+
+    const d: { resolve?: (mod: any) => void } = {};
+    const LazyComp = lazy(
+      () => new Promise<{ default: any }>(res => (d.resolve = res)) as any
+    );
+
+    let result: any;
+    createRoot(
+      () => {
+        NoHydration({
+          get children() {
+            result = (LazyComp as any)({});
+            return "x";
+          }
+        });
+      },
+      { id: "t" }
+    );
+
+    expect(typeof result).toBe("function");
+    expect(result).toThrow();
+  });
+
   test("lazy() exposes moduleUrl property", () => {
     const LazyComp = lazy(
       () => Promise.resolve({ default: () => "content" }),
