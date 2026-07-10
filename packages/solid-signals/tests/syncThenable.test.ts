@@ -1,5 +1,6 @@
 import {
   createErrorBoundary,
+  createLoadingBoundary,
   createMemo,
   createRenderEffect,
   createRoot,
@@ -19,6 +20,18 @@ function syncThenable<T>(value: T): PromiseLike<T> {
       onfulfilled?: ((v: T) => R1 | PromiseLike<R1>) | null
     ): PromiseLike<R1 | R2> {
       return syncThenable(onfulfilled ? onfulfilled(value) : (value as any));
+    }
+  };
+}
+
+function syncRejectingThenable<T = never>(reason: unknown): PromiseLike<T> {
+  return {
+    then<R1 = T, R2 = never>(
+      _onfulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
+      onrejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null
+    ): PromiseLike<R1 | R2> {
+      onrejected?.(reason);
+      return syncThenable(undefined as R1 | R2);
     }
   };
 }
@@ -46,6 +59,37 @@ function controlledThenable<T>() {
 
 function doneResult<T>(): IteratorResult<T> {
   return { done: true, value: undefined } as IteratorResult<T>;
+}
+
+function observeAsyncIterable<T>(iterable: AsyncIterable<T>) {
+  const state = {
+    value: "not-read" as unknown,
+    error: "not-called" as unknown,
+    errorCalled: false
+  };
+
+  createRoot(() => {
+    const value = createMemo(() => iterable);
+    const boundary = createErrorBoundary(
+      () =>
+        createLoadingBoundary(
+          () => value(),
+          () => "loading"
+        )(),
+      caught => {
+        state.errorCalled = true;
+        state.error = caught();
+        return "errored";
+      }
+    );
+    createRenderEffect(
+      () => (state.value = boundary()),
+      () => {}
+    );
+  });
+
+  flush();
+  return state;
 }
 
 describe("sync thenable support", () => {
@@ -94,18 +138,6 @@ describe("sync thenable support", () => {
     // A thenable (e.g. a cache that already knows it failed) that invokes its
     // rejection handler synchronously during `.then()` must settle the error,
     // not stay stuck on the pending path.
-    function syncRejectingThenable(reason: unknown): PromiseLike<never> {
-      return {
-        then<R1, R2 = never>(
-          _onfulfilled?: ((v: never) => R1 | PromiseLike<R1>) | null,
-          onrejected?: ((reason: any) => R2 | PromiseLike<R2>) | null
-        ): PromiseLike<R1 | R2> {
-          onrejected?.(reason);
-          return syncThenable(undefined as any);
-        }
-      };
-    }
-
     const result = createRoot(() =>
       createErrorBoundary(
         () => {
@@ -147,6 +179,123 @@ describe("sync thenable support", () => {
 });
 
 describe("sync async iterator support", () => {
+  it("should settle an async iterator that completes without yielding", async () => {
+    const state = observeAsyncIterable((async function* () {})());
+    expect(state.value).toBe("loading");
+
+    await Promise.resolve();
+    flush();
+    expect(state.value).toBe(undefined);
+  });
+
+  it("should preserve the last value when an async iterator completes", async () => {
+    const state = observeAsyncIterable(
+      (async function* () {
+        yield 1;
+        yield 2;
+      })()
+    );
+    expect(state.value).toBe("loading");
+
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    flush();
+    expect(state.value).toBe(2);
+  });
+
+  it("should preserve a synchronous yield when completion is asynchronous", async () => {
+    const completion = controlledThenable<IteratorResult<number>>();
+    let nextCalls = 0;
+    const iterator = {
+      next() {
+        nextCalls++;
+        return nextCalls === 1 ? syncThenable({ value: 1, done: false }) : completion;
+      },
+      [Symbol.asyncIterator]() {
+        return this as any;
+      }
+    } as AsyncIterable<number>;
+    const state = observeAsyncIterable(iterator);
+    expect(state.value).toBe(1);
+    completion.resolve(doneResult());
+    await Promise.resolve();
+    flush();
+    expect(state.value).toBe(1);
+  });
+
+  it("should surface an async iterator rejection delivered synchronously", () => {
+    const error = new Error("iterator failed");
+    const iterator = {
+      next: () => syncRejectingThenable<IteratorResult<number>>(error),
+      [Symbol.asyncIterator]() {
+        return this as any;
+      }
+    } as AsyncIterable<number>;
+    const state = observeAsyncIterable(iterator);
+    expect(state.value).toBe("errored");
+    expect(state.error).toBe(error);
+  });
+
+  it("should surface a synchronous rejection after synchronously yielded values", () => {
+    const error = new Error("iterator failed during initial drain");
+    let nextCalls = 0;
+    const iterator = {
+      next() {
+        nextCalls++;
+        return nextCalls === 1
+          ? syncThenable({ value: 1, done: false })
+          : syncRejectingThenable<IteratorResult<number>>(error);
+      },
+      [Symbol.asyncIterator]() {
+        return this as any;
+      }
+    } as AsyncIterable<number>;
+    const state = observeAsyncIterable(iterator);
+    expect(state.value).toBe("errored");
+    expect(state.error).toBe(error);
+  });
+
+  it("should surface a nullish synchronous iterator rejection", () => {
+    // Reachability only: the exact err() identity for nullish rejections
+    // (undefined, not the internal wrapper) is the #2866 unwrap contract.
+    const iterator = {
+      next: () => syncRejectingThenable<IteratorResult<number>>(undefined),
+      [Symbol.asyncIterator]() {
+        return this as any;
+      }
+    } as AsyncIterable<number>;
+    const state = observeAsyncIterable(iterator);
+    expect(state.value).toBe("errored");
+    expect(state.errorCalled).toBe(true);
+  });
+
+  it("should surface a synchronous rejection after an asynchronous yield", async () => {
+    const error = new Error("iterator failed after yield");
+    let resolveFirst!: (result: IteratorResult<number>) => void;
+    let nextCalls = 0;
+    const iterator = {
+      next() {
+        nextCalls++;
+        if (nextCalls === 1) {
+          return new Promise<IteratorResult<number>>(resolve => {
+            resolveFirst = resolve;
+          });
+        }
+        return syncRejectingThenable<IteratorResult<number>>(error);
+      },
+      [Symbol.asyncIterator]() {
+        return this as any;
+      }
+    } as AsyncIterable<number>;
+    const state = observeAsyncIterable(iterator);
+    expect(state.value).toBe("loading");
+
+    resolveFirst({ value: 1, done: false });
+    await Promise.resolve();
+    flush();
+    expect(state.value).toBe("errored");
+    expect(state.error).toBe(error);
+  });
+
   it("should drain sync values from async iterator", () => {
     const values = [1, 2, 3];
     const syncIterator = {

@@ -317,8 +317,9 @@ export function handleAsync<T>(
 
   if (iterator) {
     const it = (result as AsyncIterable<T>)[Symbol.asyncIterator]();
-    let hadSyncValue = false;
+    let hadValue = false;
     let completed = false;
+    let initialRead = true;
 
     cleanup(() => {
       if (completed) return;
@@ -331,7 +332,9 @@ export function handleAsync<T>(
 
     const iterate = (): boolean => {
       let syncResult: IteratorResult<T>,
+        syncError: unknown,
         resolved = false,
+        rejected = false,
         isSync = true;
       it.next().then(
         r => {
@@ -341,31 +344,50 @@ export function handleAsync<T>(
             if (r.done) completed = true;
           } else if (el._inFlight !== result) {
             return;
-          } else if (!r.done) asyncWrite(r.value, iterate);
-          else {
+          } else if (!r.done) {
+            hadValue = true;
+            asyncWrite(r.value, iterate);
+          } else {
             completed = true;
-            schedule();
-            flush();
+            if (hadValue) {
+              schedule();
+              flush();
+            } else {
+              // Empty completion settles like the immediately-done sync path.
+              asyncWrite(undefined as T);
+            }
           }
         },
         e => {
-          if (!isSync && el._inFlight === result) {
+          if (isSync) {
+            syncError = e;
+            rejected = true;
+          } else if (el._inFlight === result) {
             completed = true;
             handleError(e);
           }
         }
       );
       isSync = false;
+      if (rejected) {
+        // Match the promise branch, but only rethrow during the initial read.
+        completed = true;
+        handleError(syncError);
+        if (initialRead) throw syncError;
+        return true;
+      }
       if (resolved && !syncResult!.done) {
         syncValue = syncResult!.value;
-        hadSyncValue = true;
+        hadValue = true;
         return iterate();
       }
       return resolved && syncResult!.done;
     };
 
     const immediatelyDone = iterate();
-    if (!hadSyncValue && !immediatelyDone) {
+    // Later iterate() calls run from asyncWrite, where rethrowing would be unhandled.
+    initialRead = false;
+    if (!hadValue && !immediatelyDone) {
       globalQueue.initTransition(resolveTransition(el as any));
       throw new NotReadyError(context!);
     }
