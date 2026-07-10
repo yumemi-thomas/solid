@@ -10,7 +10,7 @@ import {
 } from "./constants.js";
 import { computed, createEffectNode, recompute, setStrictRead, staleValues } from "./core.js";
 import { emitDiagnostic } from "./dev.js";
-import { StatusError } from "./error.js";
+import { StatusError, unwrapStatusError } from "./error.js";
 import {
   _hitUnhandledAsync,
   GlobalQueue,
@@ -133,8 +133,7 @@ function runEffect(node: Effect<any>): void {
   // notifyEffectStatus, and a runner queued by an earlier valueChanged in the
   // same flush must not be hijacked by a later-arriving error status.
   if (node._statusFlags & STATUS_ERROR && node._type === EFFECT_USER) {
-    const err =
-      node._error instanceof StatusError ? (node._error.cause ?? node._error) : node._error;
+    const err = unwrapStatusError(node._error);
     node._prevValue = node._value;
     node._modified = false;
     try {
