@@ -1,5 +1,32 @@
 # solid-js
 
+## 2.0.0-beta.17
+
+### Patch Changes
+
+- 928ba28: Fixed a pending `<Loading>` leaking its asset-attribution scope to later document-order siblings during streaming SSR (#2860). The boundary assigned `_currentBoundaryId` on its buffered context at creation, but the property is an accessor inherited from the root context over shared tracking state — the assignment mutated the global boundary id with no restore, so a root-level `lazy()` after the boundary filed its module under the boundary's already-serialized asset map instead of the root `_assets` map, and that island never hydrated. The creation-time assignment is removed; every render phase already scopes the id correctly via `runWithBoundaryErrorContext`, which sets and restores it around the run.
+- 25a5685: Unlink disposed SSR owners from their parent's child chain before pooling. The pool cleared `_parent`/`_nextSibling` on the recycled node, but the parent's `_firstChild`/sibling chain still referenced it — so once the pool reused the owner in a different tree, disposing the old parent walked its stale chain and disposed live owners in the new tree. Boundary retries (`self=false`) are unaffected; subtree disposal still unlinks each child in O(1).
+- fe9ed90: Redesign SSR asset handling for `lazy()` around hydration ids instead of module specifiers.
+  - The server now keys the streamed module map by the hydration id of the lazy render memo, and the client looks preloaded modules up by computing the same id positionally. Module identity no longer needs to exist client-side, so bundler `moduleUrl` injection is only required on the server.
+  - New glob support: when a `lazy()` callsite has no static import specifier (e.g. `lazy(globModules[path])` over `import.meta.glob`), the server defers asset resolution until the import settles and reads the module's bundler-injected `$$moduleUrl` export. Assets still attribute to the boundary that rendered the component. Rendering without any resolvable identity now warns (late client load) instead of throwing.
+  - `Component.moduleUrl` on the server is now a getter that resolves through the active request's asset manifest, returning the client-loadable entry URL (e.g. `/assets/About-abc123.js`) for stamping into markup (islands and similar). Reading it during SSR also registers modulepreload hints for the module's chunks — the only preload signal for lazy components under `NoHydration`. Outside a request context it returns the raw specifier.
+
+- 4cc6113: Fixed `lazy()` inside `<NoHydration>` silently rendering nothing during SSR (#2859). The moduleUrl/manifest guards are intentionally waived for no-hydrate zones, but the early return that gated asset registration also gated the render memo — so exactly those waived cases returned `undefined` and the lazy content vanished from the output with no error. Asset registration is now decoupled from rendering: the render memo is always created, and async SSR waits for the module as usual. Also fixed the lazy module rejection check treating a falsy rejection value as "still loading" (same class as #2857).
+- 9b883e0: Fixed two SSR async-source regressions from 1.x (#2857, #2858):
+  - A rejection with a falsy value (`undefined`, `null`, `""`, `0`, `false`) was treated as resolved by the server memo read path — the HTML rendered the success branch while the hydration payload serialized the same source as rejected. Error presence on server computations is now tracked as a flag instead of a truthiness test on the error value, so falsy rejections render the `Errored` fallback exactly like truthy ones.
+  - Server async detection only recognized native `Promise` instances, so a non-Promise thenable (PromiseLike) returned from a memo was stored as a sync render value and skipped by the renderer with "Unrecognized value". SSR now uses the same object-thenable detection as the client async runtime (async-iterable takes precedence, matching client order): thenables under `<Loading>` are awaited and rendered, and without a boundary they surface the same missing-boundary diagnostic as a native `Promise`.
+
+- Updated dependencies [ef4d53e]
+- Updated dependencies [bcb0ca6]
+- Updated dependencies [fda28a9]
+- Updated dependencies [286fa3f]
+- Updated dependencies [3e18b8d]
+- Updated dependencies [08b88fb]
+- Updated dependencies [40d13a9]
+- Updated dependencies [b9cefee]
+- Updated dependencies [c3b8314]
+  - @solidjs/signals@2.0.0-beta.17
+
 ## 2.0.0-beta.16
 
 ### Patch Changes
