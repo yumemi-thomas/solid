@@ -39,6 +39,11 @@ export class StatusError extends Error {
   }
 }
 
+/** Return the user's error from an internal status wrapper. */
+export function unwrapStatusError(error: unknown): unknown {
+  return error instanceof StatusError ? error.cause : error;
+}
+
 export class NoOwnerError extends Error {
   constructor() {
     super(__DEV__ ? "Context can only be accessed under a reactive root." : "");

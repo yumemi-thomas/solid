@@ -1,5 +1,5 @@
 import { recompute } from "./core/core.js";
-import type { StatusError } from "./core/error.js";
+import { unwrapStatusError } from "./core/error.js";
 import {
   cleanup,
   computed,
@@ -322,7 +322,7 @@ export class CollectionQueue extends Queue {
         this._sources.add(source);
         if (wasEmpty) setSignal(this._disabled, true);
         if (this._collectionType & STATUS_ERROR) {
-          setSignal(this._error!, (source._error as StatusError)?.cause ?? source._error);
+          setSignal(this._error!, unwrapStatusError(source._error));
         }
       }
     }
