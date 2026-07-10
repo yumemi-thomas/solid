@@ -166,6 +166,10 @@ export function getNextChildId(owner: Owner): string {
   return nextChildIdFor(owner as unknown as SSROwner, true);
 }
 
+export function peekNextChildId(owner: Owner): string {
+  return nextChildIdFor(owner as unknown as SSROwner, false);
+}
+
 export function createOwner(options?: { id?: string; transparent?: boolean }): Owner {
   const parent = currentOwner;
   const transparent = options?.transparent ?? false;
@@ -819,10 +823,7 @@ function processResult<T>(
 
   // Async-iterable takes precedence over thenable, mirroring the client
   // runtime's detection order (`handleAsync` in @solidjs/signals core/async.ts).
-  if (
-    typeof (result as any)?.[Symbol.asyncIterator] !== "function" &&
-    isThenable<T>(result)
-  ) {
+  if (typeof (result as any)?.[Symbol.asyncIterator] !== "function" && isThenable<T>(result)) {
     if ((result as any).s === 1) {
       comp.value = (result as any).v;
       comp.error = undefined;

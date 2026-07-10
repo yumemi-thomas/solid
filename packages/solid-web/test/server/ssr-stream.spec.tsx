@@ -1330,13 +1330,14 @@ describe("SSR Streaming — Asset Discovery", () => {
 
     const html = await renderComplete(() => <App />, { manifest });
     expect(html).toContain("_assets");
-    expect(html).toContain("./Comp.tsx");
     expect(html).toContain("/assets/comp.js");
     const scripts = html.match(/<script[^>]*>[\s\S]*?<\/script>/g) || [];
     const assetScript = scripts.find(s => s.includes("_assets"));
     expect(assetScript).toBeDefined();
-    expect(assetScript).toContain("./Comp.tsx");
-    expect(assetScript).toContain("/assets/comp.js");
+    // The mapping is keyed by the lazy render memo's hydration id — the raw
+    // module specifier must not leak into the serialized payload.
+    expect(assetScript).not.toContain("./Comp.tsx");
+    expect(assetScript).toMatch(/\{[^{}]*:"\/assets\/comp\.js"\}/);
     expect(assetScript).not.toContain("/assets/dep.js");
   });
 
@@ -1420,8 +1421,8 @@ describe("SSR Streaming — Asset Discovery", () => {
     expect(html).toContain("FastData");
     expect(html).toContain("InnerContent");
     expect(html).toContain("_assets");
-    expect(html).toContain("./Inner.tsx");
-    expect(html).toContain("/assets/inner.js");
+    // Keyed by hydration id; the entry URL is the value.
+    expect(html).toMatch(/_assets"\]=\(?\$R\[\d+\]=\{[^{}]*:"\/assets\/inner\.js"\}/);
   });
 
   /**
@@ -1470,14 +1471,15 @@ describe("SSR Streaming — Asset Discovery", () => {
     expect(html).toContain('data-widget="support"');
     expect(html).toContain("/assets/widget.js");
 
-    // The sibling's module belongs to the root map...
+    // The sibling's module belongs to the root map (keyed by hydration id,
+    // so match on the entry URL value)...
     const rootAssets = html.match(/_\$HY\.r\["_assets"\]=[^;]*/g) || [];
-    expect(rootAssets.some(s => s.includes("./Widget.tsx"))).toBe(true);
+    expect(rootAssets.some(s => s.includes("/assets/widget.js"))).toBe(true);
     // ...and not to the boundary's map.
     const boundaryAssets = html.match(/_\$HY\.r\["[^"]+_assets"\]=[^;]*/g) || [];
     for (const map of boundaryAssets) {
       if (map.startsWith('_$HY.r["_assets"]')) continue;
-      expect(map).not.toContain("./Widget.tsx");
+      expect(map).not.toContain("/assets/widget.js");
     }
   });
 });
@@ -1698,8 +1700,9 @@ describe("renderToString — Asset Discovery", () => {
     const scripts = html.match(/<script[^>]*>[\s\S]*?<\/script>/g) || [];
     const assetScript = scripts.find(s => s.includes("_assets"));
     expect(assetScript).toBeDefined();
-    expect(assetScript).toContain("./Comp.tsx");
-    expect(assetScript).toContain("/assets/comp.js");
+    // Keyed by the lazy render memo's hydration id, not the module specifier.
+    expect(assetScript).not.toContain("./Comp.tsx");
+    expect(assetScript).toMatch(/\{[^{}]*:"\/assets\/comp\.js"\}/);
     expect(assetScript).not.toContain("/assets/dep.js");
   });
 

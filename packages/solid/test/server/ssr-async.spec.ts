@@ -1,5 +1,5 @@
 /** @vitest-environment node */
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import {
   createRoot,
   createMemo,
@@ -3277,17 +3277,21 @@ describe("Asset Manifest + lazy()", () => {
     sharedConfig.context = savedContext;
   });
 
-  test("lazy() throws when rendered without moduleUrl", async () => {
+  test("lazy() without moduleUrl renders and warns when the module lacks $$moduleUrl", async () => {
     const { lazy } = await import("../../src/server/component.js");
 
     const { context } = createMockSSRContext();
     context.resolveAssets = () => null;
+    context.registerAsset = () => {};
     sharedConfig.context = context;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const Comp = (props: any) => "Hello";
     const LazyComp = lazy(() => Promise.resolve({ default: Comp }));
     await LazyComp.preload!();
 
+    // No render-time throw — identity resolution defers to the module's
+    // bundler-injected $$moduleUrl export (glob case) and warns when missing.
     expect(() => {
       createRoot(
         () => {
@@ -3295,7 +3299,10 @@ describe("Asset Manifest + lazy()", () => {
         },
         { id: "t" }
       );
-    }).toThrow(/moduleUrl/);
+    }).not.toThrow();
+    await Promise.resolve();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("$$moduleUrl"));
+    warn.mockRestore();
   });
 
   test("lazy() throws when no manifest is set (no resolveAssets on context)", async () => {
@@ -3350,7 +3357,10 @@ describe("Asset Manifest + lazy()", () => {
       { type: "module", url: "/assets/MyComp-abc123.js" },
       { type: "module", url: "/assets/shared-def456.js" }
     ]);
-    expect(modules).toEqual({ "./MyComp.tsx": "/assets/MyComp-abc123.js" });
+    // The mapping is keyed by the hydration id of lazy's render memo (the
+    // next child id of the root owner "t"), not by moduleUrl — the client
+    // computes the same id positionally during hydration.
+    expect(modules).toEqual({ t0: "/assets/MyComp-abc123.js" });
   });
 
   test("lazy() with moduleUrl classifies .css URLs as style", async () => {

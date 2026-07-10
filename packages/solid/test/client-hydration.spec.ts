@@ -1750,8 +1750,11 @@ describe("lazy() hydration-aware rendering", () => {
 
   test("lazy renders synchronously when module is cached in _$HY.modules", () => {
     (globalThis as any)._$HY = {
+      // Keyed by the hydration id of lazy's render memo — the server
+      // registers the mapping under the same positional id ("t" root, first
+      // child), so no module identity is needed on the client.
       modules: {
-        "/assets/Comp.js": { default: (props: any) => `Hello ${props.name}` }
+        t0: { default: (props: any) => `Hello ${props.name}` }
       },
       loading: {},
       r: {},
@@ -1765,6 +1768,34 @@ describe("lazy() hydration-aware rendering", () => {
       () => Promise.resolve({ default: (props: any) => `async ${props.name}` }),
       "/assets/Comp.js"
     );
+
+    createRoot(
+      () => {
+        result = LazyComp({ name: "World" });
+      },
+      { id: "t" }
+    );
+
+    expect(typeof result).toBe("function");
+    expect(result()).toBe("Hello World");
+  });
+
+  test("lazy without moduleUrl still hydrates from a cached module (glob case)", () => {
+    (globalThis as any)._$HY = {
+      modules: {
+        t0: { default: (props: any) => `Hello ${props.name}` }
+      },
+      loading: {},
+      r: {},
+      events: [],
+      completed: new WeakSet()
+    };
+    startHydration({});
+
+    let result: any;
+    // No moduleUrl — e.g. a router using import.meta.glob. The positional
+    // hydration id still finds the server-preloaded module.
+    const LazyComp = lazy(() => Promise.resolve({ default: (props: any) => `async` }));
 
     createRoot(
       () => {

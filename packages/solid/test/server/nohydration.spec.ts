@@ -1,5 +1,5 @@
 /** @vitest-environment node */
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import { createRoot, createMemo, createProjection, lazy } from "../../src/server/index.js";
 import { NoHydration, Hydration } from "../../src/server/hydration.js";
 import { sharedConfig } from "../../src/server/shared.js";
@@ -507,19 +507,50 @@ describe("NoHydration / Hydration (server)", () => {
     }).not.toThrow();
   });
 
-  test("lazy() outside NoHydration throws without moduleUrl", () => {
-    const { context } = createMockSSRContext({ async: true });
+  test("lazy() outside NoHydration without moduleUrl defers to the module's $$moduleUrl export", async () => {
+    const { context, modules, registeredModules } = createMockSSRContext({ async: true });
     sharedConfig.context = context;
 
-    expect(() => {
-      createRoot(
-        () => {
-          const LazyComp = lazy(() => Promise.resolve({ default: () => "lazy content" }));
-          (LazyComp as any)({});
-        },
-        { id: "t" }
-      );
-    }).toThrow("lazy() used in SSR without a moduleUrl");
+    // Glob case: no callsite moduleUrl; the bundler's SSR transform injects
+    // the manifest key into the module itself.
+    const LazyComp = lazy(() =>
+      Promise.resolve({ default: () => "lazy content", $$moduleUrl: "src/GlobComp.tsx" } as any)
+    );
+
+    createRoot(
+      () => {
+        (LazyComp as any)({});
+      },
+      { id: "t" }
+    );
+    // Registration is deferred until the import resolves.
+    expect(registeredModules.length).toBe(0);
+    await Promise.resolve();
+
+    const jsAssets = modules.filter(m => m.type === "module");
+    expect(jsAssets.length).toBe(1);
+    expect(registeredModules.length).toBe(1);
+    // Keyed by the render memo's hydration id, same as the moduleUrl path.
+    expect(registeredModules[0].url).toBe("t0");
+  });
+
+  test("lazy() outside NoHydration without moduleUrl or $$moduleUrl warns instead of throwing", async () => {
+    const { context, registeredModules } = createMockSSRContext({ async: true });
+    sharedConfig.context = context;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "lazy content" }));
+    createRoot(
+      () => {
+        (LazyComp as any)({});
+      },
+      { id: "t" }
+    );
+    await Promise.resolve();
+
+    expect(registeredModules.length).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("$$moduleUrl"));
+    warn.mockRestore();
   });
 
   /**
@@ -587,9 +618,7 @@ describe("NoHydration / Hydration (server)", () => {
     sharedConfig.context = context;
 
     const d: { resolve?: (mod: any) => void } = {};
-    const LazyComp = lazy(
-      () => new Promise<{ default: any }>(res => (d.resolve = res)) as any
-    );
+    const LazyComp = lazy(() => new Promise<{ default: any }>(res => (d.resolve = res)) as any);
 
     let result: any;
     createRoot(
@@ -608,7 +637,8 @@ describe("NoHydration / Hydration (server)", () => {
     expect(result).toThrow();
   });
 
-  test("lazy() exposes moduleUrl property", () => {
+  test("lazy() moduleUrl returns the raw specifier outside a request context", () => {
+    sharedConfig.context = undefined;
     const LazyComp = lazy(
       () => Promise.resolve({ default: () => "content" }),
       "/assets/MyComp-abc123.js"
@@ -619,5 +649,36 @@ describe("NoHydration / Hydration (server)", () => {
   test("lazy() moduleUrl is undefined when not provided", () => {
     const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }));
     expect(LazyComp.moduleUrl).toBeUndefined();
+  });
+
+  test("lazy() moduleUrl resolves to the client entry URL inside a request context", () => {
+    const { context } = createMockSSRContext({ async: true });
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
+    // The mock manifest resolves every id to js: ["module.js"].
+    expect(LazyComp.moduleUrl).toBe("module.js");
+  });
+
+  test("lazy() moduleUrl access registers modulepreload hints (island signal)", () => {
+    const { context, modules } = createMockSSRContext({ async: true });
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
+    // Access without rendering — as an island renderer stamping a container
+    // attribute would. This is the only preload signal for NoHydration lazy.
+    void LazyComp.moduleUrl;
+
+    const jsAssets = modules.filter(m => m.type === "module");
+    expect(jsAssets.map(a => a.href)).toEqual(["module.js"]);
+  });
+
+  test("lazy() moduleUrl falls back to the raw specifier when the manifest misses", () => {
+    const { context } = createMockSSRContext({ async: true });
+    context.resolveAssets = () => null;
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
+    expect(LazyComp.moduleUrl).toBe("src/MyComp.tsx");
   });
 });

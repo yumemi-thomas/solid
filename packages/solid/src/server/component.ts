@@ -2,6 +2,7 @@ import {
   NotReadyError,
   createMemo,
   getNextChildId,
+  peekNextChildId,
   getOwner,
   getContext,
   NoHydrateContext
@@ -73,8 +74,19 @@ export function createComponent<T extends Record<string, any>>(
  * On server, returns a createMemo that throws NotReadyError until the module resolves,
  * allowing resolveSSRNode to capture it as a fine-grained hole. The memo naturally
  * scopes the owner so hydration IDs align with the client's createMemo in lazy().
- * Requires `moduleUrl` for SSR — the bundler plugin injects the module specifier
- * so the server can look up client chunk URLs from the asset manifest.
+ * The bundler plugin injects `moduleUrl` (the module specifier) so the server
+ * can look up client chunk URLs from the asset manifest. When no callsite
+ * `moduleUrl` exists (e.g. `lazy` over an `import.meta.glob` entry), asset
+ * resolution defers until the import resolves and reads the module's
+ * bundler-injected `$$moduleUrl` export instead.
+ *
+ * The returned component's `moduleUrl` property resolves through the active
+ * request's asset manifest: inside SSR it returns the client-loadable entry
+ * URL for the module (e.g. `/assets/About-abc123.js`), suitable for stamping
+ * into markup (island containers and similar). Outside a request context it
+ * returns the raw module specifier. Reading it during SSR also registers a
+ * modulepreload hint for the module's chunks — accessing the resolved client
+ * URL on the server is treated as a declaration that the client will fetch it.
  */
 export function lazy<T extends Component<any>>(
   fn: () => Promise<{ default: T }>,
@@ -107,34 +119,66 @@ export function lazy<T extends Component<any>>(
     moduleUrl?: string;
   } = props => {
     const noHydrate = getContext(NoHydrateContext);
-    if (!noHydrate && !moduleUrl) {
-      throw new Error(
-        "lazy() used in SSR without a moduleUrl. " +
-          "All lazy() components require a moduleUrl for correct hydration. " +
-          "This is typically injected by the bundler plugin."
-      );
-    }
     if (!noHydrate && !sharedConfig.context?.resolveAssets) {
       throw new Error(
-        `lazy() called with moduleUrl "${moduleUrl}" but no asset manifest is set. ` +
+        `lazy() called${moduleUrl ? ` with moduleUrl "${moduleUrl}"` : ""} but no asset manifest is set. ` +
           "Pass a manifest option to renderToStream/renderToString."
       );
     }
     load();
     const ctx = sharedConfig.context;
-    // Asset registration is separate from rendering: the moduleUrl/manifest
-    // guards above are waived for no-hydrate zones (nothing hydrates, so no
-    // assets are needed), and those zones must still render their resolved
-    // module. Fusing this into an early return dropped the content entirely
-    // for exactly the waived cases (#2859).
-    if (ctx?.registerAsset && ctx.resolveAssets && moduleUrl) {
-      const assets = ctx.resolveAssets(moduleUrl);
-      if (assets) {
-        for (let i = 0; i < assets.css.length; i++) ctx.registerAsset("style", assets.css[i]);
+    // Asset registration is separate from rendering: the manifest guard above
+    // is waived for no-hydrate zones (nothing hydrates, so no assets are
+    // needed), and those zones must still render their resolved module.
+    // Fusing this into an early return dropped the content entirely for
+    // exactly the waived cases (#2859).
+    if (ctx?.registerAsset && ctx.resolveAssets) {
+      // The module mapping is keyed by the hydration id the render memo below
+      // will receive (peek — creating the memo consumes the slot). The
+      // client's lazy() computes the same id positionally during hydration,
+      // so no module identity needs to exist client-side.
+      const o = getOwner();
+      const hydrationKey = !noHydrate && o?.id != null ? peekNextChildId(o) : undefined;
+      const registerLazyAssets = (id: string) => {
+        const assets = ctx.resolveAssets!(id);
+        if (!assets) return;
+        for (let i = 0; i < assets.css.length; i++) ctx.registerAsset!("style", assets.css[i]);
         if (!noHydrate) {
-          for (let i = 0; i < assets.js.length; i++) ctx.registerAsset("module", assets.js[i]);
-          ctx.registerModule?.(moduleUrl, assets.js[0]);
+          for (let i = 0; i < assets.js.length; i++) ctx.registerAsset!("module", assets.js[i]);
+          if (hydrationKey != null) ctx.registerModule?.(hydrationKey, assets.js[0]);
         }
+      };
+      if (moduleUrl) {
+        registerLazyAssets(moduleUrl);
+      } else if (!noHydrate) {
+        // No callsite moduleUrl (e.g. lazy over import.meta.glob) — the
+        // module's identity lives in the module itself: the bundler's SSR
+        // transform injects a `$$moduleUrl` export carrying the client
+        // manifest key. Defer registration until the import resolves; this
+        // .then is attached before ctx.block's (below), so for streaming it
+        // settles before the owning boundary can flush its asset map.
+        const boundary = ctx._currentBoundaryId;
+        p.then(mod => {
+          const id = (mod as any)?.$$moduleUrl;
+          if (typeof id !== "string") {
+            console.warn(
+              "lazy() used in SSR without a moduleUrl and the loaded module has no " +
+                "$$moduleUrl export, so its client assets cannot be resolved — the " +
+                "component will load late during hydration. This is typically " +
+                "injected by the bundler plugin."
+            );
+            return;
+          }
+          // Restore the boundary that owned this render — by the time the
+          // import settles, other boundaries may be rendering.
+          const current = ctx._currentBoundaryId;
+          ctx._currentBoundaryId = boundary;
+          try {
+            registerLazyAssets(id);
+          } finally {
+            ctx._currentBoundaryId = current;
+          }
+        });
       }
     }
     if (ctx?.async) {
@@ -161,7 +205,26 @@ export function lazy<T extends Component<any>>(
     ) as unknown as SolidElement;
   };
   wrap.preload = load;
-  wrap.moduleUrl = moduleUrl;
+  Object.defineProperty(wrap, "moduleUrl", {
+    get() {
+      const ctx = sharedConfig.context;
+      if (moduleUrl && ctx?.resolveAssets) {
+        const assets = ctx.resolveAssets(moduleUrl);
+        if (assets && assets.js.length) {
+          // Lazy components under NoHydration (e.g. islands) skip module
+          // registration during render, so this access is the only signal
+          // that the client will fetch these chunks.
+          if (ctx.registerAsset) {
+            for (let i = 0; i < assets.js.length; i++) ctx.registerAsset("module", assets.js[i]);
+          }
+          return assets.js[0];
+        }
+      }
+      return moduleUrl;
+    },
+    configurable: true,
+    enumerable: true
+  });
   return wrap as T & { preload: () => Promise<{ default: T }>; moduleUrl?: string };
 }
 

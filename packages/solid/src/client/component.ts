@@ -1,4 +1,4 @@
-import { untrack, createMemo } from "@solidjs/signals";
+import { untrack, createMemo, getOwner, peekNextChildId } from "@solidjs/signals";
 import { $DEVCOMP, IS_DEV, devComponent } from "../client/core.js";
 import { sharedConfig } from "./hydration.js";
 import type { Element as SolidElement } from "../types.js";
@@ -86,8 +86,11 @@ export function createComponent<T extends Record<string, any>>(
  * import early (e.g. on hover).
  *
  * @param fn dynamic import returning the module's default export
- * @param moduleUrl optional module URL used during hydration to look up
- *   preloaded chunks; usually injected by the bundler integration
+ * @param moduleUrl optional module specifier injected by the bundler
+ *   integration; exposed as the component's `moduleUrl` property (islands)
+ *   and used in hydration error messages. Hydration itself matches
+ *   server-preloaded modules positionally by hydration id, so lazy
+ *   components without a moduleUrl (e.g. via import.meta.glob) hydrate too.
  *
  * @example
  * ```tsx
@@ -112,15 +115,24 @@ export function lazy<T extends Component<any>>(
   let comp: () => T | undefined;
   let p: Promise<{ default: T }> | undefined;
   const wrap: T & { preload?: () => void; moduleUrl?: string } = ((props: any) => {
-    if (sharedConfig.hydrating && moduleUrl) {
-      const cached = (globalThis as any)._$HY?.modules?.[moduleUrl];
-      if (!cached) {
+    if (sharedConfig.hydrating) {
+      // The server keys the module mapping by the hydration id of the render
+      // memo created below; compute the same id positionally (peek — the memo
+      // consumes the slot). This keeps module identity fully server-side:
+      // glob/dynamically composed lazy modules hydrate without a moduleUrl.
+      const o = getOwner();
+      const key = o && o.id != null ? peekNextChildId(o) : undefined;
+      const cached = key != null ? (globalThis as any)._$HY?.modules?.[key] : undefined;
+      if (cached) {
+        comp = () => cached.default as T;
+      } else if (!comp && moduleUrl) {
+        // moduleUrl present means the bundler transform ran, so the server
+        // must have registered this position. A miss is a broken preload.
         throw new Error(
-          `lazy() module "${moduleUrl}" was not preloaded before hydration. ` +
-            "Ensure it is inside a Loading boundary."
+          `lazy() module "${moduleUrl}" (hydration id "${key}") was not preloaded before ` +
+            "hydration. Ensure it is inside a Loading boundary."
         );
       }
-      comp = () => cached.default as T;
     }
     if (!comp) {
       p || (p = fn());
