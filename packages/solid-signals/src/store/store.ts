@@ -307,17 +307,31 @@ function getNode<T>(
 }
 
 export function trackSelf(target: StoreNode, symbol: symbol = $TRACK) {
-  getObserver() &&
-    read(
-      getNode(
-        getNodes(target, STORE_NODE),
-        symbol,
-        undefined,
-        target[STORE_FIREWALL],
-        false,
-        target[STORE_OPTIMISTIC]
-      )
-    );
+  if (!getObserver()) return;
+  read(
+    getNode(
+      getNodes(target, STORE_NODE),
+      symbol,
+      undefined,
+      target[STORE_FIREWALL],
+      false,
+      target[STORE_OPTIMISTIC]
+    )
+  );
+  // Store-in-store: structural notifications (reconcile, notifySelf) land on
+  // the wrapped source's own self-node, never on this wrapper view's. Chain
+  // the read through so enumeration/$TRACK on the wrapper observes them
+  // (#2864). Property reads already chain naturally via the inner get trap.
+  // An override layer on the view is a hold (A17) — the shown structure is
+  // the overlay's, so don't subscribe through it; clearing the layer notifies
+  // this view's own self-node and the re-run re-establishes the chain.
+  if (
+    symbol === $TRACK &&
+    !target[STORE_OVERRIDE] &&
+    !target[STORE_OPTIMISTIC_OVERRIDE] &&
+    target[STORE_VALUE][$TARGET]
+  )
+    (target[STORE_VALUE] as any)[$TRACK];
 }
 
 export function notifySelf(target: StoreNode) {
