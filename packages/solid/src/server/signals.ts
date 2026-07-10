@@ -274,6 +274,23 @@ export function setContext<T>(
   };
 }
 
+// Detach a disposed owner from its parent's child chain before pooling.
+// Without this, the parent still points at the pooled node, and once the
+// pool recycles it into a *different* tree, disposing the old parent walks
+// into the new tree and tears down live owners (#2863).
+function unlinkOwner(node: SSROwner): void {
+  const parent = node._parent;
+  if (!parent) return;
+  if (parent._firstChild === node) parent._firstChild = node._nextSibling;
+  else {
+    let sibling = parent._firstChild;
+    while (sibling && sibling._nextSibling !== node) sibling = sibling._nextSibling;
+    if (sibling) sibling._nextSibling = node._nextSibling;
+  }
+  node._parent = null;
+  node._nextSibling = null;
+}
+
 /**
  * Tears down `owner` (optionally) and all of its descendants. Walks the
  * forward-only `_firstChild` -> `_nextSibling` chain, recursively disposing
@@ -297,10 +314,9 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
   if (!node._firstChild && !node._disposal) {
     if (self) {
       node._disposed = true;
+      unlinkOwner(node);
       if (ownerPool.length < OWNER_POOL_MAX) {
         node.id = undefined;
-        node._parent = null;
-        node._nextSibling = null;
         ownerPool.push(node);
       }
     }
@@ -324,13 +340,12 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
     }
     node._disposal = null;
   }
+  if (self) unlinkOwner(node);
   // Recycle the disposed owner. Skip the root case (`self=false`) and the
   // already-pooled case so we don't double-add. The next `createOwner` will
   // overwrite all fields, so we only need to drop heavy references here.
   if (self && ownerPool.length < OWNER_POOL_MAX) {
     node.id = undefined;
-    node._parent = null;
-    node._nextSibling = null;
     ownerPool.push(node);
   }
 }
