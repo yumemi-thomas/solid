@@ -138,7 +138,7 @@
     "build:js": "rollup -c",
     "link": "symlink-dir . node_modules/@solidjs/web",
     "types": "npm-run-all -nl types:clean types:copy-jsx types:web types:copy-web types:web-storage types:cjs",
-    "types:clean": "rimraf types/ types-cjs/ storage/types-cjs/",
+    "types:clean": "rimraf types/ types-cjs/ storage/types/ storage/types-cjs/",
     "types:copy-jsx": "ncp ../../node_modules/@dom-expressions/runtime/src/jsx.d.ts ./src/jsx.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/jsx-properties.d.ts ./src/jsx-properties.d.ts && dom-expressions-jsx-types --input ./src/jsx.d.ts --element \"SolidElement | Node | ArrayElement\" --import 'import type { Element as SolidElement } from \"solid-js\";'",
     "types:web": "tsc --project ./tsconfig.build.json",
     "types:copy-web": "ncp ../../node_modules/@dom-expressions/runtime/src/client.d.ts ./types/client.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/server.d.ts ./types/server.d.ts && ncp ./src/jsx.d.ts ./types/jsx.d.ts && ncp ./src/jsx-properties.d.ts ./types/jsx-properties.d.ts",
