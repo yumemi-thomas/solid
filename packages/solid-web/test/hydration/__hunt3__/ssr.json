@@ -1,0 +1,19 @@
+{
+  "select": "<div _hk=0><select value=\"b\"><option value=\"a\">A</option><option value=\"b\">B</option><option value=\"c\">C</option></select></div>",
+  "selectFirst": "<div _hk=0><select value=\"a\"><option value=\"a\">A</option><option value=\"b\">B</option></select></div>",
+  "textarea": "<div _hk=0><textarea>hello\nworld</textarea></div>",
+  "checkbox": "<div _hk=0><input type=\"checkbox\" checked></div>",
+  "checkboxUnchecked": "<div _hk=0><input type=\"checkbox\"></div>",
+  "textInput": "<div _hk=0><input type=\"text\" value=\"server\"></div>",
+  "formBundle": "<div _hk=0><textarea>world</textarea><select value=\"b\"><option value=\"a\">A</option><option value=\"b\">B</option></select><input type=\"checkbox\" checked><input type=\"text\" value=\"world\"></div>",
+  "nestedHydration": "<div _hk=0><span>outer</span><!--$--><span>static-nohk</span><button _hk=0>n:<!--$-->0<!--/--></button><!--/--><button>o:<!--$-->0<!--/--></button></div>",
+  "nestedHydrationWithId": "<div _hk=0><span>shell</span><button _hk=island0>i:<!--$-->0<!--/--></button></div>",
+  "noHydrationSibling": "<div _hk=0><!--$--><span>static</span><!--/--><button>b:<!--$-->0<!--/--></button></div>",
+  "portal": "THREW: document is not defined",
+  "showTrue": "<div _hk=0><!--$--><span _hk=30>yes</span><!--/--><button>go</button></div>",
+  "showFalse": "<div _hk=0><!--$--><span _hk=30>off</span><!--/--><button>toggle</button></div>",
+  "forItems": "<div _hk=0><ul><li _hk=100>alpha</li><li _hk=110>beta</li><li _hk=120>gamma</li></ul><button>swap</button></div>",
+  "forEmpty": "<div _hk=0><ul><li _hk=100>empty</li></ul></div>",
+  "switchOne": "<div _hk=0><!--$--><span _hk=40>one</span><!--/--><button>go</button></div>",
+  "repeat3": "<div _hk=0><ul><li _hk=100>0</li><li _hk=110>1</li><li _hk=120>2</li></ul><button>go</button></div>"
+}
