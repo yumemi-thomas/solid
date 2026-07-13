@@ -7,7 +7,7 @@ import {
   getContext,
   NoHydrateContext
 } from "./signals.js";
-import { sharedConfig } from "./shared.js";
+import { sharedConfig, type ResolvedAssets } from "./shared.js";
 import type { Element as SolidElement } from "../types.js";
 
 export function enableHydration() {}
@@ -127,6 +127,13 @@ export function lazy<T extends Component<any>>(
     }
     load();
     const ctx = sharedConfig.context;
+    // While set, the render memo below reports not-ready even after the module
+    // itself has loaded. Only async work arms it: an in-flight resolver-
+    // function manifest (dev servers answer asset lookups from their live
+    // module graph) or the deferred `$$moduleUrl` path. Without this gate a
+    // streamed fragment could flush before its assets registered, dropping
+    // its styles/module map from the stream. Sync manifests never arm it.
+    let assetsPending: Promise<void> | undefined;
     // Asset registration is separate from rendering: the manifest guard above
     // is waived for no-hydrate zones (nothing hydrates, so no assets are
     // needed), and those zones must still render their resolved module.
@@ -139,26 +146,51 @@ export function lazy<T extends Component<any>>(
       // so no module identity needs to exist client-side.
       const o = getOwner();
       const hydrationKey = !noHydrate && o?.id != null ? peekNextChildId(o) : undefined;
-      const registerLazyAssets = (id: string) => {
-        const assets = ctx.resolveAssets!(id);
+      const applyAssets = (assets: ResolvedAssets | null | undefined) => {
         if (!assets) return;
-        for (let i = 0; i < assets.css.length; i++) ctx.registerAsset!("style", assets.css[i]);
+        for (let i = 0; i < assets.css.length; i++) {
+          const css = assets.css[i];
+          if (typeof css === "string") ctx.registerAsset!("style", css);
+          else ctx.registerAsset!("inline-style", css);
+        }
         if (!noHydrate) {
           for (let i = 0; i < assets.js.length; i++) ctx.registerAsset!("module", assets.js[i]);
           if (hydrationKey != null) ctx.registerModule?.(hydrationKey, assets.js[0]);
         }
       };
+      const registerLazyAssets = (id: string): Promise<void> | undefined => {
+        const assets = ctx.resolveAssets!(id);
+        if (assets && typeof (assets as Promise<ResolvedAssets | null>).then === "function") {
+          // Restore the boundary that owned this render around the deferred
+          // registration — by the time the resolver settles, other
+          // boundaries may be rendering.
+          const boundary = ctx._currentBoundaryId;
+          return (assets as Promise<ResolvedAssets | null>).then(
+            resolved => {
+              const current = ctx._currentBoundaryId;
+              ctx._currentBoundaryId = boundary;
+              try {
+                applyAssets(resolved);
+              } finally {
+                ctx._currentBoundaryId = current;
+              }
+            },
+            err => {
+              console.warn(`lazy() asset resolution failed for "${id}":`, err);
+            }
+          );
+        }
+        applyAssets(assets as ResolvedAssets | null);
+      };
       if (moduleUrl) {
-        registerLazyAssets(moduleUrl);
+        assetsPending = registerLazyAssets(moduleUrl);
       } else if (!noHydrate) {
-        // No callsite moduleUrl (e.g. lazy over import.meta.glob) — the
-        // module's identity lives in the module itself: the bundler's SSR
+        // No callsite moduleUrl (e.g. lazy over an `import.meta.glob` entry) —
+        // the module's identity lives in the module itself: the bundler's SSR
         // transform injects a `$$moduleUrl` export carrying the client
-        // manifest key. Defer registration until the import resolves; this
-        // .then is attached before ctx.block's (below), so for streaming it
-        // settles before the owning boundary can flush its asset map.
+        // manifest key. Defer registration until the import resolves.
         const boundary = ctx._currentBoundaryId;
-        p.then(mod => {
+        assetsPending = p.then(mod => {
           const id = (mod as any)?.$$moduleUrl;
           if (typeof id !== "string") {
             console.warn(
@@ -169,16 +201,22 @@ export function lazy<T extends Component<any>>(
             );
             return;
           }
-          // Restore the boundary that owned this render — by the time the
-          // import settles, other boundaries may be rendering.
           const current = ctx._currentBoundaryId;
           ctx._currentBoundaryId = boundary;
           try {
-            registerLazyAssets(id);
+            // May itself defer again (async resolver); the returned promise
+            // keeps the memo gated until the whole chain settles.
+            return registerLazyAssets(id);
           } finally {
             ctx._currentBoundaryId = current;
           }
         });
+      }
+      if (assetsPending) {
+        const clear = () => {
+          assetsPending = undefined;
+        };
+        assetsPending = assetsPending.then(clear, clear);
       }
     }
     if (ctx?.async) {
@@ -199,6 +237,7 @@ export function lazy<T extends Component<any>>(
       () => {
         if (p.errored) throw p.error;
         if (!p.v) throw new NotReadyError(p);
+        if (assetsPending) throw new NotReadyError(assetsPending);
         return p.v(props);
       },
       { sync: true }
@@ -209,15 +248,25 @@ export function lazy<T extends Component<any>>(
     get() {
       const ctx = sharedConfig.context;
       if (moduleUrl && ctx?.resolveAssets) {
-        const assets = ctx.resolveAssets(moduleUrl);
-        if (assets && assets.js.length) {
+        // A getter can't await, so prefer the sync resolution path (async
+        // dev resolvers expose one carrying the js URLs); without one, fall
+        // through to the raw specifier on a thenable result.
+        const resolve = ctx.resolveAssetsSync || ctx.resolveAssets;
+        const assets = resolve(moduleUrl);
+        if (
+          assets &&
+          typeof (assets as Promise<ResolvedAssets | null>).then !== "function" &&
+          (assets as ResolvedAssets).js.length
+        ) {
+          const resolved = assets as ResolvedAssets;
           // Lazy components under NoHydration (e.g. islands) skip module
           // registration during render, so this access is the only signal
           // that the client will fetch these chunks.
           if (ctx.registerAsset) {
-            for (let i = 0; i < assets.js.length; i++) ctx.registerAsset("module", assets.js[i]);
+            for (let i = 0; i < resolved.js.length; i++)
+              ctx.registerAsset("module", resolved.js[i]);
           }
-          return assets.js[0];
+          return resolved.js[0];
         }
       }
       return moduleUrl;

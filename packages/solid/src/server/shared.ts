@@ -5,6 +5,18 @@ export type SSRTemplateObject =
   | { t: string[]; h: Function[]; p: Promise<any>[] }
   | { t: string; h?: undefined; p?: undefined };
 
+/** Inline style content, e.g. dev CSS collected from a bundler's module graph. */
+export type InlineStyleAsset = {
+  id: string;
+  content: string;
+  attrs?: Record<string, string>;
+};
+
+export type ResolvedAssets = {
+  js: string[];
+  css: (string | InlineStyleAsset)[];
+};
+
 export type HydrationContext = {
   id: string;
   count: number;
@@ -26,12 +38,26 @@ export type HydrationContext = {
   ) => (v?: string, err?: any) => boolean;
   revealFragments?: (groupOrKeys: string | string[]) => void;
   revealFallbacks?: (groupOrKeys: string | string[]) => void;
-  /** Register a client-side asset URL discovered during SSR (e.g. from lazy()). */
-  registerAsset?: (type: "module" | "style", url: string) => void;
+  /** Register a client-side asset discovered during SSR (e.g. from lazy()). */
+  registerAsset?: {
+    (type: "module" | "style", url: string): void;
+    (type: "inline-style", style: InlineStyleAsset): void;
+  };
   /** Register a moduleUrl-to-entryUrl mapping for the current boundary. */
   registerModule?: (moduleUrl: string, entryUrl: string) => void;
-  /** Resolve a module's JS and CSS assets from the asset manifest. Set by dom-expressions. */
-  resolveAssets?: (moduleUrl: string) => { js: string[]; css: string[] } | null;
+  /**
+   * Resolve a module's JS and CSS assets from the asset manifest. Set by
+   * dom-expressions. Resolver manifests (dev servers answering from a live
+   * module graph) may return a promise and may resolve css entries to
+   * inline-style descriptors instead of URLs.
+   */
+  resolveAssets?: (moduleUrl: string) => ResolvedAssets | null | Promise<ResolvedAssets | null>;
+  /**
+   * Synchronous resolution fast path. Set by dom-expressions for object
+   * manifests (sync by nature) and for resolver manifests providing
+   * `resolveSync`; used by sync consumers like lazy's moduleUrl getter.
+   */
+  resolveAssetsSync?: (moduleUrl: string) => ResolvedAssets | null | undefined;
   /** Retrieve the moduleUrl-to-entryUrl map for a boundary. */
   getBoundaryModules?: (id: string) => Record<string, string> | null;
   /** @internal Tracks which Loading boundary is currently rendering. Set by dom-expressions via applyAssetTracking(). */

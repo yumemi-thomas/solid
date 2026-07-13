@@ -3473,6 +3473,174 @@ describe("Asset Manifest + lazy()", () => {
 
     d.resolve({ default: () => "done" });
   });
+
+  test("lazy() with sync resolver registers inline-style css descriptors", async () => {
+    const { lazy } = await import("../../src/server/component.js");
+
+    const registered: Array<{ type: string; value: any }> = [];
+    const { context } = createMockSSRContext();
+    context.registerAsset = (type: string, value: any) => registered.push({ type, value });
+    context.resolveAssets = (id: string) =>
+      id === "./Dev.tsx"
+        ? {
+            js: ["/src/Dev.tsx"],
+            css: [
+              {
+                id: "/src/Dev.css",
+                content: ".dev{}",
+                attrs: { "data-vite-dev-id": "/src/Dev.css" }
+              }
+            ]
+          }
+        : null;
+    sharedConfig.context = context;
+
+    const Comp = (props: any) => "dev";
+    const LazyComp = lazy(() => Promise.resolve({ default: Comp }), "./Dev.tsx");
+    await LazyComp.preload!();
+
+    createRoot(
+      () => {
+        LazyComp({});
+      },
+      { id: "t" }
+    );
+
+    expect(registered).toEqual([
+      {
+        type: "inline-style",
+        value: {
+          id: "/src/Dev.css",
+          content: ".dev{}",
+          attrs: { "data-vite-dev-id": "/src/Dev.css" }
+        }
+      },
+      { type: "module", value: "/src/Dev.tsx" }
+    ]);
+  });
+
+  test("lazy() with async resolver gates rendering until assets register", async () => {
+    const { lazy } = await import("../../src/server/component.js");
+
+    const registered: Array<{ type: string; value: any; boundary: string | null | undefined }> = [];
+    const resolverDeferred = deferred<{ js: string[]; css: any[] } | null>();
+    const { context } = createMockSSRContext();
+    context.registerAsset = (type: string, value: any) =>
+      registered.push({ type, value, boundary: context._currentBoundaryId });
+    context.resolveAssets = () => resolverDeferred.promise;
+    context._currentBoundaryId = "b-owner";
+    sharedConfig.context = context;
+
+    const Comp = (props: any) => "async-dev";
+    const LazyComp = lazy(() => Promise.resolve({ default: Comp }), "./AsyncDev.tsx");
+    await LazyComp.preload!();
+
+    let thunk: any;
+    createRoot(
+      () => {
+        thunk = LazyComp({});
+      },
+      { id: "t" }
+    );
+
+    // Module is loaded, but the resolver is still in flight — the memo must
+    // stay not-ready so a streamed fragment can't flush without its styles.
+    expect(() => thunk()).toThrow(NotReadyError);
+    expect(registered).toEqual([]);
+
+    // Another boundary renders while the resolver settles; registration must
+    // restore attribution to the boundary that owned the lazy render.
+    context._currentBoundaryId = "b-other";
+    resolverDeferred.resolve({
+      js: ["/src/AsyncDev.tsx"],
+      css: [{ id: "/src/AsyncDev.css", content: ".a{}" }]
+    });
+    await resolverDeferred.promise;
+    await Promise.resolve();
+
+    expect(registered).toEqual([
+      {
+        type: "inline-style",
+        value: { id: "/src/AsyncDev.css", content: ".a{}" },
+        boundary: "b-owner"
+      },
+      { type: "module", value: "/src/AsyncDev.tsx", boundary: "b-owner" }
+    ]);
+    expect(context._currentBoundaryId).toBe("b-other");
+    expect(thunk()).toBe("async-dev");
+  });
+
+  test("lazy() async resolver failure warns and unblocks rendering", async () => {
+    const { lazy } = await import("../../src/server/component.js");
+
+    const { context } = createMockSSRContext();
+    context.registerAsset = () => {};
+    context.resolveAssets = () => Promise.reject(new Error("graph walk failed"));
+    sharedConfig.context = context;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const Comp = (props: any) => "survives";
+    const LazyComp = lazy(() => Promise.resolve({ default: Comp }), "./Broken.tsx");
+    await LazyComp.preload!();
+
+    let thunk: any;
+    createRoot(
+      () => {
+        thunk = LazyComp({});
+      },
+      { id: "t" }
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('asset resolution failed for "./Broken.tsx"'),
+      expect.any(Error)
+    );
+    expect(thunk()).toBe("survives");
+    warn.mockRestore();
+  });
+
+  test("lazy() glob fallback chains into an async resolver", async () => {
+    const { lazy } = await import("../../src/server/component.js");
+
+    const registered: Array<{ type: string; value: any }> = [];
+    const { context } = createMockSSRContext();
+    context.registerAsset = (type: string, value: any) => registered.push({ type, value });
+    context.resolveAssets = (id: string) =>
+      Promise.resolve(
+        id === "src/Glob.tsx"
+          ? { js: ["/src/Glob.tsx"], css: [{ id: "/src/Glob.css", content: ".g{}" }] }
+          : null
+      );
+    sharedConfig.context = context;
+
+    const Comp = (props: any) => "glob";
+    const LazyComp = lazy(() =>
+      Promise.resolve({ default: Comp, $$moduleUrl: "src/Glob.tsx" } as any)
+    );
+    await LazyComp.preload!();
+
+    let thunk: any;
+    createRoot(
+      () => {
+        thunk = LazyComp({});
+      },
+      { id: "t" }
+    );
+
+    // module promise then -> resolver promise then -> registration; promise
+    // adoption of the nested chain costs extra microtasks, so drain with a
+    // macrotask instead of counting ticks.
+    await new Promise(r => setTimeout(r));
+
+    expect(registered).toEqual([
+      { type: "inline-style", value: { id: "/src/Glob.css", content: ".g{}" } },
+      { type: "module", value: "/src/Glob.tsx" }
+    ]);
+    expect(thunk()).toBe("glob");
+  });
 });
 
 // ============================================================================

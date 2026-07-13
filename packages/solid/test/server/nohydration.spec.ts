@@ -681,4 +681,29 @@ describe("NoHydration / Hydration (server)", () => {
     const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
     expect(LazyComp.moduleUrl).toBe("src/MyComp.tsx");
   });
+
+  test("lazy() moduleUrl uses the sync resolution fast path (islands in dev)", () => {
+    const { context, modules } = createMockSSRContext({ async: true });
+    // Dev-shaped resolver wiring: resolveAssets is async (css graph walk),
+    // but the js URL is knowable synchronously via resolveAssetsSync.
+    context.resolveAssets = (key: string) => Promise.resolve({ js: ["/" + key], css: [] });
+    context.resolveAssetsSync = (key: string) => ({ js: ["/" + key], css: [] });
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
+    expect(LazyComp.moduleUrl).toBe("/src/MyComp.tsx");
+    // The access is still the island preload signal.
+    const jsAssets = modules.filter(m => m.type === "module");
+    expect(jsAssets.map(a => a.href)).toEqual(["/src/MyComp.tsx"]);
+  });
+
+  test("lazy() moduleUrl falls back to the raw specifier for an async resolver without a sync path", () => {
+    const { context } = createMockSSRContext({ async: true });
+    context.resolveAssets = () => Promise.resolve({ js: ["/never-seen.js"], css: [] });
+    context.resolveAssetsSync = undefined;
+    sharedConfig.context = context;
+
+    const LazyComp = lazy(() => Promise.resolve({ default: () => "content" }), "src/MyComp.tsx");
+    expect(LazyComp.moduleUrl).toBe("src/MyComp.tsx");
+  });
 });
