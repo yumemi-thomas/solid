@@ -1608,6 +1608,39 @@ const ErrorContext: Context<((err: any) => void) | null> = {
 };
 
 export { ErrorContext };
+
+// --- Reveal SSR coordination ---
+// Lives here (not flow.ts, where the Reveal plumbing consumes it) so both
+// boundary implementations can sever it without circular imports.
+
+export type ServerRevealGroup = {
+  id: string;
+  /**
+   * Register a child fragment (Loading) or composite child (inner Reveal).
+   * Returns `collapseFallback` (hide fallback visually, used for collapsed-sequential
+   * tail) and `held` (stash `revealFragments` swaps until the parent releases us).
+   * `held` only applies when the caller is a nested Reveal — Loadings ignore it.
+   */
+  register(
+    key: string,
+    options?: { onActivate?: () => void }
+  ): { collapseFallback: boolean; held: boolean };
+  /** Called by a child when its subtree is fully resolved. */
+  onResolved(key: string): void;
+  /**
+   * Called by a nested Reveal when it becomes "minimally resolved" under its own
+   * order (together: fully resolved; sequential: first registered fragment resolved;
+   * natural: any fragment resolved). Loadings don't fire this — their `onResolved`
+   * implies minimal readiness at the same time.
+   */
+  onMinimallyResolved?(key: string): void;
+};
+
+export const RevealGroupContext: Context<ServerRevealGroup | null> = {
+  id: Symbol("RevealGroupContext"),
+  defaultValue: null
+};
+
 export function runWithBoundaryErrorContext<T>(
   owner: Owner,
   render: () => T,
@@ -1644,6 +1677,10 @@ export function createErrorBoundary<T, U>(
   const ctx = sharedConfig.context;
   const parent = getOwner();
   const owner = createOwner();
+  // Boundaries sever reveal-group coordination for their subtree (see
+  // ssrLoadingBoundary): an Errored-wrapped Loading must not delay the
+  // ancestor group's release (#2872).
+  setContext(RevealGroupContext, null, owner);
   const outputOwner = ctx ? createOwner() : undefined;
   // Partial template from a pass that went async. A retry pull must resume
   // these surviving holes (their owners and any async computations created

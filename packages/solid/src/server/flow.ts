@@ -9,9 +9,10 @@ import {
   getOwner,
   getNextChildId,
   runWithOwner,
-  setContext
+  setContext,
+  RevealGroupContext
 } from "./signals.js";
-import { createLoadingBoundary, RevealGroupContext } from "./hydration.js";
+import { createLoadingBoundary } from "./hydration.js";
 import { sharedConfig } from "./shared.js";
 import type { Accessor, RevealOrder } from "./signals.js";
 import type { Element as SolidElement } from "../types.js";

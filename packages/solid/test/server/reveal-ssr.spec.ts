@@ -2,7 +2,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { createRoot, createMemo, createRevealOrder } from "../../src/server/index.js";
 import { ssrHandleError } from "../../src/server/hydration.js";
-import { Loading, Reveal } from "../../src/server/flow.js";
+import { Loading, Reveal, Errored } from "../../src/server/flow.js";
 import { sharedConfig } from "../../src/server/shared.js";
 
 // ---- Minimal SSR context infrastructure (mirrors ssr-async.spec.ts) ----
@@ -1559,5 +1559,182 @@ describe("Reveal SSR component", () => {
     await tick();
     revealed = mock.revealFragmentsCalls.flatMap(c => (Array.isArray(c) ? c : [c]));
     expect(revealed).toContain(keys[1]);
+  });
+});
+
+describe("boundaries sever reveal-group membership (#2871, #2872)", () => {
+  let savedContext: any;
+
+  beforeEach(() => {
+    savedContext = sharedConfig.context;
+  });
+
+  afterEach(() => {
+    sharedConfig.context = savedContext;
+  });
+
+  /** A Loading with an async hole, optionally with extra nested children. */
+  function asyncLoading(fb: string, d: { promise: Promise<string> }, extra?: () => any) {
+    return Loading({
+      fallback: fb,
+      get children() {
+        const data = createMemo(() => d.promise);
+        return [ssr(["<span>", "</span>"], () => data()), extra?.()] as any;
+      }
+    });
+  }
+
+  function revealedKeys(mock: MockSSRContext) {
+    return mock.revealFragmentsCalls.flatMap(c => (Array.isArray(c) ? c : [c]));
+  }
+
+  /** Fragment keys split by whether they registered with a revealGroup. */
+  function splitByGroup(mock: MockSSRContext) {
+    const entries = [...mock.registeredFragments.entries()];
+    return {
+      directKeys: entries.filter(([, o]) => o.revealGroup).map(([k]) => k),
+      severedKeys: entries.filter(([, o]) => !o.revealGroup).map(([k]) => k)
+    };
+  }
+
+  /** Reveal > [Loading A (contains nested Loading), Loading B], all async. */
+  function mountNestedSlotTree(order?: "together") {
+    const mock = createMockSSRContext({ async: true });
+    sharedConfig.context = mock.context;
+    const dA = deferred<string>();
+    const dB = deferred<string>();
+    const dNested = deferred<string>();
+    createRoot(
+      () => {
+        Reveal({
+          order,
+          get children() {
+            return [
+              asyncLoading("a-fb", dA, () => asyncLoading("nested-fb", dNested)),
+              asyncLoading("b-fb", dB)
+            ] as any;
+          }
+        } as any);
+      },
+      { id: "t" }
+    );
+    return { mock, dA, dB, dNested, ...splitByGroup(mock) };
+  }
+
+  test("nested Loading inside a direct slot does not join or delay the ancestor group", async () => {
+    const { mock, dA, dB, dNested, directKeys, severedKeys } = mountNestedSlotTree("together");
+
+    // Only the direct slots carry a revealGroup; the nested boundary is severed.
+    expect(directKeys.length).toBe(2);
+    expect(severedKeys.length).toBe(1);
+    const [nestedKey] = severedKeys;
+
+    // Both direct slots resolve while the nested boundary is still pending.
+    // Together must release on direct-slot readiness — the nested Loading is
+    // covered by its own fallback inside slot A and must not hold the group.
+    dA.resolve("a-val");
+    dB.resolve("b-val");
+    await tick();
+    expect(revealedKeys(mock)).toEqual(expect.arrayContaining(directKeys));
+    expect(revealedKeys(mock)).not.toContain(nestedKey);
+    expect(mock.fragmentResults.has(nestedKey)).toBe(false);
+
+    // The nested boundary settles independently afterwards.
+    dNested.resolve("nested-val");
+    await tick();
+    expect(mock.fragmentResults.get(nestedKey)).toContain("nested-val");
+  });
+
+  test("nested Loading is severed under sequential order too", async () => {
+    const { mock, dA, dB, dNested, directKeys, severedKeys } = mountNestedSlotTree();
+    const [nestedKey] = severedKeys;
+
+    // The sequential frontier walks A then B; the pending nested boundary
+    // must not park the frontier on slot A.
+    dA.resolve("a-val");
+    dB.resolve("b-val");
+    await tick();
+    expect(revealedKeys(mock)).toEqual(directKeys);
+
+    dNested.resolve("nested-val");
+    await tick();
+    expect(mock.fragmentResults.get(nestedKey)).toContain("nested-val");
+  });
+
+  test("nested Loading settling early does not release a together group prematurely", async () => {
+    const mock = createMockSSRContext({ async: true });
+    sharedConfig.context = mock.context;
+    const dA = deferred<string>();
+    const dNested = deferred<string>();
+
+    createRoot(
+      () => {
+        Reveal({
+          order: "together",
+          get children() {
+            return [asyncLoading("a-fb", dA, () => asyncLoading("nested-fb", dNested))] as any;
+          }
+        } as any);
+      },
+      { id: "t" }
+    );
+    const [nestedKey] = splitByGroup(mock).severedKeys;
+
+    // Nested resolves first: it writes its own fragment (the client queues the
+    // swap until the held slot activates) but must not count toward the group.
+    dNested.resolve("nested-val");
+    await tick();
+    expect(mock.fragmentResults.get(nestedKey)).toContain("nested-val");
+    expect(mock.revealFragmentsCalls.length).toBe(0);
+
+    dA.resolve("a-val");
+    await tick();
+    expect(mock.revealFragmentsCalls.length).toBe(1);
+  });
+
+  test("Errored severs the group: wrapped Loading does not join or delay it", async () => {
+    const mock = createMockSSRContext({ async: true });
+    sharedConfig.context = mock.context;
+    const dA = deferred<string>();
+    const dWrapped = deferred<string>();
+
+    createRoot(
+      () => {
+        Reveal({
+          order: "together",
+          get children() {
+            return [
+              asyncLoading("a-fb", dA),
+              // Errored is lazy on the server — invoke its accessor as the
+              // template resolver would, so the wrapped Loading renders.
+              (
+                Errored({
+                  fallback: "errored-fb" as any,
+                  get children() {
+                    return asyncLoading("wrapped-fb", dWrapped) as any;
+                  }
+                } as any) as unknown as () => any
+              )()
+            ] as any;
+          }
+        } as any);
+      },
+      { id: "t" }
+    );
+
+    const { directKeys, severedKeys } = splitByGroup(mock);
+    expect(directKeys.length).toBe(1);
+    const [wrappedKey] = severedKeys;
+
+    // The group's only slot is the direct Loading — it releases without
+    // waiting on the Errored-wrapped boundary.
+    dA.resolve("a-val");
+    await tick();
+    expect(mock.revealFragmentsCalls.length).toBe(1);
+    expect(mock.fragmentResults.has(wrappedKey)).toBe(false);
+
+    dWrapped.resolve("wrapped-val");
+    await tick();
+    expect(mock.fragmentResults.get(wrappedKey)).toContain("wrapped-val");
   });
 });

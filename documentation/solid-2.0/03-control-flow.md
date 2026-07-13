@@ -211,6 +211,8 @@ A nested `<Reveal>` acts as a single composite slot to its parent: the parent's 
 
 This rule is absolute. There is no opt-out: wrapping children in an extra `<Loading>` does not let them escape an outer hold, because the `<Loading>` is itself just another slot that the parent holds. If you need a subtree to reveal independently of an outer group, do not nest it under that group.
 
+Group *membership* is direct-children-only: every boundary (`<Loading>` or `<Errored>`) severs reveal coordination for its subtree. A `<Loading>` nested inside another slot's content — or wrapped in an `<Errored>` — does not join the group and never delays its release; it is covered by its own fallback inside the (possibly held) slot and settles on its own schedule. While the enclosing slot is still held, any content the severed boundary streams is queued and applied the moment the slot goes live.
+
 ##### Minimally ready
 
 Each order defines when it has "first visible content" under its own policy. This is the threshold that upward notifications use to report readiness to an enclosing `Reveal`:

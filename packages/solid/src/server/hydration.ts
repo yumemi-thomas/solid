@@ -8,45 +8,16 @@ import {
   ErrorContext,
   getContext,
   setContext,
-  runWithBoundaryErrorContext
+  runWithBoundaryErrorContext,
+  RevealGroupContext
 } from "./signals.js";
 import { sharedConfig, NoHydrateContext } from "./shared.js";
 import type { SSRTemplateObject, HydrationContext } from "./shared.js";
-import type { Accessor, Context } from "./signals.js";
+import type { Accessor } from "./signals.js";
 import type { Element as SolidElement } from "../types.js";
 
 export { sharedConfig, NoHydrateContext } from "./shared.js";
 export type { HydrationContext, SSRTemplateObject } from "./shared.js";
-
-// --- Reveal SSR coordination ---
-
-export type ServerRevealGroup = {
-  id: string;
-  /**
-   * Register a child fragment (Loading) or composite child (inner Reveal).
-   * Returns `collapseFallback` (hide fallback visually, used for collapsed-sequential
-   * tail) and `held` (stash `revealFragments` swaps until the parent releases us).
-   * `held` only applies when the caller is a nested Reveal — Loadings ignore it.
-   */
-  register(
-    key: string,
-    options?: { onActivate?: () => void }
-  ): { collapseFallback: boolean; held: boolean };
-  /** Called by a child when its subtree is fully resolved. */
-  onResolved(key: string): void;
-  /**
-   * Called by a nested Reveal when it becomes "minimally resolved" under its own
-   * order (together: fully resolved; sequential: first registered fragment resolved;
-   * natural: any fragment resolved). Loadings don't fire this — their `onResolved`
-   * implies minimal readiness at the same time.
-   */
-  onMinimallyResolved?(key: string): void;
-};
-
-export const RevealGroupContext: Context<ServerRevealGroup | null> = {
-  id: Symbol("RevealGroupContext"),
-  defaultValue: null
-};
 
 /**
  * Handles errors during SSR rendering.
@@ -90,6 +61,11 @@ function ssrLoadingBoundary(
   const parentHandler = parent && runWithOwner(parent, () => getContext(ErrorContext));
   const revealGroup = parent && runWithOwner(parent, () => getContext(RevealGroupContext));
   const o = createOwner();
+  // Boundaries sever reveal-group coordination for their subtree (matching the
+  // client): only direct Loading children of a Reveal join its group. A nested
+  // Loading is covered by its own fallback inside the (possibly held) slot and
+  // activates independently instead of delaying the ancestor group (#2871).
+  setContext(RevealGroupContext, null, o);
   const id = o.id!;
   (o as any).id = id + "00"; // fake depth to match client's createLoadingBoundary nesting
 
