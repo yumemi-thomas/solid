@@ -125,6 +125,21 @@ export function Dynamic<T extends ValidComponent>(props: DynamicProps<T>): JSX.E
   return createComponent(Comp, omit(props, "component") as ComponentProps<T>);
 }
 
-export function Portal(props: { mount?: Node; useShadow?: boolean; children: JSX.Element }) {
-  throw new Error("Portal is not supported on the server");
+/**
+ * Portals are client-only islands: the server renders nothing for them —
+ * `props.children` is never evaluated, no async is started, and nothing is
+ * serialized. The client renders the content fresh once hydration settles.
+ * Throwing here instead (as earlier betas did) is strictly worse: an ancestor
+ * `Errored` catches it and bakes the error fallback into the streamed HTML
+ * for a tree that renders fine client-side (#2876).
+ *
+ * The one thing both sides must still agree on is the parent's child-id
+ * counter: the client Portal scopes its internals under one owner (one slot),
+ * so consume the matching slot here or every hydration id after the portal
+ * drifts.
+ */
+export function Portal(props: { mount?: Element; children: JSX.Element }) {
+  const o = getOwner();
+  if (o?.id != null) getNextChildId(o);
+  return undefined as unknown as JSX.Element;
 }

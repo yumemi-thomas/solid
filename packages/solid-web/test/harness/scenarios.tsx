@@ -21,7 +21,8 @@
  *   instantiation, so the hydrate spec can drive post-hydration updates.
  * - Keep async delays short (5-15ms) — the specs own the settle waits.
  */
-import { createSignal, createMemo, Show, For, Loading } from "solid-js";
+import { createSignal, createMemo, Show, For, Loading, Errored } from "solid-js";
+import { Portal } from "@solidjs/web";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -30,6 +31,12 @@ export type Scenario = {
   App: () => any;
   /** textContent of the container once hydration fully settles */
   expectedText: string;
+  /**
+   * Tokens the server-rendered HTML must contain. Defaults to expectedText —
+   * override for scenarios with client-only content (e.g. Portal), where the
+   * settled client DOM legitimately contains text the server never rendered.
+   */
+  serverText?: string;
   /** client-side update trigger (rebound on every App instantiation) */
   update?: () => void;
   expectedTextAfterUpdate?: string;
@@ -364,6 +371,119 @@ function FalsyAndProp() {
   return <ValueCard value={val() && val()!.toUpperCase()} />;
 }
 
+// ---------------------------------------------------------------------------
+// Portal: client-only island (#2876). Server renders nothing for the portal;
+// the client renders its children fresh once hydration settles. Mounting into
+// a host inside the container lets the harness textContent assertion cover
+// the portal content. The host is a signal so the `mount` prop compiles as a
+// getter — a bare identifier would be captured (undefined) at creation time,
+// before the ref assigns.
+//
+// The host <section> sits OUTSIDE the <article> that owns the click handler,
+// so the update's synthetic click on the portal content can only reach the
+// handler through `_$host` logical retargeting — which requires the portal's
+// tree anchor to actually connect during hydration. (A dead anchor still
+// mounts visible content; this is the assertion that catches it, since real
+// DOM bubbling from the host would never touch the <article>.)
+let setPortalMsg!: (v: string) => void;
+let clickPortalContent!: () => void;
+function PortalClientIsland() {
+  const [msg, set] = createSignal("modal");
+  const [clicks, setClicks] = createSignal(0);
+  const [host, setHost] = createSignal<HTMLElement>();
+  setPortalMsg = set;
+  let b!: HTMLElement;
+  clickPortalContent = () => b.click();
+  return (
+    <div>
+      <article onClick={() => setClicks(c => c + 1)}>
+        <span>page </span>
+        <span>clicks:{clicks()} </span>
+        <Portal mount={host()}>
+          <b ref={b}>{msg()}</b>
+        </Portal>
+      </article>
+      <section ref={setHost} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Portal with async children under a settled Loading boundary. The async is
+// discovered only after hydration settles (the portal gate defers children);
+// the initialized boundary must forward the pending status without regressing
+// the page to its fallback, and the portal content pops in when it resolves.
+let refreshPortalAsync!: () => void;
+function PortalAsyncContent() {
+  const [version, setVersion] = createSignal(0);
+  const [host, setHost] = createSignal<HTMLElement>();
+  refreshPortalAsync = () => setVersion(v => v + 1);
+  const data = createMemo(async () => {
+    const v = version();
+    await sleep(10);
+    return v ? `late-${v}` : "late";
+  });
+  return (
+    <Loading fallback={<p>loading</p>}>
+      <div>
+        <span>body </span>
+        <Portal mount={host()}>
+          <em>{data()}</em>
+        </Portal>
+        <section ref={setHost} />
+      </div>
+    </Loading>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Portal BEFORE id-allocating siblings. The portal's client-side primitives
+// allocate hydration ids that the server (which renders nothing) never did —
+// unless both sides advance the parent counter identically, every id after
+// the portal drifts: the sibling condition's <h4> _hk no longer matches and
+// the async memo looks up (or worse, adopts) a serialized value that belongs
+// to a different primitive.
+let refreshPortalSibling!: () => void;
+function PortalBeforeSiblings() {
+  const [version, setVersion] = createSignal(0);
+  const [host, setHost] = createSignal<HTMLElement>();
+  refreshPortalSibling = () => setVersion(v => v + 1);
+  const [shown] = createSignal(true);
+  const data = createMemo(async () => {
+    const v = version();
+    await sleep(5);
+    return v ? `srv-${v}` : "srv";
+  });
+  return (
+    <Loading fallback={<p>loading</p>}>
+      <div>
+        <span>lead </span>
+        <Portal mount={host()}>pop</Portal>
+        {shown() && <h4>head </h4>}
+        <span>{data()}</span>
+        <section ref={setHost} />
+      </div>
+    </Loading>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Portal under Errored — the exact #2876 report shape. The old server throw
+// was caught by the boundary and baked the error fallback into the stream;
+// the no-op server Portal must render the real content around it.
+function PortalUnderErrored() {
+  const [host, setHost] = createSignal<HTMLElement>();
+  return (
+    <Errored fallback={<p>err-fallback</p>}>
+      <div>
+        <span>safe </span>
+        <Portal mount={host()}>tip</Portal>
+        <section ref={setHost} />
+      </div>
+    </Errored>
+  );
+}
+
 export const scenarios: Scenario[] = [
   {
     name: "text-hole",
@@ -508,5 +628,44 @@ export const scenarios: Scenario[] = [
     update: () => setVal("hi"),
     expectedTextAfterUpdate: "set:HI",
     stableSelector: "div"
+  },
+  {
+    name: "portal-client-island",
+    App: PortalClientIsland,
+    expectedText: "page clicks:0 modal",
+    serverText: "page clicks:0",
+    update: () => {
+      setPortalMsg("MODAL");
+      clickPortalContent();
+    },
+    expectedTextAfterUpdate: "page clicks:1 MODAL",
+    stableSelector: "div, span, section"
+  },
+  {
+    name: "portal-async-content",
+    App: PortalAsyncContent,
+    async: true,
+    expectedText: "body late",
+    serverText: "body",
+    update: () => refreshPortalAsync(),
+    expectedTextAfterUpdate: "body late-1",
+    stableSelector: "span, section"
+  },
+  {
+    name: "portal-before-siblings",
+    App: PortalBeforeSiblings,
+    async: true,
+    expectedText: "lead head srvpop",
+    serverText: "lead head srv",
+    update: () => refreshPortalSibling(),
+    expectedTextAfterUpdate: "lead head srv-1pop",
+    stableSelector: "h4, section"
+  },
+  {
+    name: "portal-under-errored",
+    App: PortalUnderErrored,
+    expectedText: "safe tip",
+    serverText: "safe",
+    stableSelector: "div, span, section"
   }
 ];

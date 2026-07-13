@@ -52,9 +52,12 @@ describe("hydration parity harness — server render", () => {
       const full = shell + rest;
 
       // Text sanity: strip scripts, then tags. Template contents survive the
-      // tag strip, so late-streamed fragment text is included.
+      // tag strip, so late-streamed fragment text is included. serverText
+      // overrides expectedText for scenarios with client-only content.
       const visible = full.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<[^>]*>/g, "");
-      for (const token of scenario.expectedText.split(/\s+/).filter(Boolean)) {
+      for (const token of (scenario.serverText ?? scenario.expectedText)
+        .split(/\s+/)
+        .filter(Boolean)) {
         expect(visible).toContain(token);
       }
 

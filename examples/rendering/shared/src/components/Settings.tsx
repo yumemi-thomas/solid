@@ -3,7 +3,7 @@ import { Portal } from "@solidjs/web";
 
 const Settings = () => {
   const [text, setText] = createSignal("Hi");
-  const [modalOpen, setModalOpen] = createSignal(false);
+  const [modalOpen, setModalOpen] = createSignal(true);
   const [modalClicks, setModalClicks] = createSignal(0);
   const id = createUniqueId();
 

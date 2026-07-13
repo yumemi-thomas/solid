@@ -14,6 +14,7 @@ import {
 import {
   createComponent,
   createMemo,
+  createOwner,
   createRoot,
   getOwner,
   runWithOwner,
@@ -197,6 +198,12 @@ export const hydrate: typeof hydrateCore = (...args) => {
  * still participates in the parent's reactive scope and disposes when the
  * parent does.
  *
+ * Portals are client-only islands: the server renders nothing for them, and
+ * under hydration the children render fresh once hydration settles. Async
+ * read inside a portal therefore starts on the client — data that should be
+ * fetched on the server belongs above the portal (hoist the read, not the
+ * render), and async UI inside one wants its own `<Loading>` boundary.
+ *
  * @example
  * ```tsx
  * <Portal mount={document.getElementById("modal-root")!}>
@@ -206,15 +213,30 @@ export const hydrate: typeof hydrateCore = (...args) => {
  *
  * @description https://docs.solidjs.com/reference/components/portal
  */
-export function Portal<T extends boolean = false, S extends boolean = false>(props: {
-  mount?: Element;
-  children: JSX.Element;
-}): JSX.Element {
+export function Portal(props: { mount?: Element; children: JSX.Element }): JSX.Element {
+  // Everything the portal allocates (content memo, effects, anchor memo)
+  // lives under one dedicated id scope: the server Portal renders nothing,
+  // so without this the client primitives would advance the parent's
+  // child-id counter and shift every hydration id after the portal. Both
+  // sides consume exactly one slot from the parent instead — the owner
+  // here, `getNextChildId` in the server Portal.
+  return runWithOwner(createOwner(), () => portalImpl(props)) as unknown as JSX.Element;
+}
+
+function portalImpl(props: { mount?: Element; children: JSX.Element }): JSX.Element {
   const treeMarker = document.createTextNode(""),
     startMarker = document.createTextNode(""),
     endMarker = document.createTextNode(""),
     mount = () => props.mount || document.body,
-    content = createMemo(() => [startMarker, props.children] as unknown as JSX.Element);
+    // `ssrSource: "client"`: the server renders nothing for portals, so under
+    // hydration the children must not evaluate during the hydration walk —
+    // the gate defers the compute to the settle flush, where it runs as a
+    // plain fresh render. Ancestor boundaries are `_initialized` by then, so
+    // async discovered inside the portal forwards as ordinary pending status
+    // instead of regressing anything to a fallback (#2876).
+    content = createMemo(() => [startMarker, props.children] as unknown as JSX.Element, {
+      ssrSource: "client"
+    });
 
   createRenderEffect<[Element, JSX.Element, Owner | null]>(
     // `getOwner()` is captured in the compute-half: the effect-half runs from
@@ -247,17 +269,37 @@ export function Portal<T extends boolean = false, S extends boolean = false>(pro
         }
       };
     },
-    { schedule: true }
+    // Also `ssrSource: "client"` (like `content` above) so the effect never
+    // fires with empty content during the hydration window — the first run
+    // happens post-settle with the real children, exactly like a fresh mount.
+    { schedule: true, ssrSource: "client" }
   );
 
-  createEffect(mount, () => {
-    const m = untrack(mount);
-    const ownerRoot = getDelegatedRoot(treeMarker);
-    if (!ownerRoot || (ownerRoot as Node).contains(m)) return;
-    registerDelegatedContainer(m, ownerRoot);
-    return () => unregisterDelegatedContainer(m, ownerRoot);
-  });
+  createEffect(
+    mount,
+    () => {
+      const m = untrack(mount);
+      const ownerRoot = getDelegatedRoot(treeMarker);
+      if (!ownerRoot || (ownerRoot as Node).contains(m)) return;
+      registerDelegatedContainer(m, ownerRoot);
+      return () => unregisterDelegatedContainer(m, ownerRoot);
+    },
+    { ssrSource: "client" }
+  );
 
+  // The anchor is client-only content too: during the hydration walk the
+  // parent's insert only claims server nodes, so a bare `treeMarker` would be
+  // silently dropped and break everything resolving through
+  // `treeMarker.parentNode` (`_$host` retargeting, delegated containers).
+  // Gate it like the rest. The memo isn't caching the (constant) marker —
+  // it's the reactive carrier of the hydration gate: `ssrSource: "client"`
+  // wraps the compute in a hidden gate signal, so the memo reads undefined
+  // during the walk and flips to the marker in the settle flush, re-running
+  // the parent's insert when fresh nodes may be placed again. A memo (not a
+  // naked accessor) so the flip is equals-gated and resolved under this
+  // owner, like any control-flow return.
+  if (sharedConfig.hydrating)
+    return createMemo(() => treeMarker, { ssrSource: "client" }) as unknown as JSX.Element;
   return treeMarker as unknown as JSX.Element;
 }
 
