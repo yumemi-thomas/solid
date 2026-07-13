@@ -6,7 +6,13 @@
     "rootDir": "./src",
     "types": ["node"],
     "paths": {
-      "@solidjs/web": ["../../src/index.ts"]
+      // Resolve against the built declarations (types:web runs first in the
+      // pipeline): d.ts inputs are exempt from rootDir, so the emit lands at
+      // storage/types/index.d.ts — the path package.json advertises. Pointing
+      // at ../../src instead pulls those sources into the program and either
+      // breaks the build (rootDir: ./src) or nests the emit under
+      // storage/types/storage/src (rootDir: ..) where consumers can't find it.
+      "@solidjs/web": ["../../types/index.d.ts"]
     }
   },
   "include": ["./src"]
