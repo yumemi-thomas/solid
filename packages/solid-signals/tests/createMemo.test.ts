@@ -633,6 +633,9 @@ describe("async compute", () => {
   });
 
   it("should handle refreshes", async () => {
+    // Question-scoped pending (re-ruled 2026-07-13): refresh() with no input
+    // change is a quiet re-ask — the shown value still answers the question
+    // being asked, so isPending stays false; the new value simply reveals.
     let n = 1;
     let value;
     const a = createRoot(() => {
@@ -650,13 +653,13 @@ describe("async compute", () => {
     await new Promise(r => setTimeout(r, 0));
     expect(value).toBe(1);
     refresh(a);
-    flush(); // trigger recompute synchronously to see pending state
-    expect(value).toBe("stale");
+    flush(); // trigger recompute synchronously — quiet re-ask, never "stale"
+    expect(value).toBe(1);
     await new Promise(r => setTimeout(r, 0));
     expect(value).toBe(2);
     refresh(a);
-    flush(); // trigger recompute synchronously to see pending state
-    expect(value).toBe("stale");
+    flush();
+    expect(value).toBe(2);
     await new Promise(r => setTimeout(r, 0));
     expect(value).toBe(3);
   });
@@ -1156,7 +1159,7 @@ describe("async compute", () => {
     expect(a()).toBe(2);
   });
 
-  it("should show isPending=true after refresh triggers new generator sequence", async () => {
+  it("refresh of a generator memo is a quiet re-ask — isPending stays false (re-ruled 2026-07-13)", async () => {
     let runCount = 0;
     const a = createRoot(() => {
       const a = createMemo(async function* () {
@@ -1182,13 +1185,14 @@ describe("async compute", () => {
     expect(a()).toBe(12); // run 1, yield 2
     expect(isPending(a)).toBe(false);
 
-    // Refresh triggers new sequence - now we have stale data
+    // Refresh triggers a new sequence, but no tracked input changed value:
+    // it is a re-ask of the same question, so the old value stays honest.
     refresh(a);
     flush();
-    expect(isPending(a)).toBe(true); // has old value 12, loading new
+    expect(isPending(a)).toBe(false); // quiet re-ask — old value still answers
     expect(a()).toBe(12); // still shows old value
 
-    // After new sequence's first yield: no longer pending
+    // The new sequence's first yield reveals silently.
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -2133,8 +2137,8 @@ describe("isPending and latest with async upstream and downstream", () => {
     setId(2);
     flush();
 
-    // The latest form never pends for the signal — the held write is its
-    // self-override (mask). With no verdict change there is no companion
+    // The latest form never pends for the signal — the held write is its own
+    // self-override, already displayed. With no verdict change there is no companion
     // sub-lane firing either: the combined effect stays lane-held on its
     // pre-write pair (atomic reveal), while a separate verdict effect reads
     // the settled false.

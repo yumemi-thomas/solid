@@ -22,6 +22,7 @@ import {
   REACTIVE_MANUAL_WRITE,
   REACTIVE_NONE,
   REACTIVE_OPTIMISTIC_DIRTY,
+  REACTIVE_REASK,
   REACTIVE_RECOMPUTING_DEPS,
   REACTIVE_SNAPSHOT_STALE,
   REACTIVE_ZOMBIE,
@@ -59,6 +60,7 @@ import {
 import { cleanup, disposeChildren, getNextChildId, markDisposal } from "./owner.js";
 import {
   activeTransition,
+  armReaskClear,
   assignOrMergeLane,
   clock,
   dirtyQueue,
@@ -199,6 +201,12 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   // Track if node was pending (for detecting async resolution)
   const wasPending = !!(el._statusFlags & STATUS_PENDING);
   const wasUninitialized = !!(el._statusFlags & STATUS_UNINITIALIZED);
+  // Re-ask classification (question-scoped pending): REACTIVE_REASK means the
+  // only reason this recompute runs is an explicit re-ask (refresh) — no
+  // tracked input changed value, so a resulting pending window is quiet.
+  // Monotone guard: a node already pending on an unanswered NEW question stays
+  // non-quiet — a re-ask cannot launder a question change.
+  const isReask = !!(el._flags & REACTIVE_REASK) && !(wasPending && !el._reask);
 
   const oldcontext = context;
   context = el;
@@ -276,7 +284,18 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         updatePendingSignal(lane._source);
       }
     }
-    if (e instanceof NotReadyError) el._blocked = true;
+    let reaskChanged = false;
+    if (e instanceof NotReadyError) {
+      el._blocked = true;
+      // Classify the pending window before status propagates so downstream
+      // verdicts computed during notifyStatus already see it. When the
+      // classification flips on an already-pending node (a quiet confirm is
+      // overtaken by a real question change, or vice versa), the status graph
+      // doesn't re-propagate (same source), so verdict companions downstream
+      // are re-polled explicitly below.
+      reaskChanged = wasPending && el._reask !== isReask;
+      el._reask = isReask;
+    }
     notifyStatus(
       el,
       e instanceof NotReadyError ? STATUS_PENDING : STATUS_ERROR,
@@ -284,6 +303,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
       undefined,
       e instanceof NotReadyError ? el._optimisticLane : undefined
     );
+    if (reaskChanged) repollDownstreamVerdicts(el);
   } finally {
     tracking = prevTracking;
     if (__DEV__) strictRead = prevStrictRead;
@@ -375,10 +395,11 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     el._pendingFirstChild !== null ||
     el._pendingDisposal !== null ||
     !!(el._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED));
-  // Masked holds (hasOverride) always queue: their commit belongs to their
-  // own transition's schedule (A18 re-rule) and is unobservable under the
-  // override (A17). Revert no longer commits anything, so an unqueued masked
-  // hold would leak (INV-7) once the revert clears _transition.
+  // Override-covered holds (hasOverride) always queue: their commit belongs
+  // to their own transition's schedule (A18 re-rule) and is unobservable
+  // under the override (A17). Revert no longer commits anything, so an
+  // unqueued covered hold would leak (INV-7) once the revert clears
+  // _transition.
   needsPendingCommit &&
     (!create || el._statusFlags & STATUS_PENDING) &&
     (!el._transition || hasOverride) &&
@@ -462,7 +483,8 @@ export function computed<T>(
     _pendingDisposal: null,
     _pendingFirstChild: null,
     _inFlight: null,
-    _transition: null
+    _transition: null,
+    _reask: false
   } as Computed<T>;
   if (__DEV__) (self as any)._name = options?.name ?? "computed";
   setupComputedNode(self, options);
@@ -522,6 +544,7 @@ export function createEffectNode<T>(
     _pendingFirstChild: null,
     _inFlight: null,
     _transition: null,
+    _reask: false,
     _modified: false,
     _prevValue: undefined as T | undefined,
     _effectFn: effectFn,
@@ -773,7 +796,7 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     }
     // Verdicts come uniformly from the collected sources' pending signals
     // (computePendingState); an active leaf override is not special-cased to
-    // force `found` — the mask (A20 re-rule 2026-07-07c) reads it settled.
+    // force `found` — it is verdict-inert (question-scoped pending model).
     collectPendingSources(el);
     if (firewall) collectPendingSources(firewall);
     pendingCheckActive = true;
@@ -1149,19 +1172,65 @@ function collectPendingSources(el: Signal<any> | Computed<any>): void {
 }
 
 /**
+ * Adds a node to the active isPending() probe without reading it. Store traps
+ * call this for record-level `affects()` mark nodes ($AFFECTS): any read
+ * THROUGH a marked record witnesses the mark, so probes over its slots pick
+ * up the declared motion (and subscribe to its release).
+ *
+ * @internal
+ */
+export function witnessAffects(node: Signal<any> | Computed<any>): void {
+  pendingProbe?.sources.add(node);
+}
+
+/**
+ * Whether an in-flight pending window on `el` is quiet: every pending source
+ * blocking it is a re-ask of its own unchanged question (refresh/poll/
+ * confirm). A quiet window does not read as pending — the shown answer still
+ * answers the question being asked. Any non-quiet source (a real value change
+ * in flight) makes the whole window read pending.
+ */
+function quietPending(el: Computed<any>): boolean {
+  if (el._pendingSources) {
+    for (const source of el._pendingSources) if (!source._reask) return false;
+    return true;
+  }
+  if (el._pendingSource) return el._pendingSource._reask;
+  // Own-async pending (the node IS the source, e.g. a firewall's own fetch).
+  return el._reask;
+}
+
+/**
+ * The core async-pending clause of the verdict: in-flight work with a
+ * previous value to show (not an initial load), asking a NEW question (quiet
+ * re-asks are silent).
+ */
+function newQuestionInFlight(comp: Computed<any>): boolean {
+  return (
+    !!(comp._statusFlags & STATUS_PENDING) &&
+    !(comp._statusFlags & STATUS_UNINITIALIZED) &&
+    !quietPending(comp)
+  );
+}
+
+/**
  * Compute whether a node is in "pending" state.
  *
- * The rule (A20, re-ruled 2026-07-07c): a node is pending iff the value the
- * reader observes is going to be superseded by work already in motion.
- * - Plain reads watch the committed channel: pending during an in-flight
- *   fetch AND while a resolved value is still held by its transition.
- * - `latest` reads watch the fresh channel (the shadow, `_parentSource`
- *   branch): they already show held values, so only actually-in-flight async
- *   supersedes them.
- * - An active optimistic override is certainty by decree: the writer declared
- *   the value not-superseded, so the node reads false for the override's
- *   whole lifetime (the mask). Action-scoped "saving" affordances belong in
- *   the data (co-written flags), never in verdicts.
+ * The rule (question-scoped pending, re-ruled 2026-07-13): a read is pending
+ * iff a VALUE CHANGE is in flight for it that has not yet revealed, or it
+ * carries a live `affects()` mark.
+ * - Same-question motion (refresh/poll/confirm — a re-ask whose tracked
+ *   inputs are value-stable) is NOT pending: the shown data still answers the
+ *   question being asked (`quietPending`).
+ * - A new question (any tracked input changed value since the last reveal)
+ *   pends everything under the source until its answer reveals. Nothing can
+ *   silence it — pendingness is monotone.
+ * - Optimistic writes are verdict-inert: an active override neither reads
+ *   pending on its own slot (it IS the displayed value; only a differing
+ *   held correction re-opens the verdict) nor masks anything else (the
+ *   store-wide mask / A21 is deleted).
+ * - `affects(target, ...keys)` is the declaration verb: a live mark is
+ *   additive pending on the named slot, held to its transaction's settle.
  * Returns false for initial async loads (no stale data to show — loading, not
  * pending) and for disposed nodes (a dead source can never settle).
  */
@@ -1171,60 +1240,53 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   // so it is never pending (INV-9 — a latched true would hold a spinner
   // forever; the PR #2845 disposal edge).
   if (comp._flags & REACTIVE_DISPOSED) return false;
+  // Declared motion: a live affects() mark is additive pending — nothing
+  // subtracts it before its transaction releases it.
+  if (el._affectsCount) return true;
   const firewall = (el as FirewallSignal<any>)._firewall;
-  // Store-wide mask: the store is the primitive, so an optimistic write
-  // decrees the WHOLE store settled — firewall, written leaves, untouched
-  // siblings, structural reads — for the lifetime of the override/transition.
-  // "Once you write optimistically you manage your own pending state."
-  if (((firewall || comp) as Computed<any>)._optimisticMask) return false;
   if (el._parentSource) {
     // The latest() shadow's verdict: pending follows the channel you read
     // (A20), and the latest view is the fresh channel — it already shows
     // transition-held values, so a hold cannot supersede what it shows. It
     // reads pending only while async that will replace what it shows is
-    // actually in flight ("false as soon as that async is done, even if the
-    // same update has other async still running").
+    // actually in flight — and only when that flight is a real question
+    // change; a quiet re-ask leaves the latest view honest too.
     const parentNode = el._parentSource as FirewallSignal<any>;
-    // Mask (A20): an active override IS the value by decree — nothing in
-    // motion supersedes it, including its own firewall's refetch.
-    if (hasActiveOverride(parentNode)) return false;
+    if (parentNode._affectsCount) return true;
     // A store leaf's async status lives on its firewall, not the leaf signal
     // itself (#2831). A leaf downstream of an in-flight refetch is pending in
     // both forms — the latest view strips holds, never in-flight async.
     const parent = (parentNode._firewall || parentNode) as Computed<any>;
-    if (parent._optimisticMask) return false;
-    return !!(
-      parent._statusFlags & STATUS_PENDING && !(parent._statusFlags & STATUS_UNINITIALIZED)
-    );
+    return newQuestionInFlight(parent);
   }
-  // Mask (A20, re-ruled 2026-07-07c): an active override is certainty by
-  // decree — writing it declares the shown value not-superseded, so the node
-  // is never pending while it holds, no matter what async is in motion around
-  // it. Action-scoped "saving" affordances belong in the data (co-written
-  // flags), not in verdicts.
-  if (hasActiveOverride(el)) return false;
   // A held store leaf defers to its firewall: when the firewall's own work is
   // in flight the firewall carries the verdict (probes collect it alongside
   // the leaf — #2831), so the leaf reports only holds the firewall does NOT
-  // explain: manual projection writes, or holds outliving a settled firewall.
-  // Without this, leaf companions flip in lockstep with the firewall and
-  // churn duplicate effect runs during initial projection loads.
-  if (firewall && el._pendingValue !== NOT_PENDING) {
+  // explain: manual projection writes, holds outliving a settled firewall —
+  // or holds under a QUIET firewall flight (a quiet re-ask doesn't explain a
+  // held value change; the hold is real digestion and reads pending here).
+  // Without this deferral, leaf companions flip in lockstep with the firewall
+  // and churn duplicate effect runs during initial projection loads.
+  if (firewall && el._pendingValue !== NOT_PENDING && !hasActiveOverride(el)) {
     return (
       !!(firewall._flags & REACTIVE_MANUAL_WRITE) ||
-      (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING))
+      (!firewall._inFlight && !(firewall._statusFlags & STATUS_PENDING)) ||
+      (!!(firewall._statusFlags & STATUS_PENDING) && quietPending(firewall))
     );
   }
-  // Upstream: value held in transition (not during initial load). Applies to
-  // resting optimistic nodes too (V1/A13): revert targets no longer exist
-  // (2026-07-07b — every held value is a pending commit), so a held value is
-  // always a transition/refetch hold and reads pending, exactly like a plain
-  // async memo (the #2799 carve-out that skipped this for resting optimistic
-  // nodes muted entangled refetch holds and was removed with the #2838 work).
-  if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) return true;
-  // Downstream: async in flight with previous value (not initial load)
-  // STATUS_UNINITIALIZED is cleared on first successful completion
-  return !!(comp._statusFlags & STATUS_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED));
+  // Value held in transition (not during initial load): a known change not
+  // yet revealed — pending. With an active optimistic override the override
+  // IS the displayed value (verdict-inert); only a held authoritative value
+  // that DIFFERS from the displayed override is a correction in flight and
+  // re-opens the verdict — a matching confirm reveals nothing.
+  if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) {
+    if (hasActiveOverride(el))
+      return !el._equals || !el._equals(el._pendingValue as any, el._overrideValue as any);
+    return true;
+  }
+  // Async in flight with previous value (not initial load; quiet re-asks are
+  // silent). STATUS_UNINITIALIZED is cleared on first successful completion.
+  return newQuestionInFlight(comp);
 }
 
 /**
@@ -1267,6 +1329,32 @@ export function updateChildCompanions(el: Computed<any>): void {
   ) {
     if (child._pendingSignal || child._latestValueComputed) updatePendingSignal(child);
   }
+}
+
+/**
+ * Re-derive verdict companions across everything downstream of `el`. Needed
+ * when a pending source's quiet classification (`_reask`) flips without a
+ * status change: `notifyStatus` won't re-propagate (same pending source
+ * already registered on subscribers), but every downstream verdict that
+ * consults `quietPending` just changed (the navigation-overtakes-quiet-confirm
+ * case). Walks subs and firewall children, poking companions along the way.
+ */
+function repollDownstreamVerdicts(el: Computed<any>): void {
+  const visited = new Set<Signal<any> | Computed<any>>();
+  const visit = (node: Signal<any> | Computed<any>) => {
+    if (visited.has(node)) return;
+    visited.add(node);
+    if (node._pendingSignal || node._latestValueComputed) updatePendingSignal(node);
+    for (let s = node._subs; s !== null; s = s._nextSub) visit(s._sub);
+    for (
+      let child: FirewallSignal<any> | null = (node as Computed<any>)._child ?? null;
+      child !== null;
+      child = child._nextChild
+    ) {
+      visit(child);
+    }
+  };
+  visit(el);
 }
 
 /**
@@ -1432,8 +1520,14 @@ export function isPending(fn: () => any): boolean {
   } catch (e) {
     collectPending();
     if (e instanceof NotReadyError) {
-      if (probe.found && !(e.source?._statusFlags & STATUS_UNINITIALIZED)) return true;
-      if (context) throw e;
+      const uninitialized = !!(e.source?._statusFlags & STATUS_UNINITIALIZED);
+      if (probe.found && !uninitialized) return true;
+      // Only a truly uninitialized source re-throws (loading participates in
+      // <Loading>/readiness like the read itself would). An INITIALIZED
+      // source that threw NotReady while the probe found nothing pending is
+      // a quiet re-ask window — the verdict is an honest `false`, and
+      // rethrowing would poison the surrounding memo with NotReady.
+      if (context && uninitialized) throw e;
     }
     // When a thunk throws during pending check (e.g., accessing undefined values
     // from uninitialized async memos), return probe.found. The error indicates
@@ -1504,6 +1598,17 @@ export function refresh<T>(target: Refreshable<T>): void {
     typeof node._fn === "function" &&
     !(node._flags & (REACTIVE_DISPOSED | REACTIVE_MANUAL_WRITE))
   ) {
+    // A refresh with no value-change dirt already queued is a re-ask of the
+    // same question: mark it so the recompute classifies any resulting
+    // pending window as quiet (not pending). If the node is already dirty
+    // from a real input change, the question changed — don't mark.
+    // REACTIVE_IN_HEAP counts as dirt: insertSubs schedules subscribers by
+    // heap insertion alone (no DIRTY/CHECK flag), so a same-batch value
+    // change followed by refresh() must not be laundered into a quiet re-ask.
+    if (!(node._flags & (REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_IN_HEAP))) {
+      node._flags |= REACTIVE_REASK;
+      armReaskClear();
+    }
     node._flags = (node._flags & ~REACTIVE_CHECK) | REACTIVE_DIRTY;
     insertIntoHeap(node, node._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
     schedule();

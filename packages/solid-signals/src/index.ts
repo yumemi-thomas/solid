@@ -75,6 +75,7 @@ export type {
   MemoOptions,
   NoInfer
 } from "./signals.js";
+export { affects } from "./affects.js";
 export { mapArray, repeat, type Maybe } from "./map.js";
 export * from "./store/index.js";
 export {

@@ -37,7 +37,7 @@ This pushes “loading state” to UI structure (boundaries) instead of leaking 
 
 `Loading` shows fallback while the subtree needs unresolved async values.
 
-Importantly, `Loading` is intended to cover **branch readiness**: it handles a subtree or newly mounted branch attempting to read async-derived values that are not ready yet. After that branch has produced content, subsequent revalidation/refresh should generally not “kick you back” into the fallback; use `isPending` for “background work is happening” UI.
+Importantly, `Loading` is intended to cover **branch readiness**: it handles a subtree or newly mounted branch attempting to read async-derived values that are not ready yet. After that branch has produced content, subsequent revalidation/refresh should generally not “kick you back” into the fallback; use `isPending` for “a change to this data is on the way” UI.
 
 ```jsx
 <Loading fallback={<Spinner />}>
@@ -65,27 +65,29 @@ By default, once a `Loading` boundary has rendered content, it keeps showing sta
 
 This is useful for route-level or key-level transitions where you don't want to wait on all data loading before updating the UI. Show the fallback again instead.
 
-### `isPending(fn)` (stale-while-revalidating queries)
+### `isPending(fn)` (in-flight change queries)
 
-`isPending` answers: “Does this read currently touch pending async work?”
+`isPending` answers: “Is a value change in flight for this read that hasn't revealed yet?”
 
-`isPending` performs the read you pass it and returns whether any value read by that function is currently pending. Because it is a read, its placement matters: reading async data can participate in Loading/SSR readiness, while reading upstream state only observes that state's own pending transition.
+It returns `true` when a tracked input of the data has changed and the new answer hasn't landed (e.g. navigation changed an id and the refetch is still in flight), or when in-flight work has declared it will change the data (`affects`, RFC 06). A re-ask of the *same* question is silent: a bare `refresh()`, polling, or a confirming refetch after a mutation does not read as pending — the data you're showing still answers what's being asked, and the fresh value reveals silently. To make a reload read as pending, declare it: `affects(user); refresh(user)`.
+
+`isPending` performs the read you pass it, so its placement matters: reading async data can participate in Loading/SSR readiness, while reading upstream state only observes that state's own pending transition.
 
 ```js
-const users = createMemo(() => fetchUsers());
-const posts = createMemo(() => fetchPosts());
+const users = createMemo(() => fetchUsers(query()));
+const posts = createMemo(() => fetchPosts(query()));
 
 const listPending = () => isPending(() => users() || posts());
 
 return (
   <Loading fallback={<Spinner />}>
-    <Show when={listPending()}>{/* subtle "refreshing…" indicator */}</Show>
+    <Show when={listPending()}>{/* subtle "updating…" indicator while a new query loads */}</Show>
     <List users={users()} posts={posts()} />
   </Loading>
 );
 ```
 
-Because this pending read reaches the async values directly, it sits under the same `Loading` boundary as the data read. On first load, the boundary owns fallback UI; after the values have resolved once, the inline indicator can show stale-while-revalidating state. `isPending` may also be used outside a `Loading` boundary when the expression only reads upstream state that cannot itself be not ready.
+Because this pending read reaches the async values directly, it sits under the same `Loading` boundary as the data read. On first load, the boundary owns fallback UI; after the values have resolved once, the inline indicator shows while a changed `query()` is being answered. `isPending` may also be used outside a `Loading` boundary when the expression only reads upstream state that cannot itself be not ready.
 
 The intent is to replace `.loading`-style flags that belong to a specific primitive (`createResource`) with something that works for any expression. Since the expression is read normally, the same primitive can guard interactive controls that directly depend on async data when it is placed under the boundary that owns that read:
 
@@ -150,7 +152,7 @@ Wrap reads of async accessors in `Loading` to control where fallback UI appears.
 
 #### `resource.loading` → `isPending`
 
-In 1.x, `.loading` was a property on the resource itself. In 2.0, loading state is structural (handled by `Loading` boundaries while a branch is not ready) and expression-level for revalidation:
+In 1.x, `.loading` was a property on the resource itself. In 2.0, loading state is structural (handled by `Loading` boundaries while a branch is not ready) and expression-level for in-flight changes:
 
 ```js
 // 1.x
@@ -160,12 +162,14 @@ const [user] = createResource(id, fetchUser);
 // 2.0
 const user = createMemo(() => fetchUser(id()));
 <Loading fallback={<UserSkeleton />}>
-  <Show when={isPending(() => user())}>Refreshing...</Show>
+  <Show when={isPending(() => user())}>Updating...</Show>
   <UserDetails user={user()} />
 </Loading>
 ```
 
-Remember: `isPending(fn)` actively reads `fn`. If that read is not ready yet, it follows the same `Loading` path as reading the value directly. Put pending indicators under the boundary that should own initial fallback UI; after the value has resolved once, `isPending` is useful for inline revalidation indicators.
+Here `isPending` fires while a changed `id()` is being answered. Note the split from 1.x: `.loading` was also true during a plain `refetch`, but a bare `refresh()` re-asks the same question and is *not* pending in 2.0. For a refetch that should read as pending, declare it (`affects(user); refresh(user)`); for a process affordance (“saving…”, a disabled reload button), co-write an optimistic flag in the action instead (RFC 06).
+
+Remember: `isPending(fn)` actively reads `fn`. If that read is not ready yet, it follows the same `Loading` path as reading the value directly. Put pending indicators under the boundary that should own initial fallback UI.
 
 #### `resource.refetch` → `refresh()`
 
@@ -181,7 +185,7 @@ const user = createMemo(() => fetchUser(id()));
 refresh(user);
 ```
 
-Like an `action(...)` result, `refresh()` is an imperative callback when you hand it to UI. Call it from event handlers, effects, or action workflows; use `Loading` / `isPending` to observe readiness.
+Like an `action(...)` result, `refresh()` is an imperative callback when you hand it to UI. Call it from event handlers, effects, or action workflows. A bare `refresh()` is a quiet re-ask — the fresh value reveals silently and `isPending` stays `false`; pair it with `affects()` when the reload should read as pending (RFC 06).
 
 #### `resource.mutate` → `createOptimisticStore` / `action`
 

@@ -1804,6 +1804,10 @@ export function refresh<T>(_target: Refreshable<T>): void {
   return undefined;
 }
 
+export function affects(_target: unknown, ..._keys: PropertyKey[]): void {
+  return undefined;
+}
+
 export function action<T extends (...args: any[]) => any>(fn: T): T {
   return fn;
 }

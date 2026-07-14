@@ -1,3 +1,4 @@
+import { pendingCheckActive } from "../core/core.js";
 import { SUPPORTS_PROXY } from "../core/index.js";
 import { createMemo } from "../signals.js";
 import {
@@ -15,8 +16,8 @@ import {
   STORE_VALUE,
   storeLookup,
   trackSelf,
+  witnessAffectsMark,
   wrap,
-  type Store,
   type StoreNode
 } from "./store.js";
 
@@ -43,7 +44,12 @@ function snapshotImpl<T>(
   if (map && map.has(item)) return map.get(item) as T;
   if (!map) map = new Map();
   if ((target = item[$TARGET] || lookup?.get(item)?.[$TARGET])) {
-    if (track) trackSelf(target, $TRACK);
+    if (track) {
+      trackSelf(target, $TRACK);
+      // A tracked walk reads THROUGH the record without touching the proxy
+      // traps — witness the record's affects() channel like a trap read would.
+      if (pendingCheckActive) witnessAffectsMark(target);
+    }
     override = mergedOverlay(target);
     isArray = Array.isArray(target[STORE_VALUE]);
     map.set(

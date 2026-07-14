@@ -53,6 +53,12 @@ const companionOwners = new Set<AnyNode>();
 // override must have reverted (overrides never outlive their transition).
 const optimisticNodes = new Set<AnyNode>();
 
+// INV-10: nodes that received an affects() mark. At quiescence every mark
+// must have been released (the refcount balances — a leaked mark would hold
+// a pending verdict forever; a double release would flip it early or wedge
+// the count negative-as-truthy).
+const affectsMarkedNodes = new Set<AnyNode>();
+
 // (Former INV-8 hold-provenance tracking is gone with revert targets: every
 // held `_pendingValue` is now a pending commit — there is only one kind.)
 export function devTrackHeldPending(node: AnyNode): void {
@@ -68,6 +74,11 @@ export function devTrackCompanionOwner(node: AnyNode): void {
 export function devTrackOptimistic(node: AnyNode): void {
   if (!__TEST__) return;
   optimisticNodes.add(node);
+}
+
+export function devTrackAffects(node: AnyNode): void {
+  if (!__TEST__) return;
+  affectsMarkedNodes.add(node);
 }
 
 // INV-3: transition async blockers may only be registered from the queue
@@ -112,17 +123,6 @@ export function createAsyncReporters(): Map<Computed<any>, Set<Computed<any>>> {
  * silently into `_value` under the override mask — A17 — so reverting is
  * just dropping the override.)
  */
-/** What a read of the companion would observe right now (A17 read order). */
-function observableVerdict(pendingSignal: Signal<boolean>): boolean {
-  return (
-    pendingSignal._overrideValue !== undefined && pendingSignal._overrideValue !== NOT_PENDING
-      ? pendingSignal._overrideValue
-      : pendingSignal._pendingValue !== NOT_PENDING
-        ? pendingSignal._pendingValue
-        : pendingSignal._value
-  ) as boolean;
-}
-
 export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) => boolean): void {
   if (!__TEST__) return;
   for (const node of optimisticNodes) {
@@ -135,32 +135,6 @@ export function devCheckActiveOverrides(isRegisteredForRevert: (node: AnyNode) =
       isRegisteredForRevert(node),
       "INV-2",
       "a node has an active optimistic override but is not registered in any _optimisticNodes list — the override can never revert"
-    );
-    // INV-10 (mask, re-rule 2026-07-07c): an active override is certainty by
-    // decree — the node's verdict must read false for as long as the override
-    // holds, no matter what async is in motion. A companion reporting true
-    // here means a verdict path missed the mask.
-    const pendingSignal = node._pendingSignal;
-    if (pendingSignal) {
-      assertInvariant(
-        observableVerdict(pendingSignal) === false,
-        "INV-10",
-        "isPending companion reports true while its owner holds an active optimistic override — the mask (override = certainty by decree) was bypassed"
-      );
-    }
-  }
-  // INV-10 store-wide: while a firewall carries the optimistic mask (any live
-  // optimistic write to its store), EVERY companion under it — the firewall's
-  // own and every probed leaf's — must read false. The store is the primitive
-  // the mask covers.
-  for (const node of companionOwners) {
-    if (isDisposed(node) || !node._pendingSignal) continue;
-    const maskOwner = ((node as any)._firewall || node) as Computed<any>;
-    if (!maskOwner._optimisticMask) continue;
-    assertInvariant(
-      observableVerdict(node._pendingSignal) === false,
-      "INV-10",
-      "isPending companion reports true under a store-wide optimistic mask — a verdict path missed the firewall's _optimisticMask"
     );
   }
 }
@@ -308,6 +282,18 @@ export function devCheckQuiescent(isQueuedForCommit: (node: AnyNode) => boolean)
       node._overrideValue === undefined || node._overrideValue === NOT_PENDING,
       "INV-6",
       "an optimistic override survived to quiescence — resolveOptimisticNodes missed the node (its transition completed without reverting it)"
+    );
+  }
+
+  for (const node of affectsMarkedNodes) {
+    if (isDisposed(node) || !node._affectsCount) {
+      affectsMarkedNodes.delete(node);
+      continue;
+    }
+    assertInvariant(
+      false,
+      "INV-10",
+      "an affects() mark survived to quiescence — a registration was never released (leaked from its transaction) or the refcount went unbalanced"
     );
   }
 

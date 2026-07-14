@@ -3,6 +3,7 @@ export {
   $REFRESH,
   $TRACK,
   action,
+  affects,
   createOwner,
   createReaction,
   createRoot,

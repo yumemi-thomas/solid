@@ -4,6 +4,7 @@ export {
   $REFRESH,
   $TRACK,
   action,
+  affects,
   createEffect,
   createMemo,
   createOptimistic,

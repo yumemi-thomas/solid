@@ -1,4 +1,5 @@
 import {
+  affects,
   createMemo,
   createLoadingBoundary,
   createProjection,
@@ -676,7 +677,7 @@ describe("Projection isPending behavior", () => {
     expect(finalResult?.value).toBe(20);
   });
 
-  it("isPending with refresh() and subscribed effect", async () => {
+  it("refresh() is a quiet re-ask; affects() + refresh() pends the subscribed effect (re-ruled 2026-07-13)", async () => {
     let runCount = 0;
     let proj;
     const results: { pending: boolean; value: number }[] = [];
@@ -707,20 +708,34 @@ describe("Projection isPending behavior", () => {
 
     results.length = 0;
 
-    // Refresh triggers new async - now we have stale data
+    // A bare refresh is a re-ask of the same question — the shown value
+    // stays honest, so no pending state is ever published; the new value
+    // reveals silently.
     refresh(proj);
     flush();
-
-    // Should see pending state
-    const pendingResult = results.find(r => r.pending);
-    expect(pendingResult).toBeDefined();
+    expect(results.find(r => r.pending)).toBeUndefined();
 
     await Promise.resolve();
     await Promise.resolve();
 
     expect(proj.value).toBe(200);
+    expect(results[results.length - 1]).toEqual({ pending: false, value: 200 });
+
+    results.length = 0;
+
+    // The DECLARED reload pends the subscribed effect for the whole window.
+    affects(proj);
+    refresh(proj);
+    flush();
+    expect(results.find(r => r.pending && r.value === 200)).toBeDefined();
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(proj.value).toBe(300);
     const finalResult = results[results.length - 1];
     expect(finalResult?.pending).toBe(false);
+    expect(finalResult?.value).toBe(300);
   });
 
   it("isPending with async generator and subscribed effect", async () => {

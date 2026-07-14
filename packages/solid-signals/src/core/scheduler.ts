@@ -8,12 +8,13 @@ import {
   REACTIVE_DISPOSED,
   REACTIVE_MANUAL_WRITE,
   REACTIVE_OPTIMISTIC_DIRTY,
+  REACTIVE_REASK,
   REACTIVE_SNAPSHOT_STALE,
   REACTIVE_ZOMBIE,
   STATUS_PENDING,
   STATUS_UNINITIALIZED
 } from "./constants.js";
-import { currentOptimisticLane, snapCompanionsToState } from "./core.js";
+import { currentOptimisticLane, snapCompanionsToState, updatePendingSignal } from "./core.js";
 import { DEV, emitDiagnostic } from "./dev.js";
 import { NotReadyError } from "./error.js";
 import { insertIntoHeap, runHeap, type Heap } from "./heap.js";
@@ -32,6 +33,7 @@ import {
   devCheckFlushStart,
   devCheckMergedLaneEmpty,
   devCheckQuiescent,
+  devTrackAffects,
   endAsyncReporterWrites
 } from "./invariants.js";
 import type { Computed, Signal } from "./types.js";
@@ -84,6 +86,7 @@ function canUseSimpleSyncFlush(queue: GlobalQueue): boolean {
     activeLanes.size === 0 &&
     queue._children.length === 0 &&
     queue._optimisticNodes.length === 0 &&
+    queue._affectsNodes.length === 0 &&
     queue._optimisticStores.size === 0 &&
     transientStoreNodes.size === 0
   );
@@ -98,6 +101,10 @@ function sweepTransientStoreNodes(): void {
     }
     if (node._pendingValue !== NOT_PENDING) continue;
     if (node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING) continue;
+    // A live affects() mark keeps the node addressable: sweeping it would
+    // detach the refcount from the slot (a fresh probe would upsert a new,
+    // unmarked node for the same property).
+    if (node._affectsCount) continue;
     transientStoreNodes.delete(node);
     node._unobserved?.();
   }
@@ -172,6 +179,9 @@ export interface Transition {
   _asyncReporters: Map<Computed<any>, Set<Computed<any>>>;
   _pendingNodes: Signal<any>[];
   _optimisticNodes: OptimisticNode[]; // Optimistic signals/computeds pending transition reversion
+  // Live affects() marks owned by this transaction: one entry per
+  // registration; each releases one refcount at settle/revert.
+  _affectsNodes: OptimisticNode[];
   _optimisticStores: Set<any>;
   _actions: Array<Generator<any, any, any> | AsyncGenerator<any, any, any>>;
   _queueStash: QueueStub;
@@ -187,6 +197,13 @@ function mergeTransitionState(target: Transition, outgoing: Transition): void {
   target._actions.push(...outgoing._actions);
   for (const lane of activeLanes) if (lane._transition === outgoing) lane._transition = target;
   target._optimisticNodes.push(...outgoing._optimisticNodes);
+  if (outgoing._affectsNodes.length) {
+    // Move (don't copy): the global queue may still alias the outgoing
+    // array, and the adoption pass in initTransition would re-push its
+    // contents into the target — double-releasing every mark.
+    target._affectsNodes.push(...outgoing._affectsNodes);
+    outgoing._affectsNodes.length = 0;
+  }
   for (const store of outgoing._optimisticStores) target._optimisticStores.add(store);
   // Legal transfer, not a new registration: entries move between transitions.
   if (__DEV__) beginAsyncReporterWrites();
@@ -207,9 +224,9 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
   for (let i = 0; i < len; i++) {
     const node = nodes[i];
     node._optimisticLane = undefined;
-    // Revert is a pure drop: there is no revert target to commit — masked
-    // authoritative values hold in _pendingValue and elevate on their OWN
-    // transition's schedule (A18 as re-ruled 2026-07-07). A pv still held
+    // Revert is a pure drop: there is no revert target to commit —
+    // override-covered authoritative values hold in _pendingValue and
+    // elevate on their OWN transition's schedule (A18 as re-ruled 2026-07-07). A pv still held
     // here belongs to a transition that hasn't completed and must NOT commit
     // early. (Reverts run inside finalizePureQueue AFTER commitPendingNodes,
     // so holds owned by the completing transition have already elevated.)
@@ -388,6 +405,7 @@ export class GlobalQueue extends Queue {
   _pendingNode: Signal<any> | null = null;
   _pendingNodes: Signal<any>[] = [];
   _optimisticNodes: OptimisticNode[] = [];
+  _affectsNodes: OptimisticNode[] = [];
   _optimisticStores: Set<any> = new Set();
   static _update: (el: Computed<unknown>) => void;
   static _dispose: (el: Computed<unknown>, self: boolean, zombie: boolean) => void;
@@ -407,6 +425,7 @@ export class GlobalQueue extends Queue {
           this._pendingNode = null;
           this._pendingNodes = [];
           this._optimisticNodes = [];
+          this._affectsNodes = [];
           this._optimisticStores = new Set();
 
           // Run lane effects immediately (before stashing) - lanes with no pending async
@@ -524,6 +543,7 @@ export class GlobalQueue extends Queue {
         _pendingNodes: [],
         _asyncReporters: __DEV__ ? createAsyncReporters() : new Map(),
         _optimisticNodes: [],
+        _affectsNodes: [],
         _optimisticStores: new Set(),
         _actions: [],
         _queueStash: { _queues: [[], []], _children: [] },
@@ -559,6 +579,14 @@ export class GlobalQueue extends Queue {
       }
       this._optimisticNodes = activeTransition._optimisticNodes;
     }
+    if (this._affectsNodes !== activeTransition._affectsNodes) {
+      // Adopt ambient marks into the transaction (marks don't hijack the
+      // node's _transition — a mark on a plain signal must not entangle
+      // unrelated writes to it). After adoption the queue aliases the
+      // transition's array, so later registrations land there directly.
+      activeTransition._affectsNodes.push(...this._affectsNodes);
+      this._affectsNodes = activeTransition._affectsNodes;
+    }
     for (const lane of activeLanes) {
       if (!lane._transition) lane._transition = activeTransition;
     }
@@ -585,14 +613,26 @@ export function queuePendingNode(node: Signal<any>): void {
   globalQueue._pendingNodes.push(node);
 }
 
+// Sticky: flips true on the first refresh() ever (the only setter of
+// REACTIVE_REASK) so the hot notification loop skips the per-subscriber flag
+// clear entirely in apps that never refresh.
+let reaskArmed = false;
+export function armReaskClear(): void {
+  reaskArmed = true;
+}
+
 export function insertSubs(node: Signal<any> | Computed<any>, optimistic: boolean = false): void {
   // Get source lane: prefer node's own lane over current context
   // This is important for isPending signals which need their own lane to flush immediately
   const sourceLane = (node as any)._optimisticLane || currentOptimisticLane;
 
   const hasSnapshot = (node as any)._snapshotValue !== undefined;
+  const clearReask = reaskArmed;
 
   for (let s = node._subs; s !== null; s = s._nextSub) {
+    // A value-change notification is a new question for the subscriber: any
+    // pending re-ask mark (refresh) it carried is superseded.
+    if (clearReask) s._sub._flags &= ~REACTIVE_REASK;
     if (hasSnapshot && s._sub._config & CONFIG_IN_SNAPSHOT_SCOPE) {
       s._sub._flags |= REACTIVE_SNAPSHOT_STALE;
       continue;
@@ -692,6 +732,11 @@ export function finalizePureQueue(
       }
       completingTransition._gatedSubs.clear();
     }
+    // Declared motion ends with the transaction: settle (or plain flush end
+    // for ambient marks) releases each registration's refcount.
+    releaseAffectsMarks(
+      completingTransition ? completingTransition._affectsNodes : globalQueue._affectsNodes
+    );
     const optimisticStores = completingTransition
       ? completingTransition._optimisticStores
       : globalQueue._optimisticStores;
@@ -718,6 +763,40 @@ export function trackOptimisticStore(store: any): void {
   // After initTransition, globalQueue._optimisticStores IS activeTransition._optimisticStores (same reference)
   globalQueue._optimisticStores.add(store);
   schedule();
+}
+
+/**
+ * Registers one `affects()` mark on a node: bumps the refcount, records the
+ * registration with the current transaction (after initTransition the queue's
+ * array aliases the active transition's, mirroring `_optimisticNodes`), and
+ * pokes the node's verdict companions so an already-materialized `false`
+ * flips reactively.
+ *
+ * @internal
+ */
+export function registerAffectsMark(node: OptimisticNode): void {
+  node._affectsCount = (node._affectsCount || 0) + 1;
+  globalQueue._affectsNodes.push(node);
+  if (__DEV__) devTrackAffects(node);
+  if (node._affectsCount === 1) updatePendingSignal(node);
+  schedule();
+}
+
+/**
+ * Releases one batch of affects marks (a settling transaction's, or the
+ * ambient batch at a plain flush end). Companion writes go through the
+ * settlement snap (committed, not transition-scoped) so releasing a mark
+ * can't open a fresh override window that would itself need settlement.
+ */
+function releaseAffectsMarks(nodes: OptimisticNode[]): void {
+  if (!nodes.length) return;
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    node._affectsCount!--;
+    if (!node._affectsCount && (node._pendingSignal || node._latestValueComputed))
+      snapCompanionsToState(node);
+  }
+  nodes.length = 0;
 }
 
 function reassignPendingTransition(pendingNodes: Signal<any>[]) {

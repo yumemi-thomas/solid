@@ -10,6 +10,14 @@ export const REACTIVE_OPTIMISTIC_DIRTY = 1 << 7;
 export const REACTIVE_SNAPSHOT_STALE = 1 << 8;
 export const REACTIVE_LAZY = 1 << 9;
 export const REACTIVE_MANUAL_WRITE = 1 << 10;
+/**
+ * The pending recompute is a re-ask of the same question: `refresh()` dirtied
+ * the node while no tracked input changed value. Cleared whenever a real
+ * value-change notification arrives (`insertSubs`), and consumed by
+ * `recompute` into the node's `_reask` classification — a quiet (re-ask)
+ * pending window does not read as pending (question-scoped pending model).
+ */
+export const REACTIVE_REASK = 1 << 11;
 
 // Static configuration bits packed into Owner/Computed/Signal _config.
 export const CONFIG_OWNED_WRITE = 1 << 0;

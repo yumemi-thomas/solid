@@ -18,7 +18,8 @@ A `Signal`/`Computed` participating in async/transitions carries:
 | `_value` | Committed, visible value | `recompute` (create/effect paths), `commitPendingNode`, `resolveOptimisticNodes`, `asyncWrite` (lane branch) |
 | `_pendingValue` | Transition-held next value; `NOT_PENDING` sentinel when absent (one meaning — a pending commit; revert targets were eliminated 2026-07-07b, §5e) | `setSignal` (non-optimistic), `recompute` (held branch), `asyncWrite` (override-active branch) |
 | `_overrideValue` | Optimistic override; `undefined` = not an optimistic node, `NOT_PENDING` = resting optimistic node, else = active override | `setSignal` (optimistic branch), `recompute` (lane-corrected), `resolveOptimisticNodes` (clears to `NOT_PENDING`) |
-| `_optimisticMask` | Store-wide mask counter on a derived store's firewall: number of store targets under it with live optimistic state; non-zero forces every verdict under the firewall to `false` (A21) | `maskStoreTarget` (store.ts) — incremented from `prepareStoreWrite`/`deleteProperty` on the first optimistic write to a target, decremented from `clearOptimisticStore`/`clearOptimisticOverride` |
+| `_affectsCount` | Live `affects()` mark refcount: non-zero forces the node's verdict to `true` (declared motion, §5g). Carried by source nodes, store leaf nodes, and per-record `$AFFECTS` nodes | `registerAffectsMark` (+1, staged with the current transaction), `releaseAffectsMarks` (−1 at settle / flush end) |
+| `_reask` | Question-scoped classification of the CURRENT pending window: `true` = the in-flight recompute is a re-ask of the same question (refresh with no input value change) — quiet, not pending (§5g). Meaningless while not `STATUS_PENDING` | `recompute` (from the `REACTIVE_REASK` flag), cleared by `clearStatus` and by value-change notifications (`insertSubs` clears the flag pre-recompute) |
 | `_statusFlags` | `STATUS_PENDING` / `STATUS_ERROR` / `STATUS_UNINITIALIZED` | `notifyStatus`, `clearStatus`, commit paths |
 | `_error` | Current error (`NotReadyError` for pending, `StatusError`-wrapped for real) | compute catch, `notifyStatus` |
 | `_pendingSignal` | Lazily-created companion: boolean "is pending" signal for `isPending()` | `getPendingSignal`, updated via `updatePendingSignal` |
@@ -32,9 +33,10 @@ Semantics of the `(_pendingValue, _overrideValue)` pair for an optimistic node
 
 - `(NOT_PENDING, NOT_PENDING)` — resting optimistic node, behaves like a plain node.
 - `(NOT_PENDING, active value)` — active override; readers see the override, `_value` is untouched.
-- `(held value, active value)` — fresh authoritative value arrived under the mask; it holds in
-  `_pendingValue` and elevates to `_value` on its own transition's commit. Reverting is a pure
-  drop of the override — `_value` is already correct.
+- `(held value, active value)` — fresh authoritative value arrived while the override displays;
+  it holds in `_pendingValue` and elevates to `_value` on its own transition's commit. Reverting
+  is a pure drop of the override — `_value` is already correct. (Verdict: pending iff the held
+  value *differs* from the displayed override — a matching confirm reveals nothing; §5g.)
 
 ## 2. Lanes (`lanes.ts`)
 
@@ -109,11 +111,11 @@ Confidence: **high** = implementation self-consistency, assert now.
   forever (the #2845 disposal edge). Enforced by the disposal guard in
   `computePendingState` plus the `snapCompanionsToState` call in
   `disposeChildren`.
-- **INV-10 (high)** The mask (A20/A21, 2026-07-07c): a companion's
-  *observable* verdict (override first, A17) is `false` whenever its owner
-  holds an active override, and whenever its firewall's `_optimisticMask` is
-  non-zero — checked for every node in `_optimisticNodes` and every tracked
-  companion owner at the end of each flush.
+- **INV-10 (high)** Affects-count balance (question-scoped model, 2026-07-13;
+  replaces the retired mask assertion): at quiescence every node that ever
+  carried an `affects()` mark has `_affectsCount === 0` — every registration
+  was released by exactly one settle/flush-end. A leaked count would latch a
+  verdict `true` forever (the declared-motion analogue of the INV-9 latch).
 
 Rejected for assertion (state space too dynamic, would need semantic rulings):
 whether `_optimisticLane` must always resolve to a live lane (stale lanes are
@@ -273,13 +275,13 @@ The invariant set is now:
   admits plain optimistic signals, which have no authoritative writer).
 - **Revert is a pure drop.** `resolveOptimisticNodes` clears the override,
   compares it against `_value`, notifies on divergence — commits nothing.
-  Masked holds queue into their transition (`recompute`'s queue gate allows
-  override-active nodes through; `asyncWrite`'s override branch collapsed
-  into the resting branch), so nothing leaks (INV-7) and nothing reveals
-  before its transition completes.
-- Masked holds do **not** notify subscribers (`asyncWrite` skips
-  `insertSubs` under an active override): the visible value is unchanged;
-  the revert is the notification point.
+  Holds under an active override queue into their transition (`recompute`'s
+  queue gate allows override-active nodes through; `asyncWrite`'s override
+  branch collapsed into the resting branch), so nothing leaks (INV-7) and
+  nothing reveals before its transition completes.
+- Holds under an active override do **not** notify subscribers (`asyncWrite`
+  skips `insertSubs` under an active override): the visible value is
+  unchanged; the revert is the notification point.
 
 This fixed a real clobber bug (**V5**, pinned in the spec suite): the old
 first-override stash (`_pendingValue = _value`) overwrote a refetch value
@@ -287,16 +289,24 @@ held on a resting node in the blocked-merged window, so the revert
 resurrected stale data. INV-2 no longer asserts a revert target; the INV-8
 hold-provenance tracker was deleted (one meaning — nothing to distinguish).
 
-An intermediate design ("silent commit": masked arrivals write `_value`
-directly, elevation immediate) was implemented and discarded — it kept the
-old reveal-at-revert timing but gave `_value` a context-dependent meaning.
-The commit-point discipline (maintainer re-rule of A18) reveals corrections
-atomically with their own (possibly merged) transition — reading
-`isPending === false` throughout under the A20 mask (2026-07-07c);
+An intermediate design ("silent commit": arrivals under an override write
+`_value` directly, elevation immediate) was implemented and discarded — it
+kept the old reveal-at-revert timing but gave `_value` a context-dependent
+meaning. The commit-point discipline (maintainer re-rule of A18) reveals
+corrections atomically with their own (possibly merged) transition;
 corrections still *propagate* internally on arrival, so downstream refetches
-start immediately — the schedule only gates the reveal.
+start immediately — the schedule only gates the reveal. (Verdict during the
+window: under the 2026-07-13 model a held *correction* — differing from the
+displayed override — reads pending; a matching confirm stays quiet. The
+2026-07-07c mask read `false` throughout; §5g.)
 
-## 5f. The mask model (2026-07-07c — A20/A21 re-rule, #2844/#2728)
+## 5f. The mask model (2026-07-07c — A20/A21 re-rule, #2844/#2728) — SUPERSEDED
+
+> **SUPERSEDED 2026-07-13 by the question-scoped pending model (§5g).** The
+> mask (`_optimisticMask`/`STORE_MASKED`/`maskStoreTarget`) is deleted;
+> optimistic writes no longer decree certainty. Kept for the reasoning
+> record — the *value* lifecycle described here (A17/A18, holds, reveals)
+> survives unchanged; only the verdicts moved.
 
 The verdict oracle was rewritten around one rule: **an active override is
 certainty by decree, and `isPending` follows the channel the read observes.**
@@ -354,6 +364,92 @@ Dead machinery removed with the model (verified by suite + census):
 Cost: net −27 B raw / +8 B gzip on minified `dist/prod.js`; core reactivity
 and store benchmarks flat within noise (best-of-3 isolated runs).
 
+## 5g. Question-scoped pending (2026-07-13 — supersedes the mask, #2844/#2728)
+
+The verdict was re-derived from one definition: **a read is pending iff a
+value change is in flight for it that has not yet revealed, or it carries a
+live `affects()` mark.** "In flight" is question-scoped: async whose tracked
+inputs are value-stable (refresh/poll/confirm — a *re-ask* of the same
+question) is not a value change in flight — the shown answer still answers
+the question being asked. Three consequences replace the mask's one rule:
+
+1. **Same-question motion is silent.** A bare `refresh()` (or any re-ask with
+   no input value change) never pends. The fresh value reveals silently. This
+   absorbs the honest half of the rejected `background()` proposal without
+   erasing ground truth: a *new* question (any tracked input changed value)
+   pends everything under the source until its answer reveals, and **nothing
+   can silence it** — pendingness is monotone, additive-only.
+2. **Optimistic writes are verdict-inert.** An active override neither reads
+   pending on its own slot (it IS the displayed value; only a held
+   authoritative *correction* that differs from the override re-opens the
+   verdict — a matching confirm reveals nothing) nor masks anything else. The
+   store-wide mask (A21) and the node mask (A20-as-decree) are deleted: an
+   override displaying over an in-flight new question is an honest mixed
+   state — `{ value: guess, pending: true }`. To downstream async, an
+   optimistic write is a real input change (it launches real fetches that
+   pend their own slots).
+3. **`affects(target, ...keys)` is the sole declaration verb.** A mark is
+   additive pending on exactly the named slots (store record → every read
+   through it; leaf keys → those slots; accessor → that source), live from
+   declaration to its transaction's settle/revert (ambient marks release at
+   flush end). The declared reload idiom — `affects(x); refresh(x)` — is how
+   process intent ("this work will change x") enters the verdict when the
+   graph can't see it yet.
+
+Verdict ladder (`computePendingState`): disposal guard → live
+`_affectsCount` → latest-shadow branch (owner's `_affectsCount`, then owner
+async in flight and non-quiet) → held-leaf firewall deferral (quiet firewall
+flight doesn't explain a held change) → held value (correction check under
+an override) → own async in flight and non-quiet. "Quiet" = every blocking
+pending source is a re-ask of its own unchanged question (`quietPending`,
+reading `_reask`).
+
+Supporting machinery:
+
+- **Re-ask classification.** `refresh()` sets `REACTIVE_REASK` unless the
+  node already carries value-change dirt (DIRTY/CHECK **or heap membership —
+  `insertSubs` schedules by heap insertion alone**); `insertSubs` clears the
+  flag on every value-change notification (a new question supersedes the
+  re-ask); `recompute` consumes it into `_reask` with a monotone guard (a
+  node already pending on an unanswered new question stays non-quiet);
+  `clearStatus` resets it on landing. When a reask classification changes
+  while pending, `repollDownstreamVerdicts` re-derives companions downstream.
+- **Affects lifecycle** (scheduler.ts): `registerAffectsMark` bumps
+  `_affectsCount`, stages the registration with the current transaction
+  (ambient registrations are adopted by `initTransition`, merged by
+  `mergeTransitionState`, mirroring `_optimisticNodes`), and pokes the
+  node's companions; `releaseAffectsMarks` decrements at the transaction's
+  settle (or plain flush end for ambient marks) and snaps companions
+  through the settlement checkpoint (committed, not transition-scoped).
+- **Store addressing** (store.ts): `affects(record)` marks a per-record
+  `$AFFECTS` node; `affects(record, ...keys)` marks the leaf nodes.
+  Witnessing: the `get`/`has`/`ownKeys` traps and the `snapshot`/`deep`
+  walk (utils.ts — it bypasses traps) upsert-and-witness the record's
+  `$AFFECTS` node into the active probe, so probes subscribe to the channel
+  *before* any mark exists — a later `affects()` wakes materialized `false`
+  verdicts through the node's companion. The upsert is skipped for untracked
+  probes (`tracking` off): they can't be woken by a later mark, so they only
+  need marks that already exist — no node, no allocation. The per-node
+  companion channel (not a shared version signal) is load-bearing here:
+  companions carry their own optimistic lane, which is what lets the wake-up
+  escape an incomplete transition's effect stash.
+- **Probe rethrow scope** (core.ts `isPending`): only a truly UNINITIALIZED
+  source's NotReady rethrows out of the probe (loading participates in
+  readiness); an initialized source throwing NotReady during a quiet re-ask
+  window yields an honest `false` instead of poisoning the surrounding memo.
+- **INV-10** (invariants.ts): affects-count balance at quiescence (§5).
+
+The trade taken knowingly (the "silent unknowns" objection): a re-ask that
+*will* return different data (server-side change, poll catching motion) is
+silent until the new value reveals — the system cannot know, and the model
+prefers honest silence over blanket alarm. The escape hatch is declarative:
+whoever knows the work matters declares `affects`. What the mask model
+answered with entangled decrees ("the store is the boundary") this model
+answers with slot-scoped facts and slot-scoped declarations; the foos bug
+and list over-lighting both fall out (an optimistic increment can't silence
+an unrelated in-flight navigation; an optimistic list add doesn't pend
+sibling rows because the confirm refresh is a quiet re-ask).
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose
@@ -380,6 +476,20 @@ and store benchmarks flat within noise (best-of-3 isolated runs).
 
 ## 7. Decision log
 
+- 2026-07-13: **A20/A21 re-ruled — question-scoped pending** (supersedes the
+  2026-07-07c mask; converged from the #2844/#2728 threads with GabbeV and
+  brenelz after cause-scoped pending, per-path masking + UNCHANGED vouching,
+  `background()`, and lane-bounded vouches were each rejected). The verdict
+  definition is now "a value change in flight that has not yet revealed, or a
+  live `affects()` mark": same-question re-asks (refresh/poll/confirm) are
+  silent; a new question pends monotonically and nothing silences it;
+  optimistic writes are verdict-inert (display without decree — honest mixed
+  state over an in-flight question); `affects(target, ...keys)` is the sole,
+  additive declaration verb. Vouching, `UNCHANGED`, and the store-wide mask
+  are deleted concepts. `isPending` keeps its name (isStale was weighed —
+  semantics now match "stale" but the argument-taking form already reads as
+  data-scoped; revisit only with docs-team pressure). Implementation in §5g;
+  scenario matrix pinned in `tests/question-scoped-pending.test.ts`.
 - 2026-07-08: two open items carried out of the retired issue-triage log:
   (1) **queued cleanup from #2838** — the `_parentSource !== el` read-ternary
   exemption and the `NotReadyError` catch in `read()`'s latest branch
@@ -392,7 +502,9 @@ and store benchmarks flat within noise (best-of-3 isolated runs).
   (the guess would outlive its revert). Flag if it comes up.
 - 2026-07-07c: **A20 re-ruled — the mask** (supersedes the previous day's
   "overrides are unsettled" entry below; GabbeV model adopted after the
-  #2844/#2728 discussions and the todos-example precedent). An active
+  #2844/#2728 discussions and the todos-example precedent). **(SUPERSEDED
+  2026-07-13 by the question-scoped pending re-rule above; kept for the
+  reasoning record.)** An active
   override reads `isPending === false` for its whole lifetime, on every node
   kind, in both forms — action affordances belong in the data (co-written
   flags / separate `createOptimistic(false)`), never in verdicts. **A21**

@@ -1,5 +1,6 @@
 import {
   action,
+  affects,
   createEffect,
   createLoadingBoundary,
   createMemo,
@@ -845,9 +846,10 @@ describe("createOptimistic", () => {
 
       // Optimistic value is immediate
       expect($data!()).toBe(20);
-      // The mask (2026-07-07c): the active override is certainty by decree —
-      // not pending even while its own confirming fetch is in flight.
-      expect(isPending($data!)).toBe(false);
+      // Question-scoped pending (re-ruled 2026-07-13, supersedes the mask):
+      // the override displays but is verdict-inert — id=2 is a new question
+      // whose answer is in flight, so the slot reads pending through it.
+      expect(isPending($data!)).toBe(true);
       // latest() returns the optimistic value
       expect(latest($data!)).toBe(20);
 
@@ -894,9 +896,10 @@ describe("createOptimistic", () => {
 
       // Optimistic value is immediate
       expect($data!()).toBe(999);
-      // The mask (2026-07-07c): even a wrong guess is decreed settled — the
-      // correction reveals through a value change, never a pending window.
-      expect(isPending($data!)).toBe(false);
+      // Question-scoped pending (re-ruled 2026-07-13, supersedes the mask):
+      // a guess — right or wrong — cannot silence the in-flight new question;
+      // the slot reads pending until the authoritative answer reveals.
+      expect(isPending($data!)).toBe(true);
       // latest() returns the optimistic value
       expect(latest($data!)).toBe(999);
 
@@ -909,7 +912,7 @@ describe("createOptimistic", () => {
       expect(isPending($data!)).toBe(false);
     });
 
-    it("isPending reports pending while refresh() refetches an async optimistic accessor (#2799)", async () => {
+    it("refresh() of an async optimistic accessor is a quiet re-ask — not pending (#2799, re-ruled 2026-07-13)", async () => {
       let resolveFetch: ((v: number[]) => void) | null = null;
       const makeFetch = () => new Promise<number[]>(r => (resolveFetch = r));
 
@@ -929,11 +932,12 @@ describe("createOptimistic", () => {
       expect($data()).toEqual([1, 2, 3]);
       expect(isPending(() => $data())).toBe(false);
 
-      // refresh() forces a refetch; the resolved value is still visible while the
-      // new fetch is in flight, so isPending must report true (same as an async memo).
+      // refresh() forces a refetch, but no tracked input changed value: it is
+      // a re-ask of the same question (question-scoped pending model), so the
+      // shown answer stays honest — NOT pending (same as an async memo).
       refresh($data);
       flush();
-      expect(isPending(() => $data())).toBe(true);
+      expect(isPending(() => $data())).toBe(false);
 
       // Settling the refetch clears pending.
       resolveFetch!([4, 5, 6]);
@@ -943,15 +947,15 @@ describe("createOptimistic", () => {
       expect(isPending(() => $data())).toBe(false);
     });
 
-    it("isPending fires on the FIRST refresh when it is the only consumer (#2806)", async () => {
+    it("a declared reload (affects + refresh) fires isPending when it is the only consumer (#2806, re-ruled 2026-07-13)", async () => {
       // The #2799 test above keeps the node alive with a value-observer
-      // (`createRenderEffect(data, () => {})`), which drives the pending-node
-      // commit that clears STATUS_UNINITIALIZED on the initial load. When the
-      // only consumer is a reactive `isPending(() => data())` (the real JSX
-      // `disabled={isPending(data)}` shape), a resting optimistic node's async
-      // completion must still commit like a plain async memo — otherwise the
-      // flag is never cleared and the *first* refresh reads as an initial load,
-      // so isPending never reports true.
+      // (`createRenderEffect(data, () => {})`). When the only consumer is a
+      // reactive `isPending(() => data())` (the real JSX
+      // `disabled={isPending(data)}` shape), the companion wiring must still
+      // work end-to-end. Under the question-scoped model a bare refresh is a
+      // quiet re-ask (never pending), so the observable pin is the declared
+      // form: `affects(data)` announces the reload and must drive the
+      // sole-consumer effect to `true`, releasing back to `false` at settle.
       let resolveFetch: ((v: number[]) => void) | null = null;
       const makeFetch = () => new Promise<number[]>(r => (resolveFetch = r));
 
@@ -976,16 +980,31 @@ describe("createOptimistic", () => {
       flush();
       expect(seen.at(-1)).toBe(false);
 
-      // The very FIRST refresh must drive the effect to `true`.
+      // A bare refresh is a quiet re-ask: the sole consumer never sees true.
       refresh($data);
       flush();
-      expect(seen.at(-1)).toBe(true);
-
-      // Settling the refetch swaps in the new value and clears pending.
+      expect(seen.at(-1)).toBe(false);
       resolveFetch!([4, 5, 6]);
       await Promise.resolve();
       flush();
       expect($data()).toEqual([4, 5, 6]);
+      expect(seen.at(-1)).toBe(false);
+
+      // A DECLARED reload pends the slot for the reload's whole window.
+      const reload = action(function* () {
+        affects($data);
+        refresh($data);
+        yield Promise.resolve();
+      });
+      const done = reload();
+      flush();
+      expect(seen.at(-1)).toBe(true);
+
+      await done;
+      resolveFetch!([7, 8, 9]);
+      await Promise.resolve();
+      flush();
+      expect($data()).toEqual([7, 8, 9]);
       expect(seen.at(-1)).toBe(false);
     });
 
@@ -2138,10 +2157,11 @@ describe("createOptimistic", () => {
       chain.setOptimistic(20);
       flush();
 
-      // Optimistic is set — masked (2026-07-07c): the override is certainty
-      // by decree, so the node reads settled even mid-refetch.
+      // Optimistic is set and displays, but is verdict-inert (re-ruled
+      // 2026-07-13): source=2 is a new question in flight, so the node reads
+      // pending right through the override.
       expect(chain.optimistic()).toBe(20);
-      expect(chain.pendingComputes.at(-1)).toBe(false);
+      expect(chain.pendingComputes.at(-1)).toBe(true);
 
       // Resolve second async (lane ready)
       chain.resolveSecond();
@@ -2197,7 +2217,9 @@ describe("createOptimistic", () => {
       chain.setOptimistic(999); // Wrong!
       flush();
 
-      expect(chain.pendingComputes.at(-1)).toBe(false); // masked — the guess is decreed
+      // Re-ruled 2026-07-13: the wrong guess displays but cannot silence the
+      // in-flight new question — pending until the correction reveals.
+      expect(chain.pendingComputes.at(-1)).toBe(true);
 
       // Resolve second async (lane flushes with wrong value)
       chain.resolveSecond();
@@ -2315,9 +2337,10 @@ describe("createOptimistic", () => {
       setOptimistic(20);
       flush();
 
-      // The override masks its own node (2026-07-07c); the downstream async
-      // memo reports its own in-flight fetch — that's the independence.
-      expect(pendingOptimisticComputes.at(-1)).toBe(false);
+      // Both report their own in-flight questions independently (re-ruled
+      // 2026-07-13: the override displays but is verdict-inert — source=2 is
+      // a new question for the optimistic node too).
+      expect(pendingOptimisticComputes.at(-1)).toBe(true);
       expect(pendingSecondComputes.at(-1)).toBe(true);
 
       // Resolve second (lane flushes)
@@ -2328,8 +2351,8 @@ describe("createOptimistic", () => {
       expect(values).toEqual([10, 20]);
       // secondAsync's own async work is resolved.
       expect(pendingSecondComputes.at(-1)).toBe(false);
-      // optimistic stays masked while firstAsync confirms the guess.
-      expect(pendingOptimisticComputes.at(-1)).toBe(false);
+      // optimistic stays pending while firstAsync's answer is in flight.
+      expect(pendingOptimisticComputes.at(-1)).toBe(true);
 
       // Resolve first
       resolveFirst!();

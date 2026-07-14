@@ -9,7 +9,7 @@ This is a short, practical guide for migrating from Solid 1.x to Solid 2.0’s A
 - **Batching/reads**: setters don’t immediately change what reads return; values become visible after the microtask batch flushes (or via `flush()`).
 - **Effects**: `createEffect` is split (compute → apply). Cleanup is usually “return a cleanup function”.
 - **Lifecycle**: `onMount` is replaced by `onSettled` (and it can return cleanup).
-- **Async UI**: use `<Loading>` for first readiness; use `isPending(() => expr)` for “refreshing…” indicators.
+- **Async UI**: use `<Loading>` for first readiness; use `isPending(() => expr)` for “a change is on the way” indicators (input-driven refetches and `affects()` declarations — a bare `refresh()` is silent).
 - **Lists**: `Index` is gone; use `<For keyed={false}>`. Default `For` receives raw items, while `keyed={false}` receives item accessors and a stable numeric index.
 - **Stores**: prefer draft-first setters; `storePath(...)` exists as an opt-in helper for the old path-style ergonomics.
 - **Plain values**: `snapshot(store)` replaces `unwrap(store)` when you need a plain non-reactive value.
@@ -320,23 +320,23 @@ The resource tuple features map to standalone APIs:
 
 | 1.x resource feature | 2.0 replacement                                                             |
 | -------------------- | --------------------------------------------------------------------------- |
-| `resource.loading`   | `Loading` (initial), `isPending(() => resource())` (revalidation)           |
+| `resource.loading`   | `Loading` (initial), `isPending(() => resource())` (in-flight input change); a bare `refresh()` is silent — use `affects(resource); refresh(resource)` or a co-written optimistic flag for refetch affordances |
 | `resource.error`     | `Errored` boundary or effect `error` option                                 |
 | `refetch()`          | `refresh(resource)`                                                         |
 | `mutate()`           | `createOptimisticStore` + `action` (see [RFC 06](06-actions-optimistic.md)) |
 
 See [RFC 05 — createResource migration](05-async-data.md#createresource--async-computations--loading) for detailed before/after examples of each pattern.
 
-### Initial loading vs revalidation: `Loading` vs `isPending`
+### Initial loading vs in-flight changes: `Loading` vs `isPending`
 
 - **`Loading`**: initial “not ready yet” UI boundary.
-- **`isPending(fn)`**: active pending read for the exact expression in `fn`; when that expression can be not ready, place it under the `Loading` boundary that should own initial fallback UI. It can live outside the boundary when it only reads upstream state that cannot be not ready.
+- **`isPending(fn)`**: active pending read for the exact expression in `fn` — `true` while a value change is in flight for it (an input changed, or in-flight work declared it with `affects`); a bare `refresh()`/poll of the same inputs is silent. When the expression can be not ready, place it under the `Loading` boundary that should own initial fallback UI. It can live outside the boundary when it only reads upstream state that cannot be not ready.
 
 ```jsx
 const listPending = () => isPending(() => users() || posts());
 
 <Loading fallback={<Spinner />}>
-  <Show when={listPending()}>{/* subtle "refreshing…" indicator */}</Show>
+  <Show when={listPending()}>{/* subtle "updating…" indicator while a new query loads */}</Show>
   <List users={users()} posts={posts()} />
 </Loading>;
 ```
@@ -670,9 +670,10 @@ These APIs are new additions (not renames of 1.x APIs):
 - **`action(fn)`** — wraps generator/async generator mutations with transition coordination.
 - **`createOptimistic` / `createOptimisticStore`** — signal/store primitives whose writes revert when a transition completes.
 - **`createProjection(fn, seed)`** — derived store with reactive reconciliation.
-- **`isPending(fn)`** — expression-level "stale while revalidating" check.
+- **`isPending(fn)`** — expression-level "unrevealed change in flight" check.
 - **`latest(fn)`** — peek at in-flight values during transitions.
-- **`refresh(target)`** — explicit recomputation/invalidation of derived reads.
+- **`refresh(target)`** — explicit recomputation/invalidation of derived reads (a quiet re-ask — not pending).
+- **`affects(target, ...keys)`** — declare that in-flight work will change the targeted data; the named slots read pending until the transaction settles.
 - **`resolve(fn)`** — returns a Promise that resolves when a reactive expression settles.
 - **`Loading` `on` prop** — controls when a Loading boundary re-shows fallback during revalidation.
 - **`deep(store)`** — deep observation of a store (tracks all nested changes).

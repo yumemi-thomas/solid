@@ -55,6 +55,12 @@ export interface RawSignal<T> {
   _pendingSignal?: Signal<boolean>; // Lazy signal for isPending()
   _latestValueComputed?: Computed<T>; // Lazy computed for latest()
   _parentSource?: Signal<any> | Computed<any>; // Back-reference for parent-child lane relationship
+  /**
+   * Live `affects()` marks on this node (refcount). Non-zero is declared
+   * motion: the node reads pending regardless of graph state, until every
+   * declaring transaction settles/reverts and releases its mark.
+   */
+  _affectsCount?: number;
 }
 
 export interface FirewallSignal<T> extends RawSignal<T> {
@@ -100,12 +106,14 @@ export interface Computed<T> extends RawSignal<T>, Owner {
   _child: FirewallSignal<any> | null;
   _notifyStatus?: (status?: number, error?: any) => void;
   /**
-   * Store-wide optimistic mask (count of this firewall's store targets with
-   * live optimistic writes). Non-zero decrees the whole store settled for
-   * `isPending` — the store is the primitive the mask covers (A20 re-rule
-   * 2026-07-07c).
+   * Question-scoped pending classification of the node's CURRENT pending
+   * window: `true` means the in-flight recompute is a re-ask of the same
+   * question (refresh/poll/confirm — no tracked input changed value), so the
+   * shown answer still answers the question and the node reads NOT pending.
+   * Set by `recompute` from `REACTIVE_REASK`, cleared on landing
+   * (`clearStatus`). Meaningless while not STATUS_PENDING.
    */
-  _optimisticMask?: number;
+  _reask: boolean;
 }
 
 export interface Root extends Owner {

@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import {
   action,
+  affects,
   createEffect,
   createMemo,
   createRenderEffect,
@@ -62,10 +63,16 @@ describe("latest/isPending consistency (#2831)", () => {
     expect(log).toEqual(["pRead=false pLatest=false latest=v1"]);
     log.length = 0;
 
+    // A bare refresh is a quiet re-ask (question-scoped pending, re-ruled
+    // 2026-07-13) — neither probe flips. The DECLARED reload (affects +
+    // refresh) is what pends, and it must be visible to both probe forms:
+    // the mark sits on the store record, and the refetch lives on the leaf's
+    // firewall — `isPending(() => latest(...))` has to see it the same as
+    // the plain read probe.
     cur = deferred<{ value: string }>();
+    affects(store);
     refresh(store);
     flush();
-    // The refetch lives on the leaf's firewall — both probes must see it.
     expect(log).toEqual(["pRead=true pLatest=true latest=v1"]);
     log.length = 0;
 

@@ -224,7 +224,7 @@ export function handleAsync<T>(
       setter(value);
       if (wasUninitialized) clearStatus(el, true);
     } else if (el._overrideValue !== undefined) {
-      // Optimistic node — resting OR masked by an active override — holds
+      // Optimistic node — resting OR covered by an active override — holds
       // through the shared pending-node path, exactly like a plain async memo,
       // so the commit clears STATUS_UNINITIALIZED (#2806) and elevation to
       // _value happens on this value's OWN transition schedule (A18 as
@@ -399,6 +399,10 @@ export function handleAsync<T>(
 export function clearStatus(el: Computed<any>, clearUninitialized: boolean = false): void {
   if (el._pendingSource || el._pendingSources) clearPendingSources(el);
   if (el._blocked) el._blocked = false;
+  // The pending window is over; its quiet classification dies with it.
+  // (Unconditional: _reask is baked into the node literals, so this is a
+  // plain store to an existing slot — no shape change.)
+  el._reask = false;
   el._statusFlags = clearUninitialized ? 0 : el._statusFlags & STATUS_UNINITIALIZED;
   if (el._error) setPendingError(el);
   // Update pending signal for isPending() reactivity

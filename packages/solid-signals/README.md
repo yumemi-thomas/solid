@@ -108,7 +108,7 @@ const data = createMemo(async () => {
 });
 
 // Check async state for this read
-isPending(data); // true while this read touches pending async work
+isPending(data); // true while an unrevealed value change is in flight for this read
 latest(data); // last resolved value; follows the not-ready path if no value has resolved yet
 ```
 
@@ -223,9 +223,10 @@ createRoot(dispose => {
 | ------------------------ | ------------------------------------------------------------------ |
 | `flush()`                | Process all pending updates                                        |
 | `untrack(fn)`            | Run `fn` without tracking dependencies                             |
-| `isPending(accessor)`    | Check if an async accessor is revalidating stale data              |
+| `isPending(accessor)`    | Check if an unrevealed value change is in flight for a read        |
 | `latest(accessor)`       | Get the last resolved value, or follow not-ready if none exists    |
-| `refresh(accessor)`      | Re-trigger an async computation                                    |
+| `refresh(accessor)`      | Re-trigger an async computation (a quiet re-ask — not pending)     |
+| `affects(target, ...keys)` | Declare that in-flight work will change the targeted data (reads pending until settle) |
 | `resolve(fn)`            | Returns a promise that resolves when a reactive expression settles |
 | `mapArray(list, mapFn)`  | Reactive array mapping with keyed reconciliation                   |
 | `repeat(count, mapFn)`   | Reactive repeat based on a reactive count                          |

@@ -1,5 +1,12 @@
 import { STATUS_PENDING } from "../core/constants.js";
-import { snapshotCaptureActive, snapshotSources, strictRead } from "../core/core.js";
+import {
+  pendingCheckActive,
+  snapshotCaptureActive,
+  snapshotSources,
+  strictRead,
+  tracking,
+  witnessAffects
+} from "../core/core.js";
 import { DEV, emitDiagnostic, registerGraph } from "../core/dev.js";
 import {
   $REFRESH,
@@ -15,8 +22,6 @@ import {
   suppressComputedRecompute,
   trackOptimisticStore,
   untrack,
-  updateChildCompanions,
-  updatePendingSignal,
   type Computed,
   type Refreshable,
   type Signal
@@ -74,7 +79,10 @@ type DataNodes = Record<PropertyKey, DataNode>;
 export const $TRACK = Symbol(__DEV__ ? "STORE_TRACK" : 0),
   $TARGET = Symbol(__DEV__ ? "STORE_TARGET" : 0),
   $PROXY = Symbol(__DEV__ ? "STORE_PROXY" : 0),
-  $DELETED = Symbol(__DEV__ ? "STORE_DELETED" : 0);
+  $DELETED = Symbol(__DEV__ ? "STORE_DELETED" : 0),
+  // Node-map slot carrying a record-level `affects()` mark: any read through
+  // the record witnesses it into the active isPending() probe.
+  $AFFECTS = Symbol(__DEV__ ? "STORE_AFFECTS" : 0);
 
 export const STORE_VALUE = "v",
   STORE_OVERRIDE = "o",
@@ -85,8 +93,7 @@ export const STORE_VALUE = "v",
   STORE_WRAP = "w",
   STORE_LOOKUP = "l",
   STORE_FIREWALL = "f",
-  STORE_OPTIMISTIC = "p",
-  STORE_MASKED = "m";
+  STORE_OPTIMISTIC = "p";
 const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
@@ -101,8 +108,6 @@ export type StoreNode = {
   [STORE_LOOKUP]?: WeakMap<any, any>;
   [STORE_FIREWALL]?: Computed<any>;
   [STORE_OPTIMISTIC]?: boolean;
-  /** This target currently contributes to its firewall's store-wide mask. */
-  [STORE_MASKED]?: boolean;
   [STORE_SNAPSHOT_PROPS]?: Record<PropertyKey, any>;
 };
 
@@ -277,12 +282,13 @@ function getNode<T>(
           if (
             typeof property === "symbol" &&
             property !== $TRACK &&
+            property !== $AFFECTS &&
             symbolKeyedRecords.has(nodes)
           ) {
             const syms = Object.getOwnPropertySymbols(nodes);
             let hasUserSymbol = false;
             for (let i = 0, len = syms.length; i < len; i++) {
-              if (syms[i] !== $TRACK) {
+              if (syms[i] !== $TRACK && syms[i] !== $AFFECTS) {
                 hasUserSymbol = true;
                 break;
               }
@@ -302,8 +308,72 @@ function getNode<T>(
     s._snapshotValue = sv === undefined ? NO_SNAPSHOT : sv;
     snapshotSources?.add(s);
   }
-  if (typeof property === "symbol" && property !== $TRACK) symbolKeyedRecords.add(nodes);
+  if (typeof property === "symbol" && property !== $TRACK && property !== $AFFECTS)
+    symbolKeyedRecords.add(nodes);
   return (nodes[property] = s);
+}
+
+/**
+ * Witness the record-level `affects()` channel into the active isPending()
+ * probe. Called from the read traps (and `snapshot`/`deep` in utils.ts, which
+ * walk records without touching traps): any read THROUGH the record makes
+ * probes over its slots observe declared motion. The $AFFECTS node is
+ * upserted here (not just when a mark registers) so the probe subscribes to
+ * the channel BEFORE any mark exists — a later `affects(record)` must wake
+ * already-materialized `false` verdicts through the node's companion, whose
+ * own lane escapes an incomplete transition's effect stash (a shared
+ * version signal cannot: its subscribers get held with the transition).
+ * Callers guard on `pendingCheckActive`, so plain reads never pay for this.
+ *
+ * @internal
+ */
+export function witnessAffectsMark(target: StoreNode): void {
+  const node =
+    target[STORE_NODE]?.[$AFFECTS] ||
+    // Upsert only when a tracking scope can subscribe: an untracked probe
+    // can't be woken by a later mark anyway, so it only needs to see marks
+    // that already exist — no node, no subscription, no allocation (not
+    // even the nodes map).
+    (tracking
+      ? getNode(
+          getNodes(target, STORE_NODE),
+          $AFFECTS,
+          undefined,
+          target[STORE_FIREWALL],
+          false,
+          target[STORE_OPTIMISTIC]
+        )
+      : undefined);
+  if (node) witnessAffects(node);
+}
+
+/**
+ * Resolves the store nodes an `affects()` declaration marks: with `keys`, the
+ * leaf node per named slot (upserted so the mark has an addressable carrier);
+ * without, the record's $AFFECTS node — witnessed by every read through the
+ * record, so the mark covers the whole subtree without touching siblings.
+ *
+ * @internal
+ */
+export function getStoreAffectsNodes(target: StoreNode, keys: PropertyKey[]): DataNode[] {
+  const nodes = getNodes(target, STORE_NODE);
+  if (!keys.length) {
+    return [
+      getNode(nodes, $AFFECTS, undefined, target[STORE_FIREWALL], false, target[STORE_OPTIMISTIC])
+    ];
+  }
+  const result: DataNode[] = [];
+  for (const key of keys) {
+    if (nodes[key]) {
+      result.push(nodes[key]);
+      continue;
+    }
+    const layer = getOverlayLayer(target, key);
+    const raw = layer ? layer[key] : target[STORE_VALUE][key];
+    const prev = raw === $DELETED ? undefined : raw;
+    result.push(upsertStoreNode(target, nodes, key, prev, target[STORE_SNAPSHOT_PROPS]));
+  }
+  return result;
 }
 
 export function trackSelf(target: StoreNode, symbol: symbol = $TRACK) {
@@ -389,29 +459,6 @@ export function getPropertyDescriptor(
   return Reflect.getOwnPropertyDescriptor(source, property);
 }
 
-/**
- * Store-wide mask bookkeeping (A20 re-rule 2026-07-07c): the store is the
- * primitive, so an optimistic write decrees the WHOLE store settled for
- * `isPending` — firewall, written leaves, untouched siblings, structural
- * reads — for the lifetime of the override/transition. The firewall carries a
- * count of masked targets (nested objects mask independently); companions of
- * the firewall and its probed leaves are poked on 0↔1 transitions so an
- * already-materialized verdict flips without waiting for another write.
- */
-export function maskStoreTarget(target: StoreNode, on: boolean): void {
-  const firewall = target[STORE_FIREWALL];
-  // Plain optimistic stores have no firewall: no source can pend them, so
-  // there is nothing to mask (leaf overrides mask themselves per-node).
-  if (!firewall) return;
-  if (!!target[STORE_MASKED] === on) return;
-  target[STORE_MASKED] = on;
-  const count = (firewall._optimisticMask = (firewall._optimisticMask || 0) + (on ? 1 : -1));
-  if ((on && count === 1) || (!on && count === 0)) {
-    updatePendingSignal(firewall);
-    updateChildCompanions(firewall);
-  }
-}
-
 function prepareStoreWrite(target: StoreNode, store: any, property: PropertyKey) {
   if (target[STORE_OPTIMISTIC]) {
     const firewall = target[STORE_FIREWALL];
@@ -440,15 +487,15 @@ function prepareStoreWrite(target: StoreNode, store: any, property: PropertyKey)
 }
 
 /**
- * Registers the store for transition reversion and arms the store-wide
- * isPending mask (A21). Called only once a write is known to be effective —
- * ineffective writes (same value, delete of an absent property) are no-ops
- * and must not decree the store settled or entangle it.
+ * Registers the store for transition reversion. Called only once a write is
+ * known to be effective — ineffective writes (same value, delete of an absent
+ * property) are no-ops and must not entangle the store. Optimistic writes are
+ * verdict-inert (question-scoped pending model): no mask is armed — the write
+ * neither pends its own slot nor silences anyone else's.
  */
 function armOptimisticStoreWrite(target: StoreNode, store: any): void {
   if (target[STORE_OPTIMISTIC] && !projectionWriteActive) {
     trackOptimisticStore(store);
-    maskStoreTarget(target, true);
   }
 }
 
@@ -525,6 +572,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (property === $TARGET) return target;
     if (property === $PROXY) return receiver;
     if (property === $REFRESH) return target[STORE_FIREWALL];
+    if (pendingCheckActive) witnessAffectsMark(target);
     if (property === $TRACK) {
       trackSelf(target);
       return receiver;
@@ -624,6 +672,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
 
   has(target, property) {
     if (property === $PROXY || property === $TRACK || property === "__proto__") return true;
+    if (pendingCheckActive) witnessAffectsMark(target);
     const hasLayer = getOverlayLayer(target, property);
     const has = hasLayer ? hasLayer[property] !== $DELETED : property in target[STORE_VALUE];
 
@@ -783,6 +832,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
   },
 
   ownKeys(target: StoreNode) {
+    if (pendingCheckActive) witnessAffectsMark(target);
     if (getObserver() !== target[STORE_FIREWALL]) trackSelf(target);
     // Merge optimistic override with regular override for key enumeration
     let keys = getKeys(target[STORE_VALUE], target[STORE_OVERRIDE], false);

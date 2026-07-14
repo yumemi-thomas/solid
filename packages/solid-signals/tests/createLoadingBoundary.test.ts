@@ -94,7 +94,7 @@ describe("createLoadingBoundary", () => {
     expect(result).toBe(0); // Should show 0, not "loading"
   });
 
-  it("reports pending on first refresh after an async projection resolves", async () => {
+  it("first refresh after an async projection resolves is a quiet re-ask (re-ruled 2026-07-13)", async () => {
     let result: any;
     let projection!: Refreshable<{ value: number }>;
     let current = deferred<{ value: number }>();
@@ -121,10 +121,13 @@ describe("createLoadingBoundary", () => {
     flush();
     expect(result).toEqual([1, false]);
 
+    // Question-scoped pending: refresh() with no input change is a re-ask of
+    // the same question — the shown value stays honest, so isPending stays
+    // false and the fresh value reveals silently (never through "loading").
     current = deferred<{ value: number }>();
     refresh(projection);
     flush();
-    expect(result).toEqual([1, true]);
+    expect(result).toEqual([1, false]);
 
     current.resolve({ value: 2 });
     await new Promise(resolve => setTimeout(resolve, 0));
