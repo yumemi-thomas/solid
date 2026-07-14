@@ -1749,6 +1749,95 @@ describe("createRevealOrder", () => {
     expect(result).toEqual([["N1", "N2"]]);
   });
 
+  const orders: RevealOrder[] = ["sequential", "together", "natural"];
+  const threeLevelCases = orders.flatMap(middleOrder =>
+    orders.map(innerOrder => ({ middleOrder, innerOrder }))
+  );
+
+  it.each(threeLevelCases)(
+    "three-level minimal readiness: $middleOrder middle forwards $innerOrder inner",
+    async ({ middleOrder, innerOrder }) => {
+      let result: any[] = [];
+      const gate = deferred<number>();
+      const first = deferred<number>();
+      const second = deferred<number>();
+
+      createRoot(() => {
+        const gateMemo = createMemo(async () => {
+          await gate.promise;
+          return "G";
+        });
+        const firstMemo = createMemo(async () => {
+          await first.promise;
+          return "F";
+        });
+        const secondMemo = createMemo(async () => {
+          await second.promise;
+          return "S";
+        });
+
+        const ordered = baseCreateRevealOrder(
+          () => [
+            createLoadingBoundary(
+              () => gateMemo(),
+              () => "lg"
+            ),
+            baseCreateRevealOrder(
+              () => [
+                baseCreateRevealOrder(
+                  () => [
+                    createLoadingBoundary(
+                      () => firstMemo(),
+                      () => "lf"
+                    ),
+                    createLoadingBoundary(
+                      () => secondMemo(),
+                      () => "ls"
+                    )
+                  ],
+                  { order: () => innerOrder, collapsed: () => false }
+                )
+              ],
+              { order: () => middleOrder, collapsed: () => false }
+            )
+          ],
+          { order: () => "together", collapsed: () => false }
+        );
+
+        createRenderEffect(
+          () => (result = materialize(ordered)),
+          () => {}
+        );
+      });
+
+      flush();
+      gate.resolve(1);
+
+      if (innerOrder === "sequential") first.resolve(1);
+      else if (innerOrder === "natural") second.resolve(1);
+      else {
+        first.resolve(1);
+        await settle();
+        expect(result).toEqual(["lg", [["lf", "ls"]]]);
+        second.resolve(1);
+      }
+
+      await settle();
+      if (innerOrder === "sequential") {
+        expect(result).toEqual(["G", [["F", "ls"]]]);
+        second.resolve(1);
+      } else if (innerOrder === "natural") {
+        expect(result).toEqual(["G", [["lf", "S"]]]);
+        first.resolve(1);
+      } else {
+        expect(result).toEqual(["G", [["F", "S"]]]);
+      }
+
+      await settle();
+      expect(result).toEqual(["G", [["F", "S"]]]);
+    }
+  );
+
   it("outer natural + inner sequential: inner composite runs its own frontier locally", async () => {
     // Outer natural releases composite slots to run their own order locally, so
     // an inner sequential reveals its children per its own frontier-gating,

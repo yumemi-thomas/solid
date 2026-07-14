@@ -1625,7 +1625,7 @@ export type ServerRevealGroup = {
     key: string,
     options?: { onActivate?: () => void }
   ): { collapseFallback: boolean; held: boolean };
-  /** Called by a child when its subtree is fully resolved. */
+  /** Called by a child when its subtree is fully resolved, which also implies minimal readiness. */
   onResolved(key: string): void;
   /**
    * Called by a nested Reveal when it becomes "minimally resolved" under its own

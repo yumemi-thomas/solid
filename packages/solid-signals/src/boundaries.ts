@@ -147,13 +147,13 @@ export class RevealController {
   /**
    * "Minimally ready" = this group has something visible to show under its own policy.
    * Used by an enclosing `together` group to decide when it can release.
-   * - `together`: fully ready (atomic).
+   * - `together`: every direct slot is minimally ready.
    * - `sequential`: the first owned slot is minimally ready (frontier can advance).
    * - `natural`: any owned slot is minimally ready.
    */
   isMinimallyReady(): boolean {
     const order = untrack(this._orderAccessor);
-    if (order === "together") return this.isReady();
+    if (order === "together") return this._forEachOwnedSlot(isSlotMinimallyReady);
     if (order === "natural") {
       let hasSlot = false;
       let anyReady = false;
@@ -524,7 +524,7 @@ export function createErrorBoundary<T, U>(
  *   own minimal signal).
  * - `together` — every direct slot is minimally ready.
  * - `natural` — any direct slot has visible content (leaves on resolve; nested
- *   composites when fully ready, since natural treats composites as atomic).
+ *   composites via their own minimal signal).
  *
  * @example
  * ```ts
