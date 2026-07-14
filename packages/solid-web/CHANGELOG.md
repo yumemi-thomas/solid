@@ -1,5 +1,61 @@
 # @solidjs/web
 
+## 2.0.0-beta.18
+
+### Minor Changes
+
+- 9b4dd76: Add the `@solidjs/web/serialization` subpath exposing the runtime's Seroval serialization primitives: `createSerializer`, `DEFAULT_WEB_PLUGINS`, and `resolveSerializerPlugins` for the shared web plugin configuration, plus the isomorphic JSON codec (`serializeJSON` / `createJSONDeserializer`) for RPC-style transports such as server functions. The entry is opt-in — browser bundles only include it when imported, like `@solidjs/web/storage`. The seroval dependency floor moves to `~1.5.4` (1.5.3 and earlier carry a security issue; the codec also relies on `depthLimit` support).
+
+### Patch Changes
+
+- 9b4dd76: Bump dom-expressions to next.21 with the streamed fragment comment-scan fix and the reusable serializer/JSON-codec module backing the new `serialization` entry
+- 43c537a: Emit `@solidjs/web/storage` types at the advertised path (#2873)
+
+  The storage tsbuild used `rootDir: ".."`, so declarations landed at
+  `storage/types/storage/src/index.d.ts` while package.json advertised
+  `storage/types/index.d.ts`, breaking consumers of `@solidjs/web/storage`
+  (e.g. solid-start). The build now resolves `@solidjs/web` against the built
+  declarations and emits directly to `storage/types/index.d.ts`.
+
+- 4a1d997: Portal no longer crashes SSR — portals are client-only islands (#2876)
+
+  The server renders nothing for a `<Portal>`: children are never evaluated, no
+  async starts, and nothing is serialized. Throwing (as earlier betas did) was
+  caught by ancestor `Errored` boundaries and baked the error fallback into the
+  streamed HTML for trees that render fine client-side.
+
+  Both sides advance the parent's child-id counter by exactly one slot — the
+  client scopes the portal's internals under a dedicated owner and the server
+  consumes the matching id — so hydration ids for siblings after a portal stay
+  aligned.
+
+  On the client, the portal's content memo and effects are gated with
+  `ssrSource: "client"`, so under hydration the children render fresh in the
+  settle flush — no evaluation during the hydration walk, no effect-type
+  switching (the 1.x timing hack). Async discovered inside a portal after
+  settle forwards through already-initialized ancestor boundaries as ordinary
+  pending status, so nothing regresses to a fallback; the portal simply attaches
+  when its content is ready.
+
+- 8ca127d: Update dom-expressions to 0.50.0-next.19. Pulls in resolver manifests: the
+  `manifest` option of `renderToString`/`renderToStream` now also accepts
+  `{ resolve(key), resolveSync?(key) }` (or a bare function) as an alternative
+  to a static manifest object, so dev servers can answer asset lookups from
+  their live module graph. `resolve` may return a promise and may resolve CSS
+  entries to inline-style descriptors (`{ id, content, attrs }`) for HMR
+  adoption; `resolveSync` is exposed on the render context as
+  `resolveAssetsSync` for sync consumers like `lazy()`'s `moduleUrl` getter.
+  Also picks up an internal perf refactor of root-level insert cleanup
+  (foreign-sibling detection via O(1) pointer checks).
+- Updated dependencies [500d484]
+- Updated dependencies [7d21226]
+- Updated dependencies [1b94264]
+- Updated dependencies [9b4dd76]
+- Updated dependencies [1561c7e]
+- Updated dependencies [4e67d45]
+- Updated dependencies [8ca127d]
+  - solid-js@2.0.0-beta.18
+
 ## 2.0.0-beta.17
 
 ### Patch Changes

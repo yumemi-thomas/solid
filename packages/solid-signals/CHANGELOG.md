@@ -1,5 +1,34 @@
 # @solidjs/signals
 
+## 2.0.0-beta.18
+
+### Minor Changes
+
+- 1b94264: Question-scoped pending model and the `affects()` primitive (supersedes the optimistic mask)
+
+  `isPending` is re-derived from one rule: a read is pending iff a value change is in flight for it that has not yet revealed, or it carries a live `affects()` mark.
+  - **Same-question re-asks are silent.** `refresh()`, polling, and confirm refetches whose tracked inputs are value-stable no longer read as pending — the fresh value reveals silently.
+  - **New questions pend monotonically.** An input value change in flight pends every read under the source until its answer reveals, and nothing can silence it.
+  - **Optimistic writes are verdict-inert.** An active override displays without decreeing settlement: it neither reads pending on its own slot (only a differing held correction re-opens the verdict) nor masks anything else. The store-wide optimistic mask (A21) and node mask (A20) are removed.
+  - **New `affects(target, key?)` primitive** (re-exported from `solid-js`). Declares that in-flight work will change the targeted data: the named slot (a store record, a specific record key, or a source accessor) reads pending from the declaration until the surrounding transaction settles or reverts. `affects(x); refresh(x)` is the declared-reload idiom.
+
+### Patch Changes
+
+- 500d484: Rebuild `affects()` on the status rails so marks propagate through derivation (#2882). A live mark now pushes `STATUS_PENDING` downstream from the marked node exactly like real in-flight async — memos and effects DERIVED from marked data read pending too, not just direct reads of the marked slot — under a dedicated sentinel pending-source per marked node, so the two channels can't clear each other: a landing on the marked node settles only its own source entry, a quiet `refresh()` re-ask can't silence the declared window (the sentinel is never a re-ask), and a mark never blocks its own transaction's settlement (release happens AT settle). Computeds that recompute mid-window re-acquire the mark through the read path.
+
+  This also fixes keyless marks not covering captured store proxies (`<For>` rows): a keyless declaration walks the marked record's subtree (through write overlays), registers on every live node in it, snapshots the reachable raw identities, and nodes created during the window inherit the mark at birth from that scope. Records added after the declaration are not covered (snapshot-at-declaration semantics).
+
+- 500d484: Narrow `affects()` to a single optional key: `affects(target, key?)`. The variadic form read like a 1.x store path (`affects(state, "user", "name")` suggests `state.user.name` but marked two sibling slots) — mark multiple slots with multiple calls, or target the nested record directly. Passing more than one key now throws in dev.
+- 4e67d45: Fix nested `Reveal` readiness across the client and streaming SSR.
+
+  Empty or synchronously resolved composites now count as minimally ready, so an
+  enclosing `order="together"` group cannot deadlock. Nested `order="natural"`
+  groups also report readiness as soon as one direct child is minimally ready,
+  and nested client `order="together"` groups propagate the same direct-slot
+  readiness they use for their own release. Readiness and completion on the server
+  are held until all synchronous child slots have registered, preventing an early
+  child from making a partially constructed group release prematurely.
+
 ## 2.0.0-beta.17
 
 ### Patch Changes

@@ -1,5 +1,30 @@
 # test-integration
 
+## 2.0.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies [9b4dd76]
+- Updated dependencies [500d484]
+- Updated dependencies [500d484]
+- Updated dependencies [4e33241]
+- Updated dependencies [9b4dd76]
+- Updated dependencies [43c537a]
+- Updated dependencies [7d21226]
+- Updated dependencies [4a1d997]
+- Updated dependencies [1b94264]
+- Updated dependencies [9b4dd76]
+- Updated dependencies [1561c7e]
+- Updated dependencies [4e67d45]
+- Updated dependencies [8ca127d]
+  - @solidjs/web@2.0.0-beta.18
+  - @solidjs/signals@2.0.0-beta.18
+  - solid-js@2.0.0-beta.18
+  - babel-preset-solid@2.0.0-beta.18
+  - @solidjs/h@2.0.0-beta.18
+  - @solidjs/html@2.0.0-beta.18
+  - @solidjs/universal@2.0.0-beta.18
+
 ## 2.0.0-beta.17
 
 ### Patch Changes

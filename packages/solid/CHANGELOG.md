@@ -1,5 +1,74 @@
 # solid-js
 
+## 2.0.0-beta.18
+
+### Minor Changes
+
+- 1b94264: Question-scoped pending model and the `affects()` primitive (supersedes the optimistic mask)
+
+  `isPending` is re-derived from one rule: a read is pending iff a value change is in flight for it that has not yet revealed, or it carries a live `affects()` mark.
+  - **Same-question re-asks are silent.** `refresh()`, polling, and confirm refetches whose tracked inputs are value-stable no longer read as pending — the fresh value reveals silently.
+  - **New questions pend monotonically.** An input value change in flight pends every read under the source until its answer reveals, and nothing can silence it.
+  - **Optimistic writes are verdict-inert.** An active override displays without decreeing settlement: it neither reads pending on its own slot (only a differing held correction re-opens the verdict) nor masks anything else. The store-wide optimistic mask (A21) and node mask (A20) are removed.
+  - **New `affects(target, key?)` primitive** (re-exported from `solid-js`). Declares that in-flight work will change the targeted data: the named slot (a store record, a specific record key, or a source accessor) reads pending from the declaration until the surrounding transaction settles or reverts. `affects(x); refresh(x)` is the declared-reload idiom.
+
+### Patch Changes
+
+- 500d484: Narrow `affects()` to a single optional key: `affects(target, key?)`. The variadic form read like a 1.x store path (`affects(state, "user", "name")` suggests `state.user.name` but marked two sibling slots) — mark multiple slots with multiple calls, or target the nested record directly. Passing more than one key now throws in dev.
+- 7d21226: Server `lazy()` now supports resolver manifests (dev servers answering asset
+  lookups from their live module graph): when `ctx.resolveAssets` returns a
+  promise, registration defers with boundary attribution preserved and the
+  lazy render memo stays not-ready until the assets have registered, so
+  streamed fragments cannot flush without their styles. CSS entries resolved
+  as `{ id, content, attrs }` descriptors register as `inline-style` assets
+  (SSR'd `<style>` tags, e.g. dev CSS that Vite's HMR client adopts) instead
+  of stylesheet links. The `moduleUrl` getter (islands) prefers the context's
+  `resolveAssetsSync` fast path, so it keeps returning a client-loadable URL
+  and registering modulepreload hints under async dev resolvers too.
+- 9b4dd76: Raise the seroval / seroval-plugins dependency floor to `~1.5.4`: seroval 1.5.3 and earlier are affected by a security issue fixed in 1.5.4.
+- 1561c7e: Sever reveal-group membership at boundaries during SSR (#2871, #2872)
+
+  Only direct `<Loading>` children of a `<Reveal>` now join its group, matching
+  client semantics where `createCollectionBoundary` clears the reveal controller
+  context for the subtree of both boundary types:
+  - A `<Loading>` nested inside another slot's content no longer enrolls in the
+    ancestor group, so a slow nested boundary can't stall `order="together"` or
+    park a `sequential` frontier. It is covered by its own fallback inside the
+    held slot and activates independently — the streamed runtime (from
+    `@dom-expressions/runtime` 0.50.0-next.20, whose deferred-activation queue
+    this change depends on) queues its swap until the enclosing slot goes live.
+  - An `<Errored>`-wrapped `<Loading>` likewise no longer holds the group
+    hostage; error fallbacks can appear without blocking group progression.
+
+  `RevealGroupContext` moved from `server/hydration.ts` to `server/signals.ts`
+  so `createErrorBoundary` can sever it without a circular import.
+
+- 4e67d45: Fix nested `Reveal` readiness across the client and streaming SSR.
+
+  Empty or synchronously resolved composites now count as minimally ready, so an
+  enclosing `order="together"` group cannot deadlock. Nested `order="natural"`
+  groups also report readiness as soon as one direct child is minimally ready,
+  and nested client `order="together"` groups propagate the same direct-slot
+  readiness they use for their own release. Readiness and completion on the server
+  are held until all synchronous child slots have registered, preventing an early
+  child from making a partially constructed group release prematurely.
+
+- 8ca127d: Update dom-expressions to 0.50.0-next.19. Pulls in resolver manifests: the
+  `manifest` option of `renderToString`/`renderToStream` now also accepts
+  `{ resolve(key), resolveSync?(key) }` (or a bare function) as an alternative
+  to a static manifest object, so dev servers can answer asset lookups from
+  their live module graph. `resolve` may return a promise and may resolve CSS
+  entries to inline-style descriptors (`{ id, content, attrs }`) for HMR
+  adoption; `resolveSync` is exposed on the render context as
+  `resolveAssetsSync` for sync consumers like `lazy()`'s `moduleUrl` getter.
+  Also picks up an internal perf refactor of root-level insert cleanup
+  (foreign-sibling detection via O(1) pointer checks).
+- Updated dependencies [500d484]
+- Updated dependencies [500d484]
+- Updated dependencies [1b94264]
+- Updated dependencies [4e67d45]
+  - @solidjs/signals@2.0.0-beta.18
+
 ## 2.0.0-beta.17
 
 ### Patch Changes
