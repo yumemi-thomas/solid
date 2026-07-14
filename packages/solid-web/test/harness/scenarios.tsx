@@ -372,6 +372,33 @@ function FalsyAndProp() {
 }
 
 // ---------------------------------------------------------------------------
+// Streamed boundary whose FALLBACK contains dynamic text holes (#2877,
+// dom-expressions#542). The fallback serializes with <!--!$--> separator
+// comments inside the swap range, so $df's removal walk must stop only at its
+// own matching <!--pl-X--> end marker — a scan that halts at the first comment
+// of any kind deletes just the pre-separator slice and leaves the rest of the
+// fallback in the DOM as permanent debris ("ready42% done").
+let refreshDynamicFallback!: () => void;
+function DynamicFallbackStream() {
+  const [version, setVersion] = createSignal(0);
+  refreshDynamicFallback = () => setVersion(v => v + 1);
+  const [progress] = createSignal(42);
+  const report = createMemo(async () => {
+    const v = version();
+    await sleep(10);
+    return v ? `ready-${v}` : "ready";
+  });
+  return (
+    <div>
+      <span>status </span>
+      <Loading fallback={<>preparing {progress()}% done</>}>
+        <strong>{report()}</strong>
+      </Loading>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Portal: client-only island (#2876). Server renders nothing for the portal;
 // the client renders its children fresh once hydration settles. Mounting into
 // a host inside the container lets the harness textContent assertion cover
@@ -628,6 +655,16 @@ export const scenarios: Scenario[] = [
     update: () => setVal("hi"),
     expectedTextAfterUpdate: "set:HI",
     stableSelector: "div"
+  },
+  {
+    name: "dynamic-fallback-stream",
+    App: DynamicFallbackStream,
+    async: true,
+    expectedText: "status ready",
+    serverText: "status preparing 42% done",
+    update: () => refreshDynamicFallback(),
+    expectedTextAfterUpdate: "status ready-1",
+    stableSelector: "div, span"
   },
   {
     name: "portal-client-island",
