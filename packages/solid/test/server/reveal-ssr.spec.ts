@@ -1560,6 +1560,103 @@ describe("Reveal SSR component", () => {
     revealed = mock.revealFragmentsCalls.flatMap(c => (Array.isArray(c) ? c : [c]));
     expect(revealed).toContain(keys[1]);
   });
+
+  const orders = ["sequential", "together", "natural"] as const;
+  const threeLevelCases = orders.flatMap(middleOrder =>
+    orders.map(innerOrder => ({ middleOrder, innerOrder }))
+  );
+
+  test.each(threeLevelCases)(
+    "three-level minimal readiness: $middleOrder middle forwards $innerOrder inner",
+    async ({ middleOrder, innerOrder }) => {
+      const mock = createMockSSRContext({ async: true });
+      sharedConfig.context = mock.context;
+
+      const gate = deferred<string>();
+      const first = deferred<string>();
+      const second = deferred<string>();
+
+      createRoot(
+        () => {
+          Reveal({
+            order: "together",
+            get children() {
+              return [
+                Loading({
+                  fallback: "gate-fb",
+                  get children() {
+                    const data = createMemo(() => gate.promise);
+                    return ssr(["<span>", "</span>"], () => data()) as any;
+                  }
+                }),
+                Reveal({
+                  order: middleOrder,
+                  get children() {
+                    return Reveal({
+                      order: innerOrder,
+                      get children() {
+                        return [
+                          Loading({
+                            fallback: "first-fb",
+                            get children() {
+                              const data = createMemo(() => first.promise);
+                              return ssr(["<span>", "</span>"], () => data()) as any;
+                            }
+                          }),
+                          Loading({
+                            fallback: "second-fb",
+                            get children() {
+                              const data = createMemo(() => second.promise);
+                              return ssr(["<span>", "</span>"], () => data()) as any;
+                            }
+                          })
+                        ] as any;
+                      }
+                    } as any);
+                  }
+                } as any)
+              ] as any;
+            }
+          } as any);
+        },
+        { id: "t" }
+      );
+
+      await tick();
+      const [gateKey, firstKey, secondKey] = [...mock.registeredFragments.keys()];
+      gate.resolve("gate");
+
+      if (innerOrder === "sequential") first.resolve("first");
+      else if (innerOrder === "natural") second.resolve("second");
+      else {
+        first.resolve("first");
+        await tick();
+        expect(mock.revealFragmentsCalls.length).toBe(0);
+        second.resolve("second");
+      }
+
+      await tick();
+      let revealed = mock.revealFragmentsCalls.flatMap(c => (Array.isArray(c) ? c : [c]));
+      expect(revealed).toContain(gateKey);
+
+      if (innerOrder === "sequential") {
+        expect(revealed).toContain(firstKey);
+        expect(revealed).not.toContain(secondKey);
+        second.resolve("second");
+      } else if (innerOrder === "natural") {
+        expect(revealed).not.toContain(firstKey);
+        expect(revealed).toContain(secondKey);
+        first.resolve("first");
+      } else {
+        expect(revealed).toContain(firstKey);
+        expect(revealed).toContain(secondKey);
+      }
+
+      await tick();
+      revealed = mock.revealFragmentsCalls.flatMap(c => (Array.isArray(c) ? c : [c]));
+      expect(revealed).toEqual(expect.arrayContaining([gateKey, firstKey, secondKey]));
+    }
+  );
 });
 
 describe("boundaries sever reveal-group membership (#2871, #2872)", () => {

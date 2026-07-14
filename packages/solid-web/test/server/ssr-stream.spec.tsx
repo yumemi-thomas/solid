@@ -2491,6 +2491,157 @@ describe("SSR Streaming — Reveal", () => {
     expect(full).toContain("$dfj");
   });
 
+  test.each(["sequential", "together", "natural"] as const)(
+    "together mode activates with an empty nested %s Reveal",
+    async order => {
+      const { promise, resolve } = deferred<string>();
+
+      function AsyncContent() {
+        const data = createMemo(async () => promise);
+        return <div>{data()}</div>;
+      }
+      function App() {
+        return (
+          <Reveal order="together">
+            <Loading fallback={<div>loading</div>}>
+              <AsyncContent />
+            </Loading>
+            <Reveal order={order}>
+              <aside>static content</aside>
+            </Reveal>
+          </Reveal>
+        );
+      }
+
+      const chunksPromise = collectChunks(() => <App />);
+      await delay(10);
+      resolve("async content");
+
+      const { chunks } = await chunksPromise;
+      const full = chunks.join("");
+      const key = full.match(/<template id="(\d+)"><div[^>]*>async content/)?.[1];
+      const templateIndex = full.indexOf(`<template id="${key}">`);
+      const activationIndex = full.indexOf(`$dfj(["${key}"])`);
+
+      expect(full).toContain("static content");
+      expect(key).toBeDefined();
+      expect(activationIndex).toBeGreaterThan(templateIndex);
+    }
+  );
+
+  test("empty composite does not make a together group ready before later slots register", async () => {
+    const { promise: profile, resolve: resolveProfile } = deferred<string>();
+    const { promise: slowCard, resolve: resolveSlowCard } = deferred<string>();
+
+    function Profile() {
+      const data = createMemo(async () => profile);
+      return <h1>{data()}</h1>;
+    }
+    function SlowCard() {
+      const data = createMemo(async () => slowCard);
+      return <p>{data()}</p>;
+    }
+    function App() {
+      return (
+        <Reveal order="together">
+          <Loading fallback={<b>loading profile</b>}>
+            <Profile />
+          </Loading>
+          <Reveal order="together">
+            <Reveal order="natural">
+              <aside>static content</aside>
+            </Reveal>
+            <Loading fallback={<i>loading slow card</i>}>
+              <SlowCard />
+            </Loading>
+          </Reveal>
+        </Reveal>
+      );
+    }
+
+    const chunksPromise = collectChunks(() => <App />);
+    await delay(10);
+    resolveProfile("profile");
+    await delay(10);
+    resolveSlowCard("slow card");
+
+    const { chunks } = await chunksPromise;
+    const full = chunks.join("");
+    const profileKey = full.match(/<template id="(\d+)"><h1[^>]*>profile/)?.[1];
+    const profileActivationIndex = full.indexOf(`$dfj(["${profileKey}"])`);
+    const slowTemplateIndex = full.indexOf(">slow card</p></template>");
+
+    expect(profileKey).toBeDefined();
+    expect(slowTemplateIndex).toBeGreaterThan(-1);
+    expect(profileActivationIndex).toBeGreaterThan(slowTemplateIndex);
+  });
+
+  test("together mode releases when a nested natural composite is minimally ready", async () => {
+    const { promise: profile, resolve: resolveProfile } = deferred<string>();
+    const { promise: fastCard, resolve: resolveFastCard } = deferred<string>();
+    const { promise: slowCard, resolve: resolveSlowCard } = deferred<string>();
+
+    function Profile() {
+      const data = createMemo(async () => profile);
+      return <h1>{data()}</h1>;
+    }
+    function FastCard() {
+      const data = createMemo(async () => fastCard);
+      return <p>{data()}</p>;
+    }
+    function SlowCard() {
+      const data = createMemo(async () => slowCard);
+      return <p>{data()}</p>;
+    }
+    function App() {
+      return (
+        <Reveal order="together">
+          <Loading fallback={<b>loading profile</b>}>
+            <Profile />
+          </Loading>
+          <Reveal order="natural">
+            <Reveal order="natural">
+              <Loading fallback={<i>loading fast card</i>}>
+                <FastCard />
+              </Loading>
+              <Loading fallback={<i>loading slow card</i>}>
+                <SlowCard />
+              </Loading>
+            </Reveal>
+          </Reveal>
+        </Reveal>
+      );
+    }
+
+    const chunksPromise = collectChunks(() => <App />);
+    await delay(10);
+    resolveFastCard("fast card");
+    await delay(10);
+    resolveProfile("profile");
+    await delay(10);
+    resolveSlowCard("slow card");
+
+    const { chunks } = await chunksPromise;
+    const full = chunks.join("");
+    const profileTemplate = full.match(/<template id="(\d+)"><h1[^>]*>profile/)?.[1];
+    const fastTemplate = full.match(/<template id="(\d+)"><p[^>]*>fast card/)?.[1];
+    const slowTemplate = full.match(/<template id="(\d+)"><p[^>]*>slow card/)?.[1];
+    const profileTemplateIndex = full.indexOf(`<template id="${profileTemplate}">`);
+    const profileActivationIndex = full.indexOf(`$dfj(["${profileTemplate}"])`);
+    const fastActivationIndex = full.indexOf(`$dfj(["${fastTemplate}"])`);
+    const slowTemplateIndex = full.indexOf(`<template id="${slowTemplate}">`);
+    const slowActivationIndex = full.indexOf(`$dfj(["${slowTemplate}"])`);
+
+    expect(profileTemplate).toBeDefined();
+    expect(fastTemplate).toBeDefined();
+    expect(slowTemplate).toBeDefined();
+    expect(profileActivationIndex).toBeGreaterThan(profileTemplateIndex);
+    expect(profileActivationIndex).toBeLessThan(slowTemplateIndex);
+    expect(fastActivationIndex).toBeGreaterThan(profileTemplateIndex);
+    expect(fastActivationIndex).toBeLessThan(slowTemplateIndex);
+    expect(slowActivationIndex).toBeGreaterThan(slowTemplateIndex);
+  });
+
   test("nested Reveal: outer sequential controls inner group", async () => {
     function Outer1() {
       const data = createMemo(async () => asyncValue("outer-1", 20));

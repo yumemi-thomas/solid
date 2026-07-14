@@ -357,6 +357,9 @@ export function Reveal(props: RevealProps): SolidElement {
   let collapsedByParent = false;
   let selfMinimallyResolved = false;
   let notifiedParentDone = false;
+  // Child getters can keep registering slots after `props.children` returns.
+  // Do not publish readiness from a partial key set to an enclosing group.
+  let registering = true;
 
   const parent = getOwner();
   const parentGroup = parent ? runWithOwner(parent, () => getContext(RevealGroupContext)) : null;
@@ -387,7 +390,7 @@ export function Reveal(props: RevealProps): SolidElement {
   }
 
   function notifyParentIfDone() {
-    if (notifiedParentDone) return;
+    if (registering || notifiedParentDone) return;
     if (parentGroup && resolved.size === keys.length) {
       notifiedParentDone = true;
       parentGroup.onResolved(id);
@@ -401,14 +404,13 @@ export function Reveal(props: RevealProps): SolidElement {
   }
 
   function updateSelfMinimallyResolved() {
-    if (selfMinimallyResolved) return;
+    if (registering || selfMinimallyResolved) return;
     if (keys.length === 0) selfMinimallyResolved = true;
     else if (order === "together") selfMinimallyResolved = minimallyResolved.size === keys.length;
     else if (order === "sequential") selfMinimallyResolved = minimallyResolved.has(keys[0]);
-    // natural: any child being visible counts. Leaves: resolved == minimally ready;
-    // composites: natural holds them until fully ready, so `resolved` is the right
-    // signal for both.
-    else selfMinimallyResolved = resolved.size > 0;
+    // natural: any child being minimally ready counts. For composites this can
+    // precede full resolution when their own order has visible content to show.
+    else selfMinimallyResolved = minimallyResolved.size > 0;
     if (selfMinimallyResolved) parentGroup?.onMinimallyResolved?.(id);
   }
 
@@ -431,7 +433,7 @@ export function Reveal(props: RevealProps): SolidElement {
   }
 
   function checkTogetherRelease() {
-    if (order !== "together" || heldByParent) return;
+    if (registering || order !== "together" || heldByParent) return;
     if (minimallyResolved.size < keys.length) return;
     // All direct slots minimally ready: drain stashed leaf swaps and cascade
     // into every inner composite (they're minimally ready too, so this releases
@@ -508,6 +510,7 @@ export function Reveal(props: RevealProps): SolidElement {
           if (order === "natural") updateSelfMinimallyResolved();
         } else {
           // Composite fully resolved.
+          markMinimallyResolved(key);
           if (!heldByParent) {
             if (order === "sequential") advanceFrontier();
             else if (order === "natural") activateComposite(key);
@@ -523,9 +526,10 @@ export function Reveal(props: RevealProps): SolidElement {
       }
     });
     const result = props.children;
-    if (parentGroup && keys.length === 0) {
-      parentGroup.onResolved(id);
-    }
+    registering = false;
+    updateSelfMinimallyResolved();
+    checkTogetherRelease();
+    notifyParentIfDone();
     return result;
   }) as unknown as SolidElement;
 

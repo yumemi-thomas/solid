@@ -219,7 +219,7 @@ Each order defines when it has "first visible content" under its own policy. Thi
 
 - `sequential` — frontier-0 (the first registered slot) has reached its own minimally-ready state.
 - `together` — every direct slot has reached its own minimally-ready state.
-- `natural` — any direct slot has produced visible content (leaves on resolve; nested composites when their whole subtree is ready, since natural treats a composite as one atomic slot).
+- `natural` — any direct slot has reached its own minimally-ready state (leaves on resolve; nested composites according to their own order).
 
 For a leaf `<Loading>`, "minimally ready" and "fully ready" are the same thing: its data resolved. For a nested `<Reveal>`, the two differ — e.g. a nested `sequential` is minimally ready once its first child resolves, even though later children are still pending.
 
@@ -231,13 +231,13 @@ For a leaf `<Loading>`, "minimally ready" and "fully ready" are the same thing: 
 |---|---|---|---|
 | `sequential` | `sequential` | Outer frontier reaches the inner slot. | Inner reveals in registration order; outer frontier waits for the inner group to finish before advancing past it. |
 | `sequential` | `together` | Outer frontier reaches the inner slot. | Inner reveals atomically once every inner child is ready. |
-| `sequential` | `natural` | Outer frontier reaches the inner slot. | Inner reveals per-slot: each leaf on resolve, each grandchild composite when fully ready. |
+| `sequential` | `natural` | Outer frontier reaches the inner slot. | Inner reveals per-slot: each leaf on resolve, while each grandchild composite runs its own order locally. |
 | `together` | `sequential` | Every direct child of the outer `together` is minimally ready; that means the inner's frontier-0 has resolved. | Inner reveals its frontier-0 immediately with the group release, then continues its own sequential order for the tail. |
 | `together` | `together` | Every direct child of the outer is minimally ready; that means the inner `together` has all its own children ready. | Inner reveals atomically as part of the same group release. |
 | `together` | `natural` | Every direct child of the outer is minimally ready; that means at least one inner child is ready. | Already-resolved inner children flush with the group release; later inner resolutions stream independently under natural. |
-| `natural` | `sequential` | The inner composite is fully ready (i.e. every inner child has resolved). | Inner group is fully ready at release; all inner children flush together. |
-| `natural` | `together` | The inner composite is fully ready. | Same as above. |
-| `natural` | `natural` | The inner composite is fully ready. | Same as above. |
+| `natural` | `sequential` | Immediately; outer `natural` does not hold the inner composite. | Inner reveals in registration order. |
+| `natural` | `together` | Immediately; outer `natural` does not hold the inner composite. | Inner reveals atomically once every direct child is minimally ready. |
+| `natural` | `natural` | Immediately; outer `natural` does not hold the inner composite. | Inner children reveal independently. |
 
 `order="natural"` is primarily useful when you have a group whose children don't need to coordinate with each other. Nesting a natural group under an outer ordering lets the natural group participate as one unit in the outer order while each child reveals on its own data once the outer releases the slot.
 
