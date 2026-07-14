@@ -1,4 +1,4 @@
-import { clearStatus, handleAsync, notifyStatus } from "./async.js";
+import { applyAffectsReads, clearStatus, handleAsync, notifyStatus } from "./async.js";
 import {
   $REFRESH,
   CONFIG_AUTO_DISPOSE,
@@ -59,6 +59,7 @@ import {
 } from "./invariants.js";
 import { cleanup, disposeChildren, getNextChildId, markDisposal } from "./owner.js";
 import {
+  activeAffectsMarks,
   activeTransition,
   armReaskClear,
   assignOrMergeLane,
@@ -111,6 +112,18 @@ interface PendingProbe {
   freshReads: Set<Signal<any> | Computed<any>>;
 }
 let pendingProbe: PendingProbe | null = null;
+
+/**
+ * Marked sources read by the recompute currently on the stack (saved/restored
+ * per recompute, like `context`). A computed that reads a node with a live
+ * `affects()` mark inherits the mark's pendingness — `recompute` applies the
+ * collected sources through `applyAffectsReads` after its commit, because the
+ * `clearStatus` at the top of the commit path wipes whatever sentinel entries
+ * the node held from the registration-time push. This is the pull half of
+ * mark propagation (real async re-establishes itself by re-throwing on read;
+ * marks are value-transparent, so they re-establish here instead).
+ */
+let affectsReads: (Signal<any> | Computed<any>)[] | null = null;
 
 if (__DEV__) {
   InvariantHooks.pendingProbeActive = () => pendingProbe !== null;
@@ -217,6 +230,9 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   let value = el._pendingValue === NOT_PENDING ? el._value : el._pendingValue;
   let oldHeight = el._height;
   let prevTracking = tracking;
+  const prevAffectsReads = affectsReads;
+  affectsReads = null;
+  let markedReads: (Signal<any> | Computed<any>)[] | null = null;
   let prevLane = currentOptimisticLane;
   let prevStrictRead: string | false = false;
   if (__DEV__) {
@@ -310,6 +326,8 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     if (isStaleEffect) stale = prevStale;
     el._flags = REACTIVE_NONE | (create ? el._flags & REACTIVE_SNAPSHOT_STALE : 0);
     context = oldcontext;
+    markedReads = affectsReads;
+    affectsReads = prevAffectsReads;
   }
 
   if (!el._error) {
@@ -390,6 +408,10 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     }
   }
   currentOptimisticLane = prevLane;
+  // Marks read during this recompute re-attach after the commit above:
+  // earlier, the sentinel's NotReadyError in `_error` would have routed the
+  // fresh value into the error-skip branch instead of committing it.
+  if (markedReads) applyAffectsReads(el, markedReads);
   const needsPendingCommit =
     el._pendingValue !== NOT_PENDING ||
     el._pendingFirstChild !== null ||
@@ -814,7 +836,14 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     !snapshotCaptureActive &&
     (!__DEV__ || !strictRead)
   ) {
-    if (c && tracking) link(el, c as Computed<any>);
+    if (c && tracking) {
+      link(el, c as Computed<any>);
+      // A live mark on a read source flows to the reader (probe reads are
+      // excluded: the probe's own collection owns that verdict, and marking
+      // the enclosing memo would make an `isPending` wrapper itself pending).
+      if (activeAffectsMarks !== 0 && el._affectsCount && !pendingCheckActive)
+        (affectsReads ??= []).push(el);
+    }
     return (!c || el._pendingValue === NOT_PENDING ? el._value : el._pendingValue) as T;
   }
 
@@ -837,6 +866,9 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
 
   if (c && tracking) {
     link(el, c as Computed<any>, pendingCheckActive);
+    // Mark inheritance through derivation (see the fast path above).
+    if (activeAffectsMarks !== 0 && el._affectsCount && !pendingCheckActive)
+      (affectsReads ??= []).push(el);
 
     if ((owner as Computed<unknown>)._fn) {
       const isZombie = (el as Computed<unknown>)._flags & REACTIVE_ZOMBIE;
@@ -1172,10 +1204,10 @@ function collectPendingSources(el: Signal<any> | Computed<any>): void {
 }
 
 /**
- * Adds a node to the active isPending() probe without reading it. Store traps
- * call this for record-level `affects()` mark nodes ($AFFECTS): any read
- * THROUGH a marked record witnesses the mark, so probes over its slots pick
- * up the declared motion (and subscribe to its release).
+ * Adds a node to the active isPending() probe without reading it. The store's
+ * untracked-probe fallback (`witnessAffectsMark`) calls this with `affects()`
+ * carrier nodes: an untracked read through a marked record may touch no real
+ * signal node at all, so the probe collects the mark's carrier directly.
  *
  * @internal
  */
@@ -1229,7 +1261,7 @@ function newQuestionInFlight(comp: Computed<any>): boolean {
  *   pending on its own slot (it IS the displayed value; only a differing
  *   held correction re-opens the verdict) nor masks anything else (the
  *   store-wide mask / A21 is deleted).
- * - `affects(target, ...keys)` is the declaration verb: a live mark is
+ * - `affects(target, key?)` is the declaration verb: a live mark is
  *   additive pending on the named slot, held to its transaction's settle.
  * Returns false for initial async loads (no stale data to show — loading, not
  * pending) and for disposed nodes (a dead source can never settle).

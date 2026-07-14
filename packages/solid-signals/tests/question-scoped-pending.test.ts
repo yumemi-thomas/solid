@@ -13,8 +13,10 @@
  * - Optimistic writes are verdict-inert: they neither announce pending on
  *   their own slots nor mask anyone else's (the store-wide mask / A21 is
  *   deleted). To downstream async they are real input changes.
- * - `affects(target, ...keys)` is the only declaration verb: additive pending
- *   on named slots, held from declaration to its transaction's settle/revert.
+ * - `affects(target, key?)` is the only declaration verb: additive pending
+ *   on the named slot AND everything derived from it (marks ride the status
+ *   rails — see tests/affects-propagation.test.ts), held from declaration to
+ *   its transaction's settle/revert.
  *
  * These supersede the A20/A21 mask pins. Scenario numbers reference the
  * question-scoped pending plan (Part 3).
@@ -29,6 +31,7 @@ import {
   createRenderEffect,
   createRoot,
   createSignal,
+  createStore,
   flush,
   isPending,
   latest,
@@ -541,6 +544,216 @@ describe("affects — the declaration verb", () => {
     expect(isPending(count)).toBe(true); // held within the current batch
     flush();
     expect(isPending(count)).toBe(false); // nothing async below ⇒ no window
+  });
+});
+
+describe("affects — captured proxies (#2882)", () => {
+  // The contract: a keyless mark covers every read through the marked record's
+  // subtree — by identity, regardless of whether the probe's read path
+  // physically traverses the marked record. `<For>` hands rows captured child
+  // proxies, so row probes never enter through the root.
+
+  type Row = { name: string; tags: { primary: string } };
+  const seedRows = (): Row[] => [
+    { name: "a", tags: { primary: "x" } },
+    { name: "b", tags: { primary: "y" } }
+  ];
+
+  it("affects(store) covers a captured row proxy (<For> row shape, derived store)", async () => {
+    let state!: { rows: Row[] };
+    let dispose!: () => void;
+    createRoot(d => {
+      dispose = d;
+      [state] = createOptimisticStore<{ rows: Row[] }>(
+        s => {
+          s.rows = seedRows();
+        },
+        { rows: [] }
+      );
+    });
+    flush();
+
+    const row = state.rows[0]; // captured child proxy, like a <For> row
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    expect(isPending(() => state.rows[0].name)).toBe(true); // path through root (already worked)
+    expect(isPending(() => row.name)).toBe(true); // captured proxy — the #2882 gap
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => row.name)).toBe(false); // released at settle
+    dispose();
+  });
+
+  it("affects(plain store) covers captured proxies at any depth", async () => {
+    const [state] = createStore<{ rows: Row[] }>({ rows: seedRows() });
+    const tags = state.rows[0].tags; // captured two levels deep
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    expect(isPending(() => tags.primary)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => tags.primary)).toBe(false);
+  });
+
+  it("keyless mark on a nested record covers its captured subtree, not siblings", async () => {
+    const [state] = createStore<{ rows: Row[] }>({ rows: seedRows() });
+    const tags0 = state.rows[0].tags;
+    const tags1 = state.rows[1].tags;
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state.rows[0]);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    expect(isPending(() => tags0.primary)).toBe(true); // inside the marked subtree
+    expect(isPending(() => tags1.primary)).toBe(false); // sibling stays crisp
+    expect(isPending(() => state.rows[1].name)).toBe(false);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => tags0.primary)).toBe(false);
+  });
+
+  it("registering a mark wakes an already-materialized false verdict on a captured proxy", async () => {
+    const [state] = createStore<{ rows: Row[] }>({ rows: seedRows() });
+    const row = state.rows[0];
+    const log: boolean[] = [];
+    createRoot(() => {
+      const pending = createMemo(() => isPending(() => row.name));
+      createRenderEffect(pending, v => {
+        log.push(v);
+      });
+    });
+    flush();
+    expect(log).toEqual([false]); // verdict materialized before any mark exists
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+    const done = act();
+    flush();
+    expect(log.at(-1)).toBe(true); // a later mark must flip the captured-proxy verdict
+
+    resolveIt();
+    await done;
+    flush();
+    expect(log.at(-1)).toBe(false); // and release must flip it back
+  });
+
+  // Optimistic stores make in-flight writes readable outside the action, so
+  // the two declaration-ordering tests use them (a plain store's writes are
+  // transition-held and invisible to outside probes anyway).
+  it("records added after the mark registers are not covered (snapshot at declaration)", async () => {
+    const [state, setState] = createOptimisticStore<{ rows: Row[] }>({ rows: seedRows() });
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      setState(s => {
+        s.rows.push({ name: "c", tags: { primary: "z" } });
+      });
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    const added = state.rows[2];
+    expect(added.name).toBe("c"); // optimistic write is visible…
+    expect(isPending(() => state.rows.length)).toBe(true); // …the rows record itself is marked…
+    expect(isPending(() => added.name)).toBe(false); // …but the new record was not in the declared scope
+
+    resolveIt();
+    await done;
+    flush();
+  });
+
+  it("overlapping keyless marks: a re-declaration covers records added since the first", async () => {
+    const [state, setState] = createOptimisticStore<{ rows: Row[] }>({ rows: seedRows() });
+
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const first = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveFirst = r));
+    });
+    const second = action(function* () {
+      setState(s => {
+        s.rows.push({ name: "c", tags: { primary: "z" } });
+      });
+      affects(state); // second mark while the first is live: must re-snapshot
+      yield new Promise<void>(r => (resolveSecond = r));
+    });
+
+    const doneFirst = first();
+    flush();
+    const doneSecond = second();
+    flush();
+    const added = state.rows[2];
+    expect(isPending(() => added.name)).toBe(true); // in the second declaration's scope
+
+    resolveFirst();
+    await doneFirst;
+    flush();
+    expect(isPending(() => added.name)).toBe(true); // second mark still live
+    expect(isPending(() => state.rows[0].name)).toBe(true);
+
+    resolveSecond();
+    await doneSecond;
+    flush();
+    expect(isPending(() => added.name)).toBe(false);
+    expect(isPending(() => state.rows[0].name)).toBe(false);
+  });
+
+  it("multiple keys throw in dev — keys are not a path", () => {
+    const [state] = createStore<{ rows: Row[] }>({ rows: seedRows() });
+    expect(() => (affects as any)(state, "rows", "length")).toThrow(/single optional key/);
+  });
+
+  it("optimistically written records visible at declaration time are covered", async () => {
+    const [state, setState] = createOptimisticStore<{ rows: Row[] }>({ rows: seedRows() });
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      setState(s => {
+        s.rows.push({ name: "c", tags: { primary: "z" } });
+      });
+      affects(state); // declared AFTER the write: the walk must read through overlays
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    const added = state.rows[2];
+    expect(added.name).toBe("c");
+    expect(isPending(() => added.name)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => added.name)).toBe(false);
   });
 });
 

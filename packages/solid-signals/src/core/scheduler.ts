@@ -411,6 +411,15 @@ export class GlobalQueue extends Queue {
   static _dispose: (el: Computed<unknown>, self: boolean, zombie: boolean) => void;
   static _runEffect: (el: Computed<unknown>) => void;
   static _clearOptimisticStore: ((store: any) => void) | null = null;
+  // Store-side hook: drops a keyless affects() mark's identity scope when the
+  // carrier node's last registration releases (wired by store.ts, mirroring
+  // _clearOptimisticStore).
+  static _releaseAffectsScope: ((node: OptimisticNode) => void) | null = null;
+  // Async-side hooks (wired by async.ts, mirroring _update): a registered
+  // mark pushes STATUS_PENDING downstream on the normal status rails, and a
+  // released mark settles its sentinel pending-source out of the graph.
+  static _propagateAffects: ((node: OptimisticNode) => void) | null = null;
+  static _settleAffects: ((node: OptimisticNode) => void) | null = null;
   flush() {
     if (this._running) return;
     this._running = true;
@@ -766,36 +775,71 @@ export function trackOptimisticStore(store: any): void {
 }
 
 /**
- * Registers one `affects()` mark on a node: bumps the refcount, records the
+ * Count of live `affects()` registrations across the system (including
+ * store-scope inherited marks). Gates the read-path mark check in `read()` so
+ * graphs that never use the feature pay one integer compare.
+ */
+export let activeAffectsMarks = 0;
+
+/**
+ * The counting half of a mark, shared by direct registration and store-scope
+ * inheritance (a node created inside a live keyless mark's identity scope):
+ * bumps the refcount and pokes the node's verdict companions so an
+ * already-materialized `false` flips reactively.
+ *
+ * @internal
+ */
+export function markAffects(node: OptimisticNode): void {
+  node._affectsCount = (node._affectsCount || 0) + 1;
+  activeAffectsMarks++;
+  if (__DEV__) devTrackAffects(node);
+  if (node._affectsCount === 1) updatePendingSignal(node);
+}
+
+/**
+ * Registers one `affects()` mark on a node: counts it, records the
  * registration with the current transaction (after initTransition the queue's
  * array aliases the active transition's, mirroring `_optimisticNodes`), and
- * pokes the node's verdict companions so an already-materialized `false`
- * flips reactively.
+ * propagates STATUS_PENDING downstream on the status rails so everything
+ * DERIVED from the marked data reads pending too. Propagation runs on every
+ * registration (not just the first): subscribers gained since an earlier
+ * overlapping registration get covered, and dedup stops re-descent early.
  *
  * @internal
  */
 export function registerAffectsMark(node: OptimisticNode): void {
-  node._affectsCount = (node._affectsCount || 0) + 1;
+  markAffects(node);
   globalQueue._affectsNodes.push(node);
-  if (__DEV__) devTrackAffects(node);
-  if (node._affectsCount === 1) updatePendingSignal(node);
+  GlobalQueue._propagateAffects?.(node);
   schedule();
 }
 
 /**
- * Releases one batch of affects marks (a settling transaction's, or the
- * ambient batch at a plain flush end). Companion writes go through the
- * settlement snap (committed, not transition-scoped) so releasing a mark
+ * Releases one registration. When the node's last mark drops, settles the
+ * mark's sentinel out of every downstream `_pendingSources` (waking blocked
+ * nodes and re-deriving verdicts along the walk). Companion writes go through
+ * the settlement snap (committed, not transition-scoped) so releasing a mark
  * can't open a fresh override window that would itself need settlement.
+ *
+ * @internal
+ */
+export function releaseAffectsMark(node: OptimisticNode): void {
+  activeAffectsMarks--;
+  node._affectsCount!--;
+  if (!node._affectsCount) {
+    GlobalQueue._settleAffects?.(node);
+    snapCompanionsToState(node);
+    GlobalQueue._releaseAffectsScope?.(node);
+  }
+}
+
+/**
+ * Releases one batch of affects marks (a settling transaction's, or the
+ * ambient batch at a plain flush end).
  */
 function releaseAffectsMarks(nodes: OptimisticNode[]): void {
   if (!nodes.length) return;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    node._affectsCount!--;
-    if (!node._affectsCount && (node._pendingSignal || node._latestValueComputed))
-      snapCompanionsToState(node);
-  }
+  for (let i = 0; i < nodes.length; i++) releaseAffectsMark(nodes[i]);
   nodes.length = 0;
 }
 
@@ -923,7 +967,11 @@ function transitionComplete(transition: Transition): boolean {
         hasActiveOverride(node) &&
         "_statusFlags" in node &&
         node._statusFlags & STATUS_PENDING &&
-        node._error instanceof NotReadyError
+        node._error instanceof NotReadyError &&
+        // Mark-sourced pending never blocks settlement: affects() releases AT
+        // settle, so counting its sentinel here would deadlock the window it
+        // is scoped to.
+        !(node._error.source as Computed<any> | undefined)?._affectsFor
       ) {
         done = false;
         break;

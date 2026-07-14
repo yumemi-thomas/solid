@@ -61,6 +61,15 @@ export interface RawSignal<T> {
    * declaring transaction settles/reverts and releases its mark.
    */
   _affectsCount?: number;
+  /**
+   * The mark's identity on the pending-source rails (lazy, see
+   * `getAffectsSentinel`). Downstream subscribers hold it in
+   * `_pendingSources` exactly like a real in-flight source, but with its own
+   * identity so a landing or quiet re-ask on the node itself can't clear it.
+   */
+  _affectsSentinel?: Computed<any>;
+  /** Set only on sentinels: the marked node this sentinel stands for. */
+  _affectsFor?: Signal<any> | Computed<any>;
 }
 
 export interface FirewallSignal<T> extends RawSignal<T> {

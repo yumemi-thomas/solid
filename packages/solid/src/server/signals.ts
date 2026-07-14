@@ -1804,7 +1804,7 @@ export function refresh<T>(_target: Refreshable<T>): void {
   return undefined;
 }
 
-export function affects(_target: unknown, ..._keys: PropertyKey[]): void {
+export function affects(_target: unknown, _key?: PropertyKey): void {
   return undefined;
 }
 

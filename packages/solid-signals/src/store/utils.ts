@@ -9,9 +9,8 @@ import {
   getKeys,
   getPropertyDescriptor,
   isWrappable,
+  mergedOverlay,
   ownEnumerableKeys,
-  STORE_OPTIMISTIC_OVERRIDE,
-  STORE_OVERRIDE,
   STORE_LOOKUP,
   STORE_VALUE,
   storeLookup,
@@ -20,18 +19,6 @@ import {
   wrap,
   type StoreNode
 } from "./store.js";
-
-/**
- * The write overlay a snapshot must read through: optimistic writes shadow
- * regular pending writes, the same resolution order as every proxy trap and
- * `reconcile` (#2850). Merging allocates only in the rare both-present case
- * (a derived optimistic store with an in-flight projection commit).
- */
-function mergedOverlay(target: StoreNode): Record<PropertyKey, any> | undefined {
-  const override = target[STORE_OVERRIDE];
-  const opt = target[STORE_OPTIMISTIC_OVERRIDE];
-  return override && opt ? { ...override, ...opt } : (opt ?? override);
-}
 
 function snapshotImpl<T>(
   item: any,

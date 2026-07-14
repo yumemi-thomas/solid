@@ -18,7 +18,8 @@ A `Signal`/`Computed` participating in async/transitions carries:
 | `_value` | Committed, visible value | `recompute` (create/effect paths), `commitPendingNode`, `resolveOptimisticNodes`, `asyncWrite` (lane branch) |
 | `_pendingValue` | Transition-held next value; `NOT_PENDING` sentinel when absent (one meaning — a pending commit; revert targets were eliminated 2026-07-07b, §5e) | `setSignal` (non-optimistic), `recompute` (held branch), `asyncWrite` (override-active branch) |
 | `_overrideValue` | Optimistic override; `undefined` = not an optimistic node, `NOT_PENDING` = resting optimistic node, else = active override | `setSignal` (optimistic branch), `recompute` (lane-corrected), `resolveOptimisticNodes` (clears to `NOT_PENDING`) |
-| `_affectsCount` | Live `affects()` mark refcount: non-zero forces the node's verdict to `true` (declared motion, §5g). Carried by source nodes, store leaf nodes, and per-record `$AFFECTS` nodes | `registerAffectsMark` (+1, staged with the current transaction), `releaseAffectsMarks` (−1 at settle / flush end) |
+| `_affectsCount` | Live `affects()` mark refcount: non-zero forces the node's verdict to `true` and propagates pending downstream via the node's sentinel (declared motion, §5g). Carried by source nodes, store leaf/track/has nodes, and per-record `$AFFECTS` carriers | `registerAffectsMark`/`markAffects` (+1, staged with the current transaction or a scope entry), `releaseAffectsMark` (−1 at settle / flush end; settles the sentinel when the count zeroes) |
+| `_affectsSentinel` | The mark's identity on the pending-source rails (lazy): held in downstream `_pendingSources` like a real in-flight source, never a re-ask, never self-pending, branded with `_affectsFor` so settlement checks skip it | `getAffectsSentinel` (async.ts) |
 | `_reask` | Question-scoped classification of the CURRENT pending window: `true` = the in-flight recompute is a re-ask of the same question (refresh with no input value change) — quiet, not pending (§5g). Meaningless while not `STATUS_PENDING` | `recompute` (from the `REACTIVE_REASK` flag), cleared by `clearStatus` and by value-change notifications (`insertSubs` clears the flag pre-recompute) |
 | `_statusFlags` | `STATUS_PENDING` / `STATUS_ERROR` / `STATUS_UNINITIALIZED` | `notifyStatus`, `clearStatus`, commit paths |
 | `_error` | Current error (`NotReadyError` for pending, `StatusError`-wrapped for real) | compute catch, `notifyStatus` |
@@ -388,13 +389,19 @@ the question being asked. Three consequences replace the mask's one rule:
    state — `{ value: guess, pending: true }`. To downstream async, an
    optimistic write is a real input change (it launches real fetches that
    pend their own slots).
-3. **`affects(target, ...keys)` is the sole declaration verb.** A mark is
-   additive pending on exactly the named slots (store record → every read
-   through it; leaf keys → those slots; accessor → that source), live from
-   declaration to its transaction's settle/revert (ambient marks release at
-   flush end). The declared reload idiom — `affects(x); refresh(x)` — is how
-   process intent ("this work will change x") enters the verdict when the
-   graph can't see it yet.
+3. **`affects(target, key?)` is the sole declaration verb.** A mark is
+   additive pending on exactly the marked data (store record → every record
+   reachable from it at declaration time, by identity — captured child
+   proxies included, #2882; leaf key → that slot; accessor → that source)
+   **and on everything derived from it**: marks ride the same status rails
+   as real in-flight async (§ affects-on-rails below), so memos/effects over
+   marked data read pending like they would over a real pending source,
+   while the marked values themselves stay readable. Live from declaration
+   to its transaction's settle/revert (ambient marks release at flush end).
+   The declared reload idiom — `affects(x); refresh(x)` — is how process
+   intent ("this work will change x") enters the verdict when the graph
+   can't see it yet; the mark's own channel is never a re-ask, so the
+   refresh's quiet classification cannot silence the declared window.
 
 Verdict ladder (`computePendingState`): disposal guard → live
 `_affectsCount` → latest-shadow branch (owner's `_affectsCount`, then owner
@@ -414,25 +421,58 @@ Supporting machinery:
   node already pending on an unanswered new question stays non-quiet);
   `clearStatus` resets it on landing. When a reask classification changes
   while pending, `repollDownstreamVerdicts` re-derives companions downstream.
-- **Affects lifecycle** (scheduler.ts): `registerAffectsMark` bumps
-  `_affectsCount`, stages the registration with the current transaction
-  (ambient registrations are adopted by `initTransition`, merged by
-  `mergeTransitionState`, mirroring `_optimisticNodes`), and pokes the
-  node's companions; `releaseAffectsMarks` decrements at the transaction's
-  settle (or plain flush end for ambient marks) and snaps companions
-  through the settlement checkpoint (committed, not transition-scoped).
-- **Store addressing** (store.ts): `affects(record)` marks a per-record
-  `$AFFECTS` node; `affects(record, ...keys)` marks the leaf nodes.
-  Witnessing: the `get`/`has`/`ownKeys` traps and the `snapshot`/`deep`
-  walk (utils.ts — it bypasses traps) upsert-and-witness the record's
-  `$AFFECTS` node into the active probe, so probes subscribe to the channel
-  *before* any mark exists — a later `affects()` wakes materialized `false`
-  verdicts through the node's companion. The upsert is skipped for untracked
-  probes (`tracking` off): they can't be woken by a later mark, so they only
-  need marks that already exist — no node, no allocation. The per-node
-  companion channel (not a shared version signal) is load-bearing here:
-  companions carry their own optimistic lane, which is what lets the wake-up
-  escape an incomplete transition's effect stash.
+- **Affects on rails** (async.ts/scheduler.ts): a mark is a synthetic
+  in-flight change on the normal status rails, under its own **sentinel**
+  pending-source (`getAffectsSentinel`, one per marked node, branded with
+  `_affectsFor`). `registerAffectsMark` bumps `_affectsCount`, stages the
+  registration with the current transaction (ambient registrations are
+  adopted by `initTransition`, merged by `mergeTransitionState`, mirroring
+  `_optimisticNodes`), pokes the node's companions, and **propagates
+  `STATUS_PENDING` downstream** from the marked node via `notifyStatus` with
+  a `NotReadyError(sentinel)` — so downstream verdicts derive from the
+  ordinary `newQuestionInFlight` clause. The separate identity is what keeps
+  the channels from clearing each other: a landing on the marked node
+  settles only the node's OWN source entry (`settlePendingSource` is
+  source-parameterized); `quietPending` never reports quiet while a sentinel
+  is among the sources (its `_reask` is permanently false), so a declared
+  reload survives its refresh's quiet classification; and neither
+  `transitionComplete` check counts a sentinel-sourced pending as a blocker
+  (`_affectsFor` brand) — a mark releases AT settle, so self-blocking would
+  deadlock. The marked node itself never carries `STATUS_PENDING` (marks
+  are value-transparent at the source; its own verdict is the
+  `_affectsCount` clause). Computeds that recompute mid-window shed the
+  sentinel via `clearStatus` and re-acquire it through the read path:
+  `read()` records marked sources into the recompute's `affectsReads`
+  accumulator (gated by the global `activeAffectsMarks` counter; probe
+  reads excluded so an `isPending` wrapper memo doesn't mark itself), and
+  `recompute` applies them after its commit (`applyAffectsReads` — earlier
+  would route the fresh value into the error-skip branch).
+  `releaseAffectsMark` decrements at the transaction's settle (or plain
+  flush end for ambient marks), settles the sentinel out of every
+  downstream `_pendingSources` (waking `_blocked` nodes), and snaps
+  companions through the settlement checkpoint (committed, not
+  transition-scoped — the settle walk snaps too, for the same reason).
+- **Store addressing** (store.ts): `affects(record)` upserts a per-record
+  `$AFFECTS` node (the mark's carrier — registry key and liveness anchor),
+  walks the record's subtree — reading through write overlays — registering
+  the mark on **every live node** in it (property leaves, `$TRACK`,
+  has-nodes: the edges existing readers subscribed through), and snapshots
+  the reachable raw identities into the mark's scope (`affectsScopes`,
+  released with the carrier's last registration). Nodes created during the
+  window inherit the mark at birth (`getNode` → `inheritAffectsMarks`, keyed
+  by the owning record's raw identity; inherited marks are released with the
+  carrier's entry), which is how captured child proxies (`<For>` rows,
+  #2882) and late tracked reads observe a mark their read path never
+  traverses. `affects(record, key)` marks the named leaf node (single key —
+  keys are not a path). Witnessing (`witnessAffectsMark`, pendingCheckActive
+  traps + the `snapshot`/`deep` walk in utils.ts) now only covers untracked
+  probes over records whose nodes never materialized: it adds the record's
+  own `$AFFECTS` carrier and any scope carrier containing the record's raw
+  to the probe. Tracked probes need none of this — they read real nodes,
+  which carry marks directly. The per-node companion channel (not a shared
+  version signal) is load-bearing for wake-ups: companions carry their own
+  optimistic lane, which is what lets a late registration's wake escape an
+  incomplete transition's effect stash.
 - **Probe rethrow scope** (core.ts `isPending`): only a truly UNINITIALIZED
   source's NotReady rethrows out of the probe (loading participates in
   readiness); an initialized source throwing NotReady during a quiet re-ask
@@ -484,9 +524,10 @@ sibling rows because the confirm refresh is a quiet re-ask).
   live `affects()` mark": same-question re-asks (refresh/poll/confirm) are
   silent; a new question pends monotonically and nothing silences it;
   optimistic writes are verdict-inert (display without decree — honest mixed
-  state over an in-flight question); `affects(target, ...keys)` is the sole,
-  additive declaration verb. Vouching, `UNCHANGED`, and the store-wide mask
-  are deleted concepts. `isPending` keeps its name (isStale was weighed —
+  state over an in-flight question); `affects(target, key?)` is the sole,
+  additive declaration verb (single optional key since 2026-07-14 — the
+  variadic form read as a 1.x path and was dropped). Vouching, `UNCHANGED`,
+  and the store-wide mask are deleted concepts. `isPending` keeps its name (isStale was weighed —
   semantics now match "stale" but the argument-taking form already reads as
   data-scoped; revisit only with docs-team pressure). Implementation in §5g;
   scenario matrix pinned in `tests/question-scoped-pending.test.ts`.

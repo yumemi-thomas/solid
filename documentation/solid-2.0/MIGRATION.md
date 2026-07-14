@@ -673,7 +673,7 @@ These APIs are new additions (not renames of 1.x APIs):
 - **`isPending(fn)`** — expression-level "unrevealed change in flight" check.
 - **`latest(fn)`** — peek at in-flight values during transitions.
 - **`refresh(target)`** — explicit recomputation/invalidation of derived reads (a quiet re-ask — not pending).
-- **`affects(target, ...keys)`** — declare that in-flight work will change the targeted data; the named slots read pending until the transaction settles.
+- **`affects(target, key?)`** — declare that in-flight work will change the targeted data; the marked record (or the single named slot) reads pending until the transaction settles.
 - **`resolve(fn)`** — returns a Promise that resolves when a reactive expression settles.
 - **`Loading` `on` prop** — controls when a Loading boundary re-shows fallback during revalidation.
 - **`deep(store)`** — deep observation of a store (tracks all nested changes).

@@ -76,11 +76,11 @@ const addTodo = action(function* (todo) {
 
 `refresh()` is also an action: call it from event handlers, effects, or other actions rather than from pure computations. It starts invalidation work; it does not carry user-visible optimistic state by itself. Because it re-asks the *same* question (no input changed), a bare `refresh()` is quiet: the fresh value reveals silently and `isPending` stays `false`. When the reload should read as pending, declare it with `affects()`.
 
-### `affects(target, ...keys)` (declare what in-flight work will change)
+### `affects(target, key?)` (declare what in-flight work will change)
 
-`affects` declares that the surrounding work will change the targeted data. The named slots read as pending (`isPending` → `true`) from the declaration until the transaction settles or reverts. It is additive only: a declaration can turn pending *on* for data the graph can't see changing yet; nothing turns pending *off* while a real change is in flight.
+`affects` declares that the surrounding work will change the targeted data. The marked data — and anything derived from it — reads as pending (`isPending` → `true`) from the declaration until the transaction settles or reverts, exactly as if a real fetch for it were in flight; the values themselves stay readable throughout. It is additive only: a declaration can turn pending *on* for data the graph can't see changing yet; nothing turns pending *off* while a real change is in flight — pairing `affects(x)` with `refresh(x)` keeps the whole window pending even though the bare refresh alone would be quiet.
 
-Targets mirror how you read: `affects(store)` marks a store record (root or nested — siblings are untouched), `affects(record, "key")` marks exactly the named slots, and `affects(accessor)` marks a signal/memo source.
+Targets mirror how you read: `affects(store)` marks a store record (root or nested) and everything reachable from it at declaration time — including rows captured by `<For>` — while siblings stay untouched; `affects(record, "key")` marks exactly the named slot; and `affects(accessor)` marks a signal/memo source. One key per call — keys do **not** form a path (mark several slots with several calls, or target the nested record directly).
 
 ```js
 const reload = action(function* () {

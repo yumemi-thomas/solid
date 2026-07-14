@@ -4,7 +4,6 @@ import {
   snapshotCaptureActive,
   snapshotSources,
   strictRead,
-  tracking,
   witnessAffects
 } from "../core/core.js";
 import { DEV, emitDiagnostic, registerGraph } from "../core/dev.js";
@@ -27,9 +26,12 @@ import {
   type Signal
 } from "../core/index.js";
 import {
+  GlobalQueue,
   globalQueue,
+  markAffects,
   projectionWriteActive,
-  registerTransientStoreNode
+  registerTransientStoreNode,
+  releaseAffectsMark
 } from "../core/scheduler.js";
 import { createProjectionInternal } from "./projection.js";
 
@@ -260,12 +262,11 @@ function getNodes(target: StoreNode, type: typeof STORE_NODE | typeof STORE_HAS)
 }
 
 function getNode<T>(
+  target: StoreNode,
   nodes: DataNodes,
   property: PropertyKey,
   value: T,
-  firewall?: Computed<T>,
   equals: false | ((a: any, b: any) => boolean) = isEqual,
-  optimistic?: boolean,
   snapshotProps?: Record<PropertyKey, any>
 ): DataNode {
   if (nodes[property]) return nodes[property]!;
@@ -298,9 +299,9 @@ function getNode<T>(
         }
       }
     },
-    firewall
+    target[STORE_FIREWALL] as Computed<T> | undefined
   );
-  if (optimistic) {
+  if (target[STORE_OPTIMISTIC]) {
     s._overrideValue = NOT_PENDING;
   }
   if (snapshotProps && property in snapshotProps) {
@@ -310,84 +311,164 @@ function getNode<T>(
   }
   if (typeof property === "symbol" && property !== $TRACK && property !== $AFFECTS)
     symbolKeyedRecords.add(nodes);
+  // A node born inside a live keyless mark's identity scope inherits the mark
+  // (the declaration walk could only cover nodes that existed then). The
+  // record's own $AFFECTS carrier is the mark's channel, never a member.
+  if (property !== $AFFECTS && affectsScopes.size) inheritAffectsMarks(s, target[STORE_VALUE]);
   return (nodes[property] = s);
 }
 
 /**
- * Witness the record-level `affects()` channel into the active isPending()
- * probe. Called from the read traps (and `snapshot`/`deep` in utils.ts, which
- * walk records without touching traps): any read THROUGH the record makes
- * probes over its slots observe declared motion. The $AFFECTS node is
- * upserted here (not just when a mark registers) so the probe subscribes to
- * the channel BEFORE any mark exists — a later `affects(record)` must wake
- * already-materialized `false` verdicts through the node's companion, whose
- * own lane escapes an incomplete transition's effect stash (a shared
- * version signal cannot: its subscribers get held with the transition).
+ * Scope inheritance for late-created nodes: every live keyless mark whose
+ * identity scope contains the owning record's raw gets counted on the new
+ * node. Inherited marks live exactly as long as the scope's carrier — the
+ * release hook below drops them with the entry.
+ */
+function inheritAffectsMarks(node: DataNode, raw: object): void {
+  for (const [carrier, entry] of affectsScopes) {
+    if (carrier._affectsCount && entry.scope.has(raw)) {
+      markAffects(node);
+      entry.inherited.push(node);
+    }
+  }
+}
+
+/**
+ * Live keyless-mark scopes: the mark's carrier `$AFFECTS` node → the raw
+ * identities reachable from the marked record when the mark was declared,
+ * plus the nodes created inside that scope since (inherited marks). A
+ * keyless mark covers the record's subtree by IDENTITY, not read path —
+ * captured descendant proxies (`<For>` rows) never traverse the marked
+ * record, so coverage resolves against raw identity here (#2882). Entries
+ * die with the carrier's last registration (scheduler release hook), which
+ * also releases every inherited mark.
+ */
+interface AffectsScope {
+  scope: Set<object>;
+  inherited: DataNode[];
+}
+const affectsScopes = new Map<DataNode, AffectsScope>();
+
+/**
+ * Snapshots the identities reachable from `value` into `scope`, reading
+ * through write overlays (an optimistic row pushed before the declaration is
+ * in motion too). Untracked by construction: walks raw values, never traps.
+ * Every LIVE node under each reachable record — property leaves, `$TRACK`,
+ * and has-nodes — collects into `found`: those are the graph edges existing
+ * readers subscribed through, so the mark registers on them directly and
+ * rides the status rails to everything derived. (Nodes born later inherit
+ * from the scope in `getNode`.)
+ */
+function walkAffectsScope(
+  value: any,
+  entry: AffectsScope,
+  found: DataNode[],
+  lookup: WeakMap<any, any> | undefined,
+  // Cycle guard, fresh per declaration: the scope itself can't serve — a
+  // re-declaration on the same carrier unions into a scope that already
+  // holds the root, and must still descend to pick up records added since.
+  visited: Set<object>
+): void {
+  if (!isWrappable(value)) return;
+  const target: StoreNode | undefined =
+    value[$TARGET] || (lookup ?? storeLookup).get(value)?.[$TARGET];
+  const raw = target ? target[STORE_VALUE] : value;
+  if (visited.has(raw)) return;
+  visited.add(raw);
+  entry.scope.add(raw);
+  let override: Record<PropertyKey, any> | undefined;
+  if (target) {
+    collectRecordNodes(target[STORE_NODE], found);
+    collectRecordNodes(target[STORE_HAS], found);
+    override = mergedOverlay(target);
+    lookup = target[STORE_LOOKUP] ?? lookup;
+  }
+  if (Array.isArray(raw)) {
+    const len = override?.length ?? raw.length;
+    for (let i = 0; i < len; i++) {
+      const v = override && i in override ? override[i] : raw[i];
+      if (v !== $DELETED) walkAffectsScope(v, entry, found, lookup, visited);
+    }
+  } else {
+    const keys = getKeys(raw, override);
+    for (let i = 0, l = keys.length; i < l; i++) {
+      const desc = getPropertyDescriptor(raw, override, keys[i]);
+      if (!desc || desc.get) continue;
+      walkAffectsScope(desc.value, entry, found, lookup, visited);
+    }
+  }
+}
+
+/** All live signal nodes of one record's node map (string + symbol keyed). */
+function collectRecordNodes(nodes: DataNodes | undefined, found: DataNode[]): void {
+  if (!nodes) return;
+  for (const key of Object.keys(nodes)) found.push(nodes[key]);
+  const syms = Object.getOwnPropertySymbols(nodes);
+  for (let i = 0, l = syms.length; i < l; i++) {
+    // Another mark's carrier is its own channel — counting it here would
+    // extend that sibling scope's lifetime to this declaration's.
+    if (syms[i] !== $AFFECTS) found.push(nodes[syms[i]]);
+  }
+}
+
+/**
+ * Witness live mark coverage of a record into the active isPending() probe.
+ * Tracked reads don't need this — they go through real signal nodes, which
+ * carry marks directly (declaration walk or birth inheritance). This covers
+ * UNTRACKED probes reading through records whose nodes never materialized
+ * (no observer ever subscribed, so no node exists to carry the mark).
  * Callers guard on `pendingCheckActive`, so plain reads never pay for this.
  *
  * @internal
  */
 export function witnessAffectsMark(target: StoreNode): void {
-  const node =
-    target[STORE_NODE]?.[$AFFECTS] ||
-    // Upsert only when a tracking scope can subscribe: an untracked probe
-    // can't be woken by a later mark anyway, so it only needs to see marks
-    // that already exist — no node, no subscription, no allocation (not
-    // even the nodes map).
-    (tracking
-      ? getNode(
-          getNodes(target, STORE_NODE),
-          $AFFECTS,
-          undefined,
-          target[STORE_FIREWALL],
-          false,
-          target[STORE_OPTIMISTIC]
-        )
-      : undefined);
-  if (node) witnessAffects(node);
+  const own = target[STORE_NODE]?.[$AFFECTS];
+  if (own?._affectsCount) witnessAffects(own);
+  if (affectsScopes.size) {
+    const raw = target[STORE_VALUE];
+    for (const [carrier, entry] of affectsScopes) {
+      if (carrier !== own && carrier._affectsCount && entry.scope.has(raw)) witnessAffects(carrier);
+    }
+  }
 }
 
 /**
- * Resolves the store nodes an `affects()` declaration marks: with `keys`, the
- * leaf node per named slot (upserted so the mark has an addressable carrier);
- * without, the record's $AFFECTS node — witnessed by every read through the
- * record, so the mark covers the whole subtree without touching siblings.
+ * Resolves the store nodes an `affects()` declaration marks: with a `key`,
+ * the named slot's leaf node (upserted so the mark has an addressable
+ * carrier); without, the record's $AFFECTS carrier plus every LIVE node in
+ * its subtree (the edges existing readers subscribed through), with the
+ * subtree's identities snapshotted into the mark's scope so nodes created
+ * during the window — and untracked probes over captured proxies — resolve
+ * against it (#2882).
  *
  * @internal
  */
-export function getStoreAffectsNodes(target: StoreNode, keys: PropertyKey[]): DataNode[] {
+export function getStoreAffectsNodes(target: StoreNode, key?: PropertyKey): DataNode[] {
   const nodes = getNodes(target, STORE_NODE);
-  if (!keys.length) {
-    return [
-      getNode(nodes, $AFFECTS, undefined, target[STORE_FIREWALL], false, target[STORE_OPTIMISTIC])
-    ];
+  if (key === undefined) {
+    const carrier = getNode(target, nodes, $AFFECTS, undefined, false);
+    GlobalQueue._releaseAffectsScope ||= node => {
+      const entry = affectsScopes.get(node as DataNode);
+      if (!entry) return;
+      affectsScopes.delete(node as DataNode);
+      for (let i = 0; i < entry.inherited.length; i++) releaseAffectsMark(entry.inherited[i]);
+    };
+    let entry = affectsScopes.get(carrier);
+    if (!entry) affectsScopes.set(carrier, (entry = { scope: new Set(), inherited: [] }));
+    const result = [carrier];
+    walkAffectsScope(target[$PROXY], entry, result, target[STORE_LOOKUP], new Set());
+    return result;
   }
-  const result: DataNode[] = [];
-  for (const key of keys) {
-    if (nodes[key]) {
-      result.push(nodes[key]);
-      continue;
-    }
-    const layer = getOverlayLayer(target, key);
-    const raw = layer ? layer[key] : target[STORE_VALUE][key];
-    const prev = raw === $DELETED ? undefined : raw;
-    result.push(upsertStoreNode(target, nodes, key, prev, target[STORE_SNAPSHOT_PROPS]));
-  }
-  return result;
+  if (nodes[key]) return [nodes[key]];
+  const layer = getOverlayLayer(target, key);
+  const raw = layer ? layer[key] : target[STORE_VALUE][key];
+  const prev = raw === $DELETED ? undefined : raw;
+  return [upsertStoreNode(target, nodes, key, prev, target[STORE_SNAPSHOT_PROPS])];
 }
 
 export function trackSelf(target: StoreNode, symbol: symbol = $TRACK) {
   if (!getObserver()) return;
-  read(
-    getNode(
-      getNodes(target, STORE_NODE),
-      symbol,
-      undefined,
-      target[STORE_FIREWALL],
-      false,
-      target[STORE_OPTIMISTIC]
-    )
-  );
+  read(getNode(target, getNodes(target, STORE_NODE), symbol, undefined, false));
   // Store-in-store: structural notifications (reconcile, notifySelf) land on
   // the wrapped source's own self-node, never on this wrapper view's. Chain
   // the read through so enumeration/$TRACK on the wrapper observes them
@@ -411,6 +492,18 @@ export function notifySelf(target: StoreNode) {
       node,
       target[STORE_OPTIMISTIC] && !projectionWriteActive ? STORE_SELF_PENDING : undefined
     );
+}
+
+/**
+ * The write overlay a walk must read through: optimistic writes shadow
+ * regular pending writes, the same resolution order as every proxy trap and
+ * `reconcile` (#2850). Merging allocates only in the rare both-present case
+ * (a derived optimistic store with an in-flight projection commit).
+ */
+export function mergedOverlay(target: StoreNode): Record<PropertyKey, any> | undefined {
+  const override = target[STORE_OVERRIDE];
+  const opt = target[STORE_OPTIMISTIC_OVERRIDE];
+  return override && opt ? { ...override, ...opt } : (opt ?? override);
 }
 
 export function getKeys(
@@ -508,15 +601,7 @@ function upsertStoreNode(
 ): DataNode {
   if (nodes[property]) return nodes[property]!;
   const initial = isWrappable(prev) ? wrap(prev, target) : prev;
-  const node = getNode(
-    nodes,
-    property,
-    initial,
-    target[STORE_FIREWALL],
-    isEqual,
-    target[STORE_OPTIMISTIC],
-    snapshotProps
-  );
+  const node = getNode(target, nodes, property, initial, isEqual, snapshotProps);
   registerTransientStoreNode(node);
   return node;
 }
@@ -594,7 +679,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       !selfRead &&
       !writeOnly(receiver)
     ) {
-      return read(getNode(nodes, property, undefined, target[STORE_FIREWALL]));
+      return read(getNode(target, nodes, property, undefined));
     }
     const overlay = getOverlayLayer(target, property);
     const overridden = !!overlay;
@@ -642,12 +727,11 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       } else if (getObserver() && !selfRead) {
         return read(
           getNode(
+            target,
             nodes,
             property,
             isWrappable(value) ? wrap(value, target) : value,
-            target[STORE_FIREWALL],
             isEqual,
-            target[STORE_OPTIMISTIC],
             target[STORE_SNAPSHOT_PROPS]
           )
         );
@@ -686,9 +770,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     // it without first upserting a has-node at the write site). Create + read only
     // when tracking; leave untracked reads node-free.
     if (getObserver()) {
-      return read(
-        getNode(nodes, property, has, target[STORE_FIREWALL], isEqual, target[STORE_OPTIMISTIC])
-      );
+      return read(getNode(target, nodes, property, has));
     }
     return has;
   },

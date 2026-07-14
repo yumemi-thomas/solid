@@ -226,7 +226,7 @@ createRoot(dispose => {
 | `isPending(accessor)`    | Check if an unrevealed value change is in flight for a read        |
 | `latest(accessor)`       | Get the last resolved value, or follow not-ready if none exists    |
 | `refresh(accessor)`      | Re-trigger an async computation (a quiet re-ask — not pending)     |
-| `affects(target, ...keys)` | Declare that in-flight work will change the targeted data (reads pending until settle) |
+| `affects(target, key?)` | Declare that in-flight work will change the targeted data (reads pending until settle) |
 | `resolve(fn)`            | Returns a promise that resolves when a reactive expression settles |
 | `mapArray(list, mapFn)`  | Reactive array mapping with keyed reconciliation                   |
 | `repeat(count, mapFn)`   | Reactive repeat based on a reactive count                          |
