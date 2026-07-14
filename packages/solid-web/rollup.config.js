@@ -99,5 +99,21 @@ export default [
     ],
     external: ["@solidjs/web"],
     plugins
+  },
+  {
+    input: "serialization/src/index.ts",
+    output: [
+      {
+        file: "serialization/dist/serialization.cjs",
+        format: "cjs",
+        exports: "auto"
+      },
+      {
+        file: "serialization/dist/serialization.js",
+        format: "es"
+      }
+    ],
+    external: ["seroval", "seroval-plugins/web"],
+    plugins
   }
 ];
