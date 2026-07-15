@@ -398,7 +398,11 @@ describe("createEffect error phases (#2839)", () => {
       flush();
     }).toThrow("boom-effect");
     expect(log).toEqual([]);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("REACTIVITY_HALTED"));
+    // The halt log carries the causing error alongside the message (#2884).
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("REACTIVITY_HALTED"),
+      expect.objectContaining({ message: "boom-effect" })
+    );
 
     setBeat(1);
     flush();

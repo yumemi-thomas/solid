@@ -93,7 +93,7 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
       return;
     }
     if (!this._queue.notify(this, STATUS_ERROR, STATUS_ERROR)) {
-      haltReactivity();
+      haltReactivity(unwrapStatusError(actualError));
       throw actualError;
     }
   } else if (this._type === EFFECT_RENDER) {
@@ -146,7 +146,7 @@ function runEffect(node: Effect<any>): void {
         : console.error(err);
     } catch (error) {
       if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
-        haltReactivity();
+        haltReactivity(error);
         throw error;
       }
     }
@@ -172,7 +172,7 @@ function runEffect(node: Effect<any>): void {
     node._error = new StatusError(node, error);
     node._statusFlags |= STATUS_ERROR;
     if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
-      haltReactivity();
+      haltReactivity(error);
       throw error;
     }
   } finally {
@@ -233,7 +233,7 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
       node._queue.notify(node, STATUS_PENDING, 0);
       const err = error !== undefined ? error : node._error;
       if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
-        haltReactivity();
+        haltReactivity(unwrapStatusError(err));
         throw err;
       }
     }

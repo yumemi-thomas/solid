@@ -289,7 +289,7 @@ export function schedule() {
  * every boundary — app state is undefined at that point, so scheduling stops
  * entirely rather than limping along with a half-applied update.
  */
-export function haltReactivity(): void {
+export function haltReactivity(cause?: unknown): void {
   if (halted) return;
   halted = true;
   let message = "[REACTIVITY_HALTED] An uncaught error halted the reactive system.";
@@ -303,7 +303,10 @@ export function haltReactivity(): void {
       message
     });
   }
-  console.error(message);
+  // Log the cause here too: callers rethrow it, but a creation-time throw
+  // unwinds through ancestor recomputes that convert it to status instead of
+  // surfacing it (#2884), so the rethrow alone cannot guarantee visibility.
+  cause === undefined ? console.error(message) : console.error(message, cause);
 }
 
 // Logs on the first write after a halt so a frozen interaction is traceable.

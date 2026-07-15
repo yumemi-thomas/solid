@@ -216,7 +216,13 @@ describe("equals comparator errors (#2837)", () => {
       setUsers([]);
       flush();
     }).toThrow("Cannot read properties of undefined");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("REACTIVITY_HALTED"));
+    // The halt log carries the causing error alongside the message (#2884).
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("REACTIVITY_HALTED"),
+      expect.objectContaining({
+        message: expect.stringContaining("Cannot read properties of undefined")
+      })
+    );
 
     // Halted deliberately and loudly — not a silent wedge
     setBeat(1);

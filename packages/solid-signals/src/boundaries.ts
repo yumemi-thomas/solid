@@ -25,7 +25,7 @@ import {
 } from "./core/index.js";
 import type { IQueue, Signal } from "./core/index.js";
 import { emitDiagnostic } from "./core/dev.js";
-import { schedule } from "./core/scheduler.js";
+import { haltReactivity, schedule } from "./core/scheduler.js";
 import { accessor, type Accessor } from "./signals.js";
 
 export interface BoundaryComputed<T> extends Computed<T> {
@@ -42,7 +42,7 @@ function boundaryComputed<T>(fn: () => T, propagationMask: number): BoundaryComp
     // consumes this boundary's own type and forwards the remainder upward until
     // a boundary that handles it is found.
     node._statusFlags &= ~node._propagationMask;
-    node._queue.notify(node, STATUS_PENDING | STATUS_ERROR, flags, actualError);
+    const handled = node._queue.notify(node, STATUS_PENDING | STATUS_ERROR, flags, actualError);
     // The queue is the only propagation channel: a foreign status must not stay
     // reader-visible on the tree, or reads re-throw it across the boundary and
     // link unrelated ambient contexts (the #2809 nested-boundary loop). Deps are
@@ -52,6 +52,14 @@ function boundaryComputed<T>(fn: () => T, propagationMask: number): BoundaryComp
       node._statusFlags &= ~foreign;
       if (node._error === actualError && !(node._statusFlags & (STATUS_PENDING | STATUS_ERROR)))
         node._error = undefined;
+    }
+    // An ERROR the chain could not deliver to any boundary is uncaught. The
+    // scrub above already removed it from reader-visible state, so without
+    // escalation here it would vanish entirely (#2884) — halt-and-throw,
+    // exactly like an unhandled effect error.
+    if (!handled && flags & STATUS_ERROR) {
+      haltReactivity(unwrapStatusError(actualError));
+      throw actualError;
     }
   };
   node._propagationMask = propagationMask;

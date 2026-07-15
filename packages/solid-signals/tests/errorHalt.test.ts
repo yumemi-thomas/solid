@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEffect,
   createErrorBoundary,
+  createLoadingBoundary,
+  createRenderEffect,
   createRoot,
   createSignal,
   createTrackedEffect,
@@ -153,6 +155,56 @@ describe("uncaught effect errors halt the reactive system", () => {
     setC(3);
     flush();
     expect(seenC).toEqual([]);
+  });
+
+  it("logs the causing error alongside REACTIVITY_HALTED (#2884)", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const [a, setA] = createSignal(0);
+
+    createRoot(() => {
+      createEffect(a, v => {
+        if (v === 1) throw new Error("halt cause");
+      });
+    });
+    flush();
+
+    expect(() => {
+      setA(1);
+      flush();
+    }).toThrow("halt cause");
+    const haltCall = error.mock.calls.find(args => /REACTIVITY_HALTED/.test(String(args[0])));
+    expect(haltCall).toBeDefined();
+    expect(haltCall![1]).toBeInstanceOf(Error);
+    expect((haltCall![1] as Error).message).toBe("halt cause");
+  });
+
+  it("a Loading boundary cannot silently swallow an unhandled error (#2884)", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A nested render effect whose creation throws routes the error into the
+    // boundary tree as status. A Loading boundary only collects PENDING; the
+    // ERROR dimension forwards up unhandled, and the boundary's foreign-status
+    // scrub (#2809) used to erase it entirely — no log, no throw.
+    expect(() =>
+      createRoot(() => {
+        createLoadingBoundary(
+          () => {
+            createRenderEffect(
+              () => {
+                throw new Error("swallowed boom");
+              },
+              () => {}
+            );
+            return "content";
+          },
+          () => "loading"
+        )();
+      })
+    ).toThrow("swallowed boom");
+
+    const haltCall = error.mock.calls.find(args => /REACTIVITY_HALTED/.test(String(args[0])));
+    expect(haltCall).toBeDefined();
+    expect((haltCall![1] as Error).message).toBe("swallowed boom");
   });
 
   it("detaches a throwing cleanup so it never re-fires (#2813)", () => {
