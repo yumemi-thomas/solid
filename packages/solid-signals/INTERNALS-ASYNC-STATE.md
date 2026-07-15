@@ -440,7 +440,12 @@ Supporting machinery:
   (`_affectsFor` brand) — a mark releases AT settle, so self-blocking would
   deadlock. The marked node itself never carries `STATUS_PENDING` (marks
   are value-transparent at the source; its own verdict is the
-  `_affectsCount` clause). Computeds that recompute mid-window shed the
+  `_affectsCount` clause), and **mark-only pending is value-transparent
+  through derivation too** (#2886): `read()` skips the suspension branch
+  when the owner's pending sources are all sentinels (`onlyMarkPending`,
+  gated by `activeAffectsMarks`), so a live tracked reader over mark-pended
+  derived nodes — a `mapArray` over a marked store — keeps rendering fresh
+  optimistic values instead of throwing. Computeds that recompute mid-window shed the
   sentinel via `clearStatus` and re-acquire it through the read path:
   `read()` records marked sources into the recompute's `affectsReads`
   accumulator (gated by the global `activeAffectsMarks` counter; probe

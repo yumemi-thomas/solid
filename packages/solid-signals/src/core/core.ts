@@ -1,4 +1,4 @@
-import { clearStatus, handleAsync, notifyStatus } from "./async.js";
+import { clearStatus, handleAsync, notifyStatus, onlyMarkPending } from "./async.js";
 import {
   $REFRESH,
   CONFIG_AUTO_DISPOSE,
@@ -812,7 +812,16 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     }
   }
 
-  if (owner._statusFlags & STATUS_PENDING) {
+  // Mark-only pending never suspends the reader (#2886): an affects() mark is
+  // a promise of change, not an absence of value, so a derived node whose only
+  // pending sources are mark sentinels keeps its real value readable —
+  // pendingness reaches readers through verdicts (isPending), not throws.
+  // (`activeAffectsMarks` gates the source scan off the mark-free hot path;
+  // sentinels can't survive in pending sources past their last release.)
+  if (
+    owner._statusFlags & STATUS_PENDING &&
+    !(activeAffectsMarks !== 0 && onlyMarkPending(owner as Computed<any>))
+  ) {
     if (c && !(stale && owner._transition && activeTransition !== owner._transition)) {
       if (__DEV__ && c && c._config & CONFIG_CHILDREN_FORBIDDEN) {
         const message =

@@ -11,7 +11,10 @@
  * - a landing mid-mark (affects + refresh resolving) does not strip the
  *   mark early — pending holds until settle;
  * - a mark never blocks its own transaction's settlement;
- * - store record marks reach derived readers of captured row proxies.
+ * - store record marks reach derived readers of captured row proxies;
+ * - mark-only pending is value-transparent: reads through derivation never
+ *   suspend, so optimistic writes under a whole-store mark stay visible
+ *   to live tracked readers (#2886).
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -334,6 +337,60 @@ describe("affects — propagation through derivation", () => {
     flush();
     expect(isPending(() => users.length)).toBe(false);
     expect(log.at(-1)).toBe(false);
+    dispose();
+  });
+
+  it("optimistic writes stay visible to tracked readers under a whole-store mark (#2886)", async () => {
+    // Mark-only pending must be value-transparent on the READ path: a live
+    // mapArray subscriber whose recompute reads mark-pended store nodes used
+    // to suspend (NotReadyError from the sentinel's STATUS_PENDING), so the
+    // optimistic insert never rendered for the whole action.
+    type User = { name: string };
+    let serverUsers: User[] = [{ name: "a" }];
+    const getUsers = async () => serverUsers.map(u => ({ ...u }));
+    const [users, setUsers] = createOptimisticStore<User[]>(() => getUsers(), []);
+
+    const rendered: string[][] = [];
+    let dispose!: () => void;
+    createRoot(d => {
+      dispose = d;
+      const rows = mapArray(
+        () => users,
+        u => u.name
+      );
+      createRenderEffect(rows, v => {
+        rendered.push([...v]);
+      });
+    });
+    flush();
+    await Promise.resolve();
+    flush();
+    expect(rendered.at(-1)).toEqual(["a"]); // initial load settled
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(users); // declared: this data is changing
+      setUsers(u => {
+        u.push({ name: "Ryan" });
+      });
+      yield new Promise<void>(r => (resolveIt = r));
+      serverUsers = [{ name: "a" }, { name: "Ryan" }];
+      refresh(users as any);
+    });
+    const done = act();
+    flush();
+    // The optimistic insert renders DURING the action, and the mark reports.
+    expect(rendered.at(-1)).toEqual(["a", "Ryan"]);
+    expect(isPending(() => users.length)).toBe(true);
+
+    resolveIt();
+    await done;
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+    await new Promise(r => setTimeout(r, 0));
+    flush();
+    expect(rendered.at(-1)).toEqual(["a", "Ryan"]);
+    expect(isPending(() => users.length)).toBe(false);
     dispose();
   });
 });
