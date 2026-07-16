@@ -190,11 +190,8 @@ function collectMarkSources(el: Computed<any>, into: MarkedNode[]): void {
   if (single) {
     const marked = single._affectsFor;
     if (marked && marked._affectsCount) into.push(marked);
-    return;
-  }
-  const sources = el._pendingSources;
-  if (sources) {
-    for (const s of sources) {
+  } else if (el._pendingSources) {
+    for (const s of el._pendingSources) {
       const marked = s._affectsFor;
       if (marked && marked._affectsCount) into.push(marked);
     }

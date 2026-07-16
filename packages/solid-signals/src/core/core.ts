@@ -368,13 +368,16 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   // Mark-only pending doesn't queue (#2893): the node holds no value needing
   // a transition-scheduled commit, and queueing would stamp the marking
   // action's transaction onto it — freezing unrelated writes that share it.
+  // (Single mask test up front keeps the mark-free hot path at original cost.)
+  const pendFlags = el._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED);
   const needsPendingCommit =
     el._pendingValue !== NOT_PENDING ||
     el._pendingFirstChild !== null ||
     el._pendingDisposal !== null ||
-    !!(el._statusFlags & STATUS_UNINITIALIZED) ||
-    (!!(el._statusFlags & STATUS_PENDING) &&
-      !(activeAffectsMarks !== 0 && GlobalQueue._onlyMarkPending!(el)));
+    (pendFlags !== 0 &&
+      (pendFlags !== STATUS_PENDING ||
+        activeAffectsMarks === 0 ||
+        !GlobalQueue._onlyMarkPending!(el)));
   // Override-covered holds (hasOverride) always queue: their commit belongs
   // to their own transition's schedule (A18 re-rule) and is unobservable
   // under the override (A17). Revert no longer commits anything, so an

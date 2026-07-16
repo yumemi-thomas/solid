@@ -34,23 +34,17 @@ import type { Computed, FirewallSignal, Link } from "./types.js";
 
 export function addPendingSource(el: Computed<any>, source: Computed<any>): boolean {
   if (el._pendingSource === source || el._pendingSources?.has(source)) return false;
-  // Once the Set exists it is THE container: landing a third source in the
-  // (now empty) singular slot creates dual state that removePendingSource
-  // refuses to clear, stranding the Set members' pending forever (#2893).
-  if (!el._pendingSource && !el._pendingSources) {
-    el._pendingSource = source;
-    return true;
-  }
-  if (!el._pendingSource) {
-    el._pendingSources!.add(source);
-    return true;
-  }
-  if (!el._pendingSources) {
+  // Once the Set exists it is THE container — the singular slot stays empty
+  // from migration until removePendingSource collapses back to one entry.
+  // Landing a third source in the singular slot instead created dual state
+  // that removePendingSource refused to clear, stranding the Set members'
+  // pending forever (#2893).
+  if (el._pendingSources) el._pendingSources.add(source);
+  else if (!el._pendingSource) el._pendingSource = source;
+  else {
     el._pendingSources = new Set([el._pendingSource, source]);
-  } else {
-    el._pendingSources.add(source);
+    el._pendingSource = undefined;
   }
-  el._pendingSource = undefined;
   return true;
 }
 
@@ -437,7 +431,7 @@ export function notifyStatus(
   // transition-scheduled commit, and stamping `_transition` on them would
   // freeze unrelated writes that share a downstream memo until the action
   // settles. Real async keeps queuing (its commits ride the transition).
-  const markSourced = pendingSource !== undefined && pendingSource._affectsFor !== undefined;
+  const markSourced = pendingSource?._affectsFor !== undefined;
   // A real error is a settled verdict a mark must not erase (#2893): landing
   // STATUS_PENDING here would clobber `_error` with the sentinel's
   // NotReadyError, and unlike real async there is no arriving value whose
