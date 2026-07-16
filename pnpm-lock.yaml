@@ -33,17 +33,17 @@ importers:
         specifier: ^5.4.0
         version: 5.4.0(tinybench@2.9.0)(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0))(vitest@4.1.6)
       '@dom-expressions/babel-plugin-jsx':
-        specifier: 0.50.0-next.21
-        version: 0.50.0-next.21(@babel/core@7.29.0)
+        specifier: 0.50.0-next.22
+        version: 0.50.0-next.22(@babel/core@7.29.0)
       '@dom-expressions/hyperscript':
-        specifier: 0.50.0-next.21
-        version: 0.50.0-next.21
+        specifier: 0.50.0-next.22
+        version: 0.50.0-next.22
       '@dom-expressions/runtime':
-        specifier: 0.50.0-next.21
-        version: 0.50.0-next.21(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)
+        specifier: 0.50.0-next.22
+        version: 0.50.0-next.22(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)
       '@dom-expressions/tagged-jsx':
-        specifier: 0.50.0-next.21
-        version: 0.50.0-next.21
+        specifier: 0.50.0-next.22
+        version: 0.50.0-next.22
       '@rollup/plugin-babel':
         specifier: ^6.0.3
         version: 6.0.3(@babel/core@7.29.0)(@types/babel__core@7.20.5)(rollup@4.59.0)
@@ -410,7 +410,7 @@ importers:
         version: 7.3.3(@types/node@25.6.0)(terser@5.49.0)
       vitest:
         specifier: ^4.1.6
-        version: 4.1.6(@types/node@25.6.0)(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0))
+        version: 4.1.6(@types/node@25.6.0)(@vitest/coverage-v8@4.1.6)(jsdom@25.0.1)(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0))
 
   packages/solid-universal:
     devDependencies:
@@ -1099,19 +1099,24 @@ packages:
     peerDependencies:
       '@babel/core': ^7.20.12
 
-  '@dom-expressions/hyperscript@0.50.0-next.21':
-    resolution: {integrity: sha512-rxhRWV+Qwkjsoi6OdFRgsod19CmrhoMug1IYx7aIwfq5/B6L4Lc98O0/J7yLk0gc88XmUSwR0if+YpO49OcTmw==}
+  '@dom-expressions/babel-plugin-jsx@0.50.0-next.22':
+    resolution: {integrity: sha512-WooCWvVHd0b6uxNFHyd5Rq7Xab/fSYLoPlWpH4UzPSibV+tOEK5ZU3QUmwE+kIqCdyTNAf+15+i0sBj6D57tkA==}
+    peerDependencies:
+      '@babel/core': ^7.20.12
 
-  '@dom-expressions/runtime@0.50.0-next.21':
-    resolution: {integrity: sha512-lAl96vAiYqDwgSYAut5xYG3W504X01O6tk+xFpgR2XKy19PkmdxqBlQVK1TwhZFqT7hM9R7dd/Dy4Ia6R2WKMA==}
+  '@dom-expressions/hyperscript@0.50.0-next.22':
+    resolution: {integrity: sha512-3+cBYOXBQAKTut1yLFjH0Ccl5Q74xm8drNz/fVAg2LuMQpiyqLkLQgklHdRf1ZiAn3VDmnpSDIG7MBcgCQjZAg==}
+
+  '@dom-expressions/runtime@0.50.0-next.22':
+    resolution: {integrity: sha512-LnAW97MFA1KTD1hMpLbUICEmPhZPpZi7EIG1vTZaM4tRp/a09DeZSeGx8W9mpRLyJJlAD7sNiRXkJO1XeHCMCg==}
     hasBin: true
     peerDependencies:
       csstype: ^3.0
       seroval: ~1.5.4
       seroval-plugins: ~1.5.4
 
-  '@dom-expressions/tagged-jsx@0.50.0-next.21':
-    resolution: {integrity: sha512-oz32YgjKieq/st60ogLMlaS9MN2/IQcQJv6Ff0xOKGMm3UJ2BuWEeZIJv1G8Mqvhz0qPpDKQWMB4wlR6j2j3Kg==}
+  '@dom-expressions/tagged-jsx@0.50.0-next.22':
+    resolution: {integrity: sha512-95WmTFh7QhiDJu4GjU4IixHVH/rGDvig0zSh4cT3FnzgL4QKsPiGy27FOI1llz84R+L/ircF0dDM98CULEIF4w==}
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -4409,16 +4414,26 @@ snapshots:
       parse5: 7.3.0
       validate-html-nesting: 1.2.4
 
-  '@dom-expressions/hyperscript@0.50.0-next.21': {}
+  '@dom-expressions/babel-plugin-jsx@0.50.0-next.22(@babel/core@7.29.0)':
+    dependencies:
+      '@babel/core': 7.29.0
+      '@babel/helper-module-imports': 7.18.6
+      '@babel/plugin-syntax-jsx': 7.28.6(@babel/core@7.29.0)
+      '@babel/types': 7.29.0
+      html-entities: 2.3.3
+      parse5: 7.3.0
+      validate-html-nesting: 1.2.4
 
-  '@dom-expressions/runtime@0.50.0-next.21(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)':
+  '@dom-expressions/hyperscript@0.50.0-next.22': {}
+
+  '@dom-expressions/runtime@0.50.0-next.22(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)':
     dependencies:
       babel-plugin-transform-rename-import: 2.3.0
       csstype: 3.2.3
       seroval: 1.5.5
       seroval-plugins: 1.5.5(seroval@1.5.5)
 
-  '@dom-expressions/tagged-jsx@0.50.0-next.21': {}
+  '@dom-expressions/tagged-jsx@0.50.0-next.22': {}
 
   '@esbuild/aix-ppc64@0.27.7':
     optional: true
@@ -6633,33 +6648,6 @@ snapshots:
       '@types/node': 25.6.0
       '@vitest/coverage-v8': 4.1.6(vitest@4.1.6)
       jsdom: 25.0.1
-    transitivePeerDependencies:
-      - msw
-
-  vitest@4.1.6(@types/node@25.6.0)(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0)):
-    dependencies:
-      '@vitest/expect': 4.1.6
-      '@vitest/mocker': 4.1.6(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0))
-      '@vitest/pretty-format': 4.1.6
-      '@vitest/runner': 4.1.6
-      '@vitest/snapshot': 4.1.6
-      '@vitest/spy': 4.1.6
-      '@vitest/utils': 4.1.6
-      es-module-lexer: 2.1.0
-      expect-type: 1.3.0
-      magic-string: 0.30.21
-      obug: 2.1.1
-      pathe: 2.0.3
-      picomatch: 4.0.4
-      std-env: 4.1.0
-      tinybench: 2.9.0
-      tinyexec: 1.1.2
-      tinyglobby: 0.2.16
-      tinyrainbow: 3.1.0
-      vite: 7.3.3(@types/node@25.6.0)(terser@5.49.0)
-      why-is-node-running: 2.3.0
-    optionalDependencies:
-      '@types/node': 25.6.0
     transitivePeerDependencies:
       - msw
 

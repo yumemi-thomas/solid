@@ -115,5 +115,37 @@ export default [
     ],
     external: ["seroval", "seroval-plugins/web"],
     plugins
+  },
+  {
+    input: "server-functions/src/client.ts",
+    output: [
+      {
+        file: "server-functions/dist/client.cjs",
+        format: "cjs",
+        exports: "auto"
+      },
+      {
+        file: "server-functions/dist/client.js",
+        format: "es"
+      }
+    ],
+    external: ["seroval", "seroval-plugins/web"],
+    plugins
+  },
+  {
+    input: "server-functions/src/server.ts",
+    output: [
+      {
+        file: "server-functions/dist/server.cjs",
+        format: "cjs",
+        exports: "auto"
+      },
+      {
+        file: "server-functions/dist/server.js",
+        format: "es"
+      }
+    ],
+    external: ["solid-js", "seroval", "seroval-plugins/web"],
+    plugins
   }
 ];

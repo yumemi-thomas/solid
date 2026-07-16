@@ -34,6 +34,7 @@ import type { JSX } from "./jsx.js";
 
 export * from "./client.js";
 export * from "./server-mock.js";
+export * from "./response.js";
 export type { JSX } from "./jsx.js";
 export {
   For,

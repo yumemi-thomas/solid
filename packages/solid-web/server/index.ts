@@ -12,6 +12,7 @@ import {
 import type { JSX } from "../src/jsx.js";
 
 export * from "./server.js";
+export * from "../src/response.js";
 export type { JSX } from "../src/jsx.js";
 
 export {

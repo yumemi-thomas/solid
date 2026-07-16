@@ -32,7 +32,9 @@
     "serialization/dist",
     "serialization/types",
     "serialization/types-cjs",
-    "serialization/package.json"
+    "serialization/package.json",
+    "server-functions/dist",
+    "server-functions/package.json"
   ],
   "exports": {
     ".": {
@@ -145,6 +147,76 @@
         "default": "./serialization/dist/serialization.cjs"
       }
     },
+    "./server-functions": {
+      "worker": {
+        "import": {
+          "types": "./types/server-functions/server.d.ts",
+          "default": "./server-functions/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/server-functions/server.d.cts",
+          "default": "./server-functions/dist/server.cjs"
+        }
+      },
+      "browser": {
+        "import": {
+          "types": "./types/server-functions/client.d.ts",
+          "default": "./server-functions/dist/client.js"
+        },
+        "require": {
+          "types": "./types-cjs/server-functions/client.d.cts",
+          "default": "./server-functions/dist/client.cjs"
+        }
+      },
+      "deno": {
+        "import": {
+          "types": "./types/server-functions/server.d.ts",
+          "default": "./server-functions/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/server-functions/server.d.cts",
+          "default": "./server-functions/dist/server.cjs"
+        }
+      },
+      "node": {
+        "import": {
+          "types": "./types/server-functions/server.d.ts",
+          "default": "./server-functions/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/server-functions/server.d.cts",
+          "default": "./server-functions/dist/server.cjs"
+        }
+      },
+      "import": {
+        "types": "./types/server-functions/client.d.ts",
+        "default": "./server-functions/dist/client.js"
+      },
+      "require": {
+        "types": "./types-cjs/server-functions/client.d.cts",
+        "default": "./server-functions/dist/client.cjs"
+      }
+    },
+    "./server-functions/server": {
+      "import": {
+        "types": "./types/server-functions/server.d.ts",
+        "default": "./server-functions/dist/server.js"
+      },
+      "require": {
+        "types": "./types-cjs/server-functions/server.d.cts",
+        "default": "./server-functions/dist/server.cjs"
+      }
+    },
+    "./server-functions/client": {
+      "import": {
+        "types": "./types/server-functions/client.d.ts",
+        "default": "./server-functions/dist/client.js"
+      },
+      "require": {
+        "types": "./types-cjs/server-functions/client.d.cts",
+        "default": "./server-functions/dist/client.cjs"
+      }
+    },
     "./types/*": "./types/*"
   },
   "scripts": {
@@ -152,13 +224,14 @@
     "build:clean": "rimraf dist/",
     "build:js": "rollup -c",
     "link": "symlink-dir . node_modules/@solidjs/web",
-    "types": "npm-run-all -nl types:clean types:copy-jsx types:web types:copy-web types:web-storage types:copy-serialization types:cjs",
+    "types": "npm-run-all -nl types:clean types:copy-jsx types:web types:copy-web types:web-storage types:copy-serialization types:copy-server-functions types:cjs",
     "types:clean": "rimraf types/ types-cjs/ storage/types/ storage/types-cjs/ serialization/types/ serialization/types-cjs/",
     "types:copy-jsx": "ncp ../../node_modules/@dom-expressions/runtime/src/jsx.d.ts ./src/jsx.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/jsx-properties.d.ts ./src/jsx-properties.d.ts && dom-expressions-jsx-types --input ./src/jsx.d.ts --element \"SolidElement | Node | ArrayElement\" --import 'import type { Element as SolidElement } from \"solid-js\";'",
     "types:web": "tsc --project ./tsconfig.build.json",
-    "types:copy-web": "ncp ../../node_modules/@dom-expressions/runtime/src/client.d.ts ./types/client.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/server.d.ts ./types/server.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/serializer.d.ts ./types/serializer.d.ts && ncp ./src/jsx.d.ts ./types/jsx.d.ts && ncp ./src/jsx-properties.d.ts ./types/jsx-properties.d.ts",
+    "types:copy-web": "ncp ../../node_modules/@dom-expressions/runtime/src/client.d.ts ./types/client.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/server.d.ts ./types/server.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/serializer.d.ts ./types/serializer.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/response.d.ts ./types/response.d.ts && ncp ./src/jsx.d.ts ./types/jsx.d.ts && ncp ./src/jsx-properties.d.ts ./types/jsx-properties.d.ts",
     "types:web-storage": "tsc --project ./storage/tsconfig.build.json",
     "types:copy-serialization": "node -e \"fs.mkdirSync('./serialization/types', { recursive: true }); fs.copyFileSync('../../node_modules/@dom-expressions/runtime/src/serializer.d.ts', './serialization/types/index.d.ts');\"",
+    "types:copy-server-functions": "node -e \"fs.mkdirSync('./types/server-functions', { recursive: true }); for (const f of ['shared', 'client', 'server']) fs.copyFileSync('../../node_modules/@dom-expressions/runtime/src/server-functions/' + f + '.d.ts', './types/server-functions/' + f + '.d.ts');\"",
     "types:cjs": "node ../../scripts/sync-dual-types.mjs ./types ./types-cjs ./storage/types ./storage/types-cjs ./serialization/types ./serialization/types-cjs",
     "test": "vitest run && vitest run --config vite.config.server.mjs && vitest run --config vite.config.hydrate.mjs",
     "test:server": "vitest run --config vite.config.server.mjs",
