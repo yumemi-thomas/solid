@@ -1,5 +1,30 @@
 # solid-js
 
+## 2.0.0-beta.19
+
+### Patch Changes
+
+- d94d5c3: Pay-for-use tree-shaking, phase 2 (#2883). The optimistic write engine (override writes, lane routing/suspension, stashed-optimistic reads, transition-completion blockage, optimistic-node resolution) moves out of `core.ts`/`scheduler.ts`/`lanes.ts` into a new internal `optimistic` module behind fourteen nullable `GlobalQueue` hooks, installed by the verdict layer and at first `createOptimistic`/`createOptimisticStore` call. Every core call site is gated on state only the engine can create (an `_overrideValue` slot, a live lane, a non-empty optimistic batch), and the A17 override-is-the-value read path stays inline in core. On the `solid-js` side, `createLoadingBoundary`'s hydration-resume machinery (boundary triggers, resume scheduling, asset-failure reporting, snapshot capture) now installs through the existing `enableHydration()` seam, so client-only apps stop shipping it.
+
+  Measured (esbuild, minify, `_`-prop mangling, gzip -9): core floor 8.2 → 7.7 KB gzip; plain-store subset 13.0 → 12.4 KB; minimal app from published dist 11.5 → 10.9 KB; a CSR app using `<Loading>` drops a further ~0.9 KB gzip; opting into `hydrate()` costs +43 min bytes. Cumulative with phase 1, the minimal-app floor is down ~14% and the signals floor ~13.5% with no behavioral change — differential smoke runs are byte-identical and the full Tier-A suite passes unchanged.
+
+- d0b9c91: Pay-for-use tree-shaking, phase 3 (#2883) — mechanical cleanups selected by cost/benefit audit. Signals: the effect re-enqueue block (four copies) and zombie/dirty queue selection dedupe into shared `enqueueSub`/`queueFor` helpers (hot-path microbenched, no regression); boundary/reveal internal method names are `_`-prefixed so property mangling reaches them; production error strings trim to their diagnostic codes (dev builds keep full sentences); and the prod dist build stops stripping `/*@__PURE__*/` annotations — rollup-plugin-prettier is off the prod tree, terser re-emits annotations, and a new `check-pure` build guard fails the build if they ever vanish again. solid-js client: `sharedConfig.getNextContextId` and `lazy()`'s hydration-module lookup install from `enableHydration()` instead of shipping in every CSR bundle, and MockPromise's class static block (which defeated dead-code elimination in every client bundle) becomes a PURE-annotated factory. CDN `unpkg`/`jsdelivr` fields now point at browser production ESM instead of CommonJS files.
+
+  A last-mile pass closes part of the esbuild-vs-Rollup shaking gap at the source level (Rollup's literal tracking folds never-written state that esbuild retains): the external-source wiring in computed setup and `untrack` moves behind hooks that mirror `enableExternalSource()`'s config liveness, the affects-only `onlyMarkPending` read-path helper moves into the affects module, and the optimistic-store settle loop moves inside its store-side hook. All are Rollup-neutral by measurement.
+
+  Measured: minimal app 10.9 → 10.3 KB gzip under esbuild and **9.8 KB gzip / 9.0 KB brotli under Vite** (Solid's default toolchain — under the 10 KB mark); CSR app with `<Loading>`/`lazy` 13.9 → 12.6 KB; signals floor 7.7 → 7.4 KB; and the full-featured bundle _shrinks_ ~330 gzip bytes, recovering a third of the phase-1/2 hook indirection tax. Cumulative across all three phases the minimal app is down ~19% with all 1,941 tests across the affected packages passing unchanged.
+
+- Updated dependencies [655b614]
+- Updated dependencies [442ad9a]
+- Updated dependencies [1dc0b45]
+- Updated dependencies [24bca49]
+- Updated dependencies [71ba988]
+- Updated dependencies [587cf48]
+- Updated dependencies [d94d5c3]
+- Updated dependencies [d0b9c91]
+- Updated dependencies [b923fd7]
+  - @solidjs/signals@2.0.0-beta.19
+
 ## 2.0.0-beta.18
 
 ### Minor Changes

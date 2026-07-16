@@ -1,5 +1,14 @@
 # babel-preset-solid
 
+## 2.0.0-beta.19
+
+### Patch Changes
+
+- cded919: Align `@dom-expressions/babel-plugin-jsx` with the rest of the toolchain at 0.50.0-next.22
+- Updated dependencies [d94d5c3]
+- Updated dependencies [d0b9c91]
+  - solid-js@2.0.0-beta.19
+
 ## 2.0.0-beta.18
 
 ### Patch Changes
