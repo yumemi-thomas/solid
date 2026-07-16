@@ -612,6 +612,49 @@ describe("affects — captured proxies (#2882)", () => {
     expect(isPending(() => tags.primary)).toBe(false);
   });
 
+  it("affects(plain store) covers an untouched symbol-keyed grandchild", async () => {
+    const meta = Symbol("meta");
+    const [state] = createStore({ outer: { [meta]: { value: 1 } } });
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    const child = state.outer[meta];
+    expect(isPending(() => child.value)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => child.value)).toBe(false);
+  });
+
+  it("affects(array store) covers symbol-keyed metadata", async () => {
+    const meta = Symbol("meta");
+    const initial = Object.assign([{ value: 0 }], { [meta]: { value: 1 } });
+    const [state] = createStore(initial);
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(state);
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    const metadata = state[meta];
+    expect(isPending(() => metadata.value)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => metadata.value)).toBe(false);
+  });
+
   it("keyless mark on a nested record covers its captured subtree, not siblings", async () => {
     const [state] = createStore<{ rows: Row[] }>({ rows: seedRows() });
     const tags0 = state.rows[0].tags;

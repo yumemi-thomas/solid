@@ -556,6 +556,57 @@ describe("deep", () => {
     expect(effect).toHaveBeenCalledTimes(4);
     expect(effect.mock.calls[3][0]).toEqual({ list: [{ d: 4 }] });
   });
+
+  test("tracks updates in a symbol-keyed subtree", () => {
+    const meta = Symbol("meta");
+    const [state, setState] = createStore({ [meta]: { value: 1 } });
+    const values: number[] = [];
+
+    createRoot(() => {
+      createEffect(
+        () => deep(state),
+        value => {
+          values.push(value[meta].value);
+        }
+      );
+    });
+    flush();
+
+    setState(s => {
+      s[meta].value = 2;
+    });
+    flush();
+
+    expect(values).toEqual([1, 2]);
+  });
+
+  test("notifies on symbol key addition and deletion", () => {
+    const meta = Symbol("meta");
+    const [state, setState] = createStore<{ [meta]?: number }>({});
+    const seen: (number | undefined)[] = [];
+
+    createRoot(() => {
+      createEffect(
+        () => deep(state),
+        value => {
+          seen.push(value[meta]);
+        }
+      );
+    });
+    flush();
+
+    setState(s => {
+      s[meta] = 1;
+    });
+    flush();
+
+    setState(s => {
+      delete s[meta];
+    });
+    flush();
+
+    expect(seen).toEqual([undefined, 1, undefined]);
+  });
   test("handles shared references", () => {
     const sharedReference = {
       a: 1,

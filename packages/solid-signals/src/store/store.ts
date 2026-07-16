@@ -56,7 +56,7 @@ export type Store<T> = Readonly<T>;
  * projection form — `createStore(fn, seed, { key })` or `createProjection` —
  * whose derive function reconciles its return by `options.key`.
  */
-export type StoreSetter<T> = (fn: (state: T) => T | void) => void;
+export type StoreSetter<T> = (fn: (state: Mutable<T>) => Mutable<T> | void) => void;
 /** Tuple returned by the plain `createStore(initialValue)` form. */
 export type StoreReturn<T> = [get: Store<T>, set: StoreSetter<T>];
 /** Tuple returned by the derived `createStore(fn, seed, options?)` form. */
@@ -72,6 +72,8 @@ export interface ProjectionOptions extends StoreOptions {
   key?: string | ((item: NonNullable<any>) => any);
 }
 export type NoFn<T> = T extends Function ? never : T;
+/** Makes the setter draft's top-level properties writable; {@link Store} keeps the getter readonly. */
+export type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 type DataNode = Signal<any>;
 type DataNodes = Record<PropertyKey, DataNode>;
@@ -200,7 +202,7 @@ function unwrapStoreValue(value: any, map?: Map<any, any>, lookup?: WeakMap<any,
   map.set(value, result);
   lookup = target[STORE_LOOKUP] ?? storeLookup;
 
-  for (const key of getKeys(source, override)) {
+  for (const key of getStoreKeys(source, override)) {
     if (isArray && key === "length") continue;
     const next = key in override ? override[key] : source[key];
     if (next !== $DELETED) result[key] = unwrapStoreValue(next, map, lookup);
@@ -216,6 +218,29 @@ function isPrototypePollutionKey(property: PropertyKey) {
 // Own enumerable keys including symbols (`Object.keys` drops symbol-keyed props). #2769
 export function ownEnumerableKeys(o: object): (string | symbol)[] {
   return Reflect.ownKeys(o).filter(k => Object.prototype.propertyIsEnumerable.call(o, k));
+}
+
+// Plain-object variant that keeps Object.keys() as the fast path and only pays
+// descriptor checks for symbols. Do not use this on store proxies: splitting
+// strings/symbols would invoke their ownKeys trap twice.
+function ownEnumerableKeysPlain(o: object): (string | symbol)[] {
+  const keys: (string | symbol)[] = Object.keys(o);
+  const symbols = Object.getOwnPropertySymbols(o);
+  for (let i = 0, len = symbols.length; i < len; i++) {
+    const symbol = symbols[i];
+    if (Object.prototype.propertyIsEnumerable.call(o, symbol)) keys.push(symbol);
+  }
+  return keys;
+}
+
+function ownEnumerableSymbols(o: object): symbol[] {
+  const symbols = Object.getOwnPropertySymbols(o);
+  const result: symbol[] = [];
+  for (let i = 0, len = symbols.length; i < len; i++) {
+    const symbol = symbols[i];
+    if (Object.prototype.propertyIsEnumerable.call(o, symbol)) result.push(symbol);
+  }
+  return result;
 }
 
 /**
@@ -392,7 +417,10 @@ function walkAffectsScope(
     collectRecordNodes(target[STORE_NODE], found);
     collectRecordNodes(target[STORE_HAS], found);
     override = mergedOverlay(target);
-    lookup = target[STORE_LOOKUP] ?? lookup;
+    // Carry the effective lookup into untouched descendants. Default stores
+    // use the global lookup just like snapshotImpl; without it, nested raw
+    // objects fall back to string-only enumeration and symbol branches vanish.
+    lookup = target[STORE_LOOKUP] ?? lookup ?? storeLookup;
   }
   if (Array.isArray(raw)) {
     const len = override?.length ?? raw.length;
@@ -400,8 +428,18 @@ function walkAffectsScope(
       const v = override && i in override ? override[i] : raw[i];
       if (v !== $DELETED) walkAffectsScope(v, entry, found, lookup, visited);
     }
+    // Arrays can also carry symbol metadata. Enumerate symbols separately to
+    // avoid scanning large index lists twice. Outside a store tree, retain the
+    // existing index-only walk.
+    const symbols = target || lookup ? getStoreSymbols(raw, override) : [];
+    for (let i = 0, l = symbols.length; i < l; i++) {
+      const key = symbols[i];
+      const desc = getPropertyDescriptor(raw, override, key);
+      if (!desc || desc.get) continue;
+      walkAffectsScope(desc.value, entry, found, lookup, visited);
+    }
   } else {
-    const keys = getKeys(raw, override);
+    const keys = target || lookup ? getStoreKeys(raw, override) : getKeys(raw, override);
     for (let i = 0, l = keys.length; i < l; i++) {
       const desc = getPropertyDescriptor(raw, override, keys[i]);
       if (!desc || desc.get) continue;
@@ -521,17 +559,26 @@ export function mergedOverlay(target: StoreNode): Record<PropertyKey, any> | und
   return override && opt ? { ...override, ...opt } : (opt ?? override);
 }
 
-export function getKeys(
+function getKeysImpl(
   source: Record<PropertyKey, any>,
   override: Record<PropertyKey, any> | undefined,
-  enumerable: boolean = true
+  enumerable: boolean,
+  symbols: boolean
 ): PropertyKey[] {
   // Plain objects can't trigger proxy traps — only pay for the untrack
   // closure when the source is itself a wrapped store (store-in-store).
   const baseKeys = (source as any)[$TARGET]
-    ? untrack(() => (enumerable ? Object.keys(source) : Reflect.ownKeys(source)))
+    ? untrack(() =>
+        enumerable
+          ? symbols
+            ? ownEnumerableKeys(source)
+            : Object.keys(source)
+          : Reflect.ownKeys(source)
+      )
     : enumerable
-      ? Object.keys(source)
+      ? symbols
+        ? ownEnumerableKeysPlain(source)
+        : Object.keys(source)
       : Reflect.ownKeys(source);
   if (!override) return baseKeys;
   const keys = new Set(baseKeys);
@@ -541,6 +588,39 @@ export function getKeys(
     else keys.delete(key);
   }
   return Array.from(keys);
+}
+
+export function getKeys(
+  source: Record<PropertyKey, any>,
+  override: Record<PropertyKey, any> | undefined,
+  enumerable: boolean = true
+): PropertyKey[] {
+  return getKeysImpl(source, override, enumerable, false);
+}
+
+export function getStoreKeys(
+  source: Record<PropertyKey, any>,
+  override: Record<PropertyKey, any> | undefined
+): PropertyKey[] {
+  return getKeysImpl(source, override, true, true);
+}
+
+export function getStoreSymbols(
+  source: Record<PropertyKey, any>,
+  override: Record<PropertyKey, any> | undefined
+): symbol[] {
+  const symbols = (source as any)[$TARGET]
+    ? untrack(() => ownEnumerableSymbols(source))
+    : ownEnumerableSymbols(source);
+  if (!override) return symbols;
+  const result = new Set(symbols);
+  const overrideSymbols = Object.getOwnPropertySymbols(override);
+  for (let i = 0, len = overrideSymbols.length; i < len; i++) {
+    const symbol = overrideSymbols[i];
+    if (override[symbol] !== $DELETED) result.add(symbol);
+    else result.delete(symbol);
+  }
+  return Array.from(result);
 }
 
 export function getPropertyDescriptor(
@@ -1113,7 +1193,7 @@ export function storeSetter<T extends object>(store: Store<T>, fn: (draft: T) =>
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
-export function createStore<T extends object = {}>(store: NoFn<T> | Store<NoFn<T>>): StoreReturn<T>;
+export function createStore<T extends object = {}>(store: NoFn<T>): StoreReturn<T>;
 export function createStore<T extends object = {}>(
   fn: (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
   store: Partial<T> | Store<NoFn<T>>,
