@@ -741,6 +741,25 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       }
     }
     if (__DEV__ && strictRead && typeof property === "string") {
+      // Safeguard parity with core read() (#2897): untracked store reads skip
+      // node creation (and with it read()'s PENDING_ASYNC_UNTRACKED_READ
+      // check), so a derived store's in-flight firewall must be consulted
+      // here — otherwise a component-body read of a pending store silently
+      // returns the stale seed where the memo equivalent throws.
+      if ((target[STORE_FIREWALL]?._statusFlags ?? 0) & STATUS_PENDING) {
+        const message =
+          `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictRead}. ` +
+          `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`;
+        emitDiagnostic({
+          code: "PENDING_ASYNC_UNTRACKED_READ",
+          kind: "async",
+          severity: "error",
+          message,
+          nodeName: String(property),
+          data: { strictRead }
+        });
+        throw new Error(message);
+      }
       const message =
         `[STRICT_READ_UNTRACKED] Reactive value read directly in ${strictRead} will not update. ` +
         `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
