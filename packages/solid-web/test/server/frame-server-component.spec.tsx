@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { children } from "solid-js";
+import { children, createMemo, merge } from "solid-js";
+import { Loading } from "@solidjs/web";
+
+const asyncValue = <T,>(value: T, ms = 10): Promise<T> =>
+  new Promise(r => setTimeout(() => r(value), ms));
 // Direct source imports while frames are pre-facade: the pnpm override links
 // @dom-expressions/runtime to the sibling frame-streams branch, and this
 // config's rxcore alias points its internals at solid-web's core — so this
@@ -46,6 +50,71 @@ describe("server components authored with Solid JSX", () => {
     const html = chunks.find(c => c.type === "html").html;
     expect(html).toContain("<!--proj:comment#0:start--><!--proj:comment#0:end-->");
     expect(html).toContain("<!--proj:comment#1:start--><!--proj:comment#1:end-->");
+  });
+
+  it("resolves projections through merge() — props win, defaults never mask positions", async () => {
+    const ServerComp = (_props: any) => {
+      const props = merge({ header: () => "default" }, _props);
+      return (
+        <section>
+          {props.header}
+          <props.row label="a" />
+        </section>
+      );
+    };
+    const chunks = await collect(renderServerComponent(ServerComp, { frame: { id: "f3" } }));
+    const html = chunks.find(c => c.type === "html").html;
+    // The projection proxy's `has: true` routes merge down its proxy path
+    // and wins per-property resolution: both the child read and the
+    // component-position call reach the projection proxy, not the default.
+    expect(html).toContain("<!--proj:header:start--><!--proj:header:end-->");
+    expect(html).toContain("<!--proj:row#0:start--><!--proj:row#0:end-->");
+    expect(html).not.toContain("default");
+    const slots = chunks.filter(c => c.type === "slot");
+    expect(slots.map(c => c.key)).toEqual(["row#0"]);
+  });
+
+  it("does not become thenable under merge/await plumbing", async () => {
+    const ServerComp = (props: any) => {
+      // A stray Promise.resolve(props) must not invoke a phantom `then` slot.
+      void Promise.resolve(props);
+      return <div>ok</div>;
+    };
+    const chunks = await collect(renderServerComponent(ServerComp, { frame: { id: "f4" } }));
+    expect(chunks.filter(c => c.type === "slot")).toEqual([]);
+    expect(chunks.find(c => c.type === "html").html).toMatch(/^<div( _hk=\d+)?>ok<\/div>$/);
+  });
+
+  it("streams a real <Loading> boundary as fragment + reveal chunks, projections inside", async () => {
+    const ServerComp = (props: any) => {
+      const data = createMemo(async () => asyncValue("Comments loaded", 10));
+      return (
+        <article>
+          <h1>Story</h1>
+          <Loading fallback={<span>loading…</span>}>
+            <section>
+              {data()}
+              {props.children}
+            </section>
+          </Loading>
+        </article>
+      );
+    };
+    const chunks = await collect(renderServerComponent(ServerComp, { frame: { id: "s" } }));
+    const html = chunks.find(c => c.type === "html").html;
+    // Shell flushes with the boundary's placeholder range, fallback in the
+    // template — Solid's Loading drives registerFragment through the sink.
+    expect(html).toContain("<h1>Story</h1>");
+    expect(html).toMatch(/<template id="pl-[^"]+">.*loading…/);
+    expect(html).not.toContain("Comments loaded");
+    const frag = chunks.find(c => c.type === "fragment");
+    expect(frag.html).toContain("Comments loaded");
+    // The thread-through case: a projection declared inside streamed async
+    // content — the client slot mounts when the fragment reveals.
+    expect(frag.html).toContain("<!--proj:children:start--><!--proj:children:end-->");
+    const reveal = chunks.find(c => c.type === "reveal");
+    expect(reveal.keys).toEqual([frag.key]);
+    expect(chunks[chunks.length - 1].type).toBe("complete");
   });
 
   it("survives the children() helper", async () => {
