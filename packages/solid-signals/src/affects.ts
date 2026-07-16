@@ -10,13 +10,7 @@ import { emitDiagnostic } from "./core/dev.js";
 import { NotReadyError } from "./core/error.js";
 import { $REFRESH, type Computed, type Signal } from "./core/index.js";
 import { devTrackAffects } from "./core/invariants.js";
-import {
-  GlobalQueue,
-  globalQueue,
-  queuePendingNode,
-  schedule,
-  shiftAffectsMarks
-} from "./core/scheduler.js";
+import { GlobalQueue, globalQueue, schedule, shiftAffectsMarks } from "./core/scheduler.js";
 import type { Accessor } from "./signals.js";
 import { $TARGET, getStoreAffectsNodes, type Store, type StoreNode } from "./store/store.js";
 
@@ -62,8 +56,14 @@ function getAffectsSentinel(node: MarkedNode): Computed<any> {
  * normal status rails. Runs on every registration (dedup in `notifyStatus`
  * stops re-descent at already-covered subscribers). Subscribers that
  * recompute mid-window shed this via `clearStatus` and re-acquire it through
- * the read path (`applyAffectsReads`) — the same shape as real async, where
- * the re-throw on read re-establishes the source.
+ * the read path (`applyAffectsReads` for direct readers of the marked node,
+ * `collectMarkSources` transitively) — the mark analogue of real async's
+ * re-throw-on-read. Subscribers are deliberately NOT queued as pending nodes
+ * (#2893): they hold no value needing a transition-scheduled commit, and
+ * queueing would stamp the marking action's transaction onto them — from then
+ * on ANY write dirtying one of them (including writes to unmarked signals
+ * that merely share a downstream memo) would be captured and frozen until the
+ * action settles.
  */
 function propagateAffectsMark(node: MarkedNode): void {
   if (!node._subs && !(node as Computed<any>)._child) return;
@@ -71,7 +71,6 @@ function propagateAffectsMark(node: MarkedNode): void {
   const error = new NotReadyError(sentinel);
   forEachDependent(node as Computed<any>, sub => {
     if (sub._pendingSource !== sentinel && !sub._pendingSources?.has(sentinel)) {
-      if (!sub._transition) queuePendingNode(sub);
       notifyStatus(sub, STATUS_PENDING, error);
     }
   });
@@ -175,6 +174,33 @@ function onlyMarkPending(el: Computed<any>): boolean {
   return !!el._pendingSource?._affectsFor;
 }
 
+/**
+ * Collect the still-live marked nodes behind a pended owner's sentinel
+ * sources into a recompute's `affectsReads`. This is the transitive half of
+ * read-path re-establishment (#2893): real async re-establishes at every
+ * derivation level because its re-throw on read re-registers the source, but
+ * mark-pended reads are value-transparent — without this, pendingness dies on
+ * the first mid-window recompute past depth one, and the isPending() probe
+ * itself (whose prepare step recomputes retryable NotReady holders) strips
+ * the very status it reports on. Reached through
+ * `GlobalQueue._collectMarkSources`, gated on `activeAffectsMarks`.
+ */
+function collectMarkSources(el: Computed<any>, into: MarkedNode[]): void {
+  const single = el._pendingSource;
+  if (single) {
+    const marked = single._affectsFor;
+    if (marked && marked._affectsCount) into.push(marked);
+    return;
+  }
+  const sources = el._pendingSources;
+  if (sources) {
+    for (const s of sources) {
+      const marked = s._affectsFor;
+      if (marked && marked._affectsCount) into.push(marked);
+    }
+  }
+}
+
 // Late installation (same pattern as `GlobalQueue._update`): the mark engine
 // lives with the feature so graphs that never declare a mark never ship it.
 // Each call site is gated by state only this module creates (`markedReads`
@@ -186,6 +212,7 @@ GlobalQueue._releaseAffectsMarks = releaseAffectsMarks;
 GlobalQueue._markAffects = markAffects;
 GlobalQueue._releaseAffectsMark = releaseAffectsMark;
 GlobalQueue._onlyMarkPending = onlyMarkPending;
+GlobalQueue._collectMarkSources = collectMarkSources;
 
 /**
  * Declares that in-flight work will change the targeted data: the named

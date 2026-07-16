@@ -34,8 +34,15 @@ import type { Computed, FirewallSignal, Link } from "./types.js";
 
 export function addPendingSource(el: Computed<any>, source: Computed<any>): boolean {
   if (el._pendingSource === source || el._pendingSources?.has(source)) return false;
-  if (!el._pendingSource) {
+  // Once the Set exists it is THE container: landing a third source in the
+  // (now empty) singular slot creates dual state that removePendingSource
+  // refuses to clear, stranding the Set members' pending forever (#2893).
+  if (!el._pendingSource && !el._pendingSources) {
     el._pendingSource = source;
+    return true;
+  }
+  if (!el._pendingSource) {
+    el._pendingSources!.add(source);
     return true;
   }
   if (!el._pendingSources) {
@@ -425,6 +432,18 @@ export function notifyStatus(
 
   const pendingSource =
     status === STATUS_PENDING && error instanceof NotReadyError ? error.source : undefined;
+  // Mark-sourced propagation must not capture subscribers into the marking
+  // action's transaction (#2893): they carry no held value needing a
+  // transition-scheduled commit, and stamping `_transition` on them would
+  // freeze unrelated writes that share a downstream memo until the action
+  // settles. Real async keeps queuing (its commits ride the transition).
+  const markSourced = pendingSource !== undefined && pendingSource._affectsFor !== undefined;
+  // A real error is a settled verdict a mark must not erase (#2893): landing
+  // STATUS_PENDING here would clobber `_error` with the sentinel's
+  // NotReadyError, and unlike real async there is no arriving value whose
+  // recompute would surface the error again. Descent stops too — everything
+  // downstream holds the propagated error for the same reason.
+  if (markSourced && el._statusFlags & STATUS_ERROR) return;
   const isSource = pendingSource === el;
   const isOptimisticBoundary =
     status === STATUS_PENDING && el._overrideValue !== undefined && !isSource;
@@ -486,7 +505,7 @@ export function notifyStatus(
         schedule();
         return;
       }
-      if (!downstreamBlockStatus && !sub._transition) queuePendingNode(sub);
+      if (!downstreamBlockStatus && !markSourced && !sub._transition) queuePendingNode(sub);
       notifyStatus(sub, status, error, downstreamBlockStatus, downstreamLane);
     }
   });

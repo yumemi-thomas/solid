@@ -358,14 +358,23 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   currentOptimisticLane = prevLane;
   // Marks read during this recompute re-attach after the commit above:
   // earlier, the sentinel's NotReadyError in `_error` would have routed the
-  // fresh value into the error-skip branch instead of committing it.
+  // fresh value into the error-skip branch instead of committing it. A real
+  // (non-NotReady) error wins over marks (#2893): applying the sentinel here
+  // would clobber the user's error with a NotReadyError from a node whose
+  // reads value-transparency promises can never throw NotReady.
   // `markedReads` only collects under a live mark, so the hook is installed.
-  if (markedReads) GlobalQueue._applyAffectsReads!(el, markedReads);
+  if (markedReads && !(el._statusFlags & STATUS_ERROR))
+    GlobalQueue._applyAffectsReads!(el, markedReads);
+  // Mark-only pending doesn't queue (#2893): the node holds no value needing
+  // a transition-scheduled commit, and queueing would stamp the marking
+  // action's transaction onto it — freezing unrelated writes that share it.
   const needsPendingCommit =
     el._pendingValue !== NOT_PENDING ||
     el._pendingFirstChild !== null ||
     el._pendingDisposal !== null ||
-    !!(el._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED));
+    !!(el._statusFlags & STATUS_UNINITIALIZED) ||
+    (!!(el._statusFlags & STATUS_PENDING) &&
+      !(activeAffectsMarks !== 0 && GlobalQueue._onlyMarkPending!(el)));
   // Override-covered holds (hasOverride) always queue: their commit belongs
   // to their own transition's schedule (A18 re-rule) and is unobservable
   // under the override (A17). Revert no longer commits anything, so an
@@ -756,9 +765,16 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
 
   if (c && tracking) {
     link(el, c as Computed<any>, pendingCheckActive);
-    // Mark inheritance through derivation (see the fast path above).
-    if (activeAffectsMarks !== 0 && el._affectsCount && !pendingCheckActive)
-      (affectsReads ??= []).push(el);
+    // Mark inheritance through derivation (see the fast path above), and its
+    // transitive half (#2893): a mark-pended owner's sentinel sources flow to
+    // the reader like a direct mark — value-transparent reads have no throw
+    // to re-establish through, so without this a mid-window recompute sheds
+    // pendingness permanently past one derivation level.
+    if (activeAffectsMarks !== 0 && !pendingCheckActive) {
+      if (el._affectsCount) (affectsReads ??= []).push(el);
+      if (owner._statusFlags & STATUS_PENDING)
+        GlobalQueue._collectMarkSources!(owner as Computed<any>, (affectsReads ??= []));
+    }
 
     if ((owner as Computed<unknown>)._fn) {
       const elQueue = queueFor(el as Computed<unknown>);

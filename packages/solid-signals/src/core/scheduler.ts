@@ -329,6 +329,7 @@ export class GlobalQueue extends Queue {
   static _markAffects: ((node: OptimisticNode) => void) | null = null;
   static _releaseAffectsMark: ((node: OptimisticNode) => void) | null = null;
   static _onlyMarkPending: ((el: Computed<any>) => boolean) | null = null;
+  static _collectMarkSources: ((el: Computed<any>, into: OptimisticNode[]) => void) | null = null;
   // External-source bridge (wired by enableExternalSource(); null while no
   // config is active — including after _resetExternalSourceConfig()).
   static _wireExternalSource: ((self: Computed<any>) => void) | null = null;
@@ -549,7 +550,9 @@ export class GlobalQueue extends Queue {
     if (this._affectsNodes !== activeTransition._affectsNodes) {
       // Adopt ambient marks into the transaction (marks don't hijack the
       // node's _transition — a mark on a plain signal must not entangle
-      // unrelated writes to it). After adoption the queue aliases the
+      // unrelated writes to it; the same rule holds one hop downstream:
+      // propagation never queues pended subscribers as pending nodes, see
+      // propagateAffectsMark, #2893). After adoption the queue aliases the
       // transition's array, so later registrations land there directly.
       activeTransition._affectsNodes.push(...this._affectsNodes);
       this._affectsNodes = activeTransition._affectsNodes;

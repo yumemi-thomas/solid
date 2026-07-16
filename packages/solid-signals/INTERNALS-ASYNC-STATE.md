@@ -451,12 +451,40 @@ Supporting machinery:
   accumulator (gated by the global `activeAffectsMarks` counter; probe
   reads excluded so an `isPending` wrapper memo doesn't mark itself), and
   `recompute` applies them after its commit (`applyAffectsReads` — earlier
-  would route the fresh value into the error-skip branch).
+  would route the fresh value into the error-skip branch). Re-acquisition
+  is **transitive** (#2893 bug 3): value-transparency removed real async's
+  re-throw-on-read (the mechanism that re-establishes a source at every
+  derivation level), so a tracked read of a mark-pended *owner* also feeds
+  the reader's `affectsReads` — `collectMarkSources` maps the owner's
+  sentinel sources back to their still-live `_affectsFor` nodes. Without
+  this, pendingness died on the first mid-window recompute past depth one,
+  and the `isPending()` probe itself (whose prepare step recomputes
+  retryable NotReady holders) stripped the status it was reporting on.
+  Propagation is **transaction-inert** (#2893 bug 2): pended subscribers
+  are NOT queued as pending nodes — they hold no value needing a
+  transition-scheduled commit, and queueing stamped the marking action's
+  transaction onto them at stash, from which point ANY write dirtying one
+  (a plain write to the marked signal, or to an unmarked signal merely
+  sharing a downstream memo) was captured and frozen until the action
+  settled. Same rule at recompute: mark-only `STATUS_PENDING` doesn't
+  count toward `needsPendingCommit`. A **real error outranks a mark**
+  (#2893 bug 4): `notifyStatus` drops mark-sourced propagation onto nodes
+  holding `STATUS_ERROR`, and `recompute` skips `applyAffectsReads` when
+  the compute ended errored — landing the sentinel would clobber `_error`
+  with a `NotReadyError` that value-transparency promises can never
+  surface, with no arriving value to ever restore the user's error.
   `releaseAffectsMark` decrements at the transaction's settle (or plain
   flush end for ambient marks), settles the sentinel out of every
   downstream `_pendingSources` (waking `_blocked` nodes), and snaps
   companions through the settlement checkpoint (committed, not
   transition-scoped — the settle walk snaps too, for the same reason).
+  (The settle walk is also why `addPendingSource`'s container migration
+  must check BOTH slots — #2893 bug 1: a third source landing in the
+  emptied singular slot next to the Set put `removePendingSource` into a
+  refusal state that stranded the Set's sentinels forever, `isPending`
+  stuck `true` — deterministically hit by a keyless store mark over
+  `mapArray`, whose internal computed subscribes to exactly three covered
+  nodes.)
 - **Store addressing** (store.ts): `affects(record)` upserts a per-record
   `$AFFECTS` node (the mark's carrier — registry key and liveness anchor),
   walks the record's subtree — reading through write overlays — registering
