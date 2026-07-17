@@ -53,6 +53,8 @@ function addEnumSymbols(o: any, syms: symbol[], keys: Set<PropertyKey>) {
 }
 
 function getAllKeys(value, override, next) {
+  // Symbols are merged explicitly below; keep the common string-key path on
+  // Object.keys() and avoid reflecting the base symbols twice.
   const keys = getKeys(value, override) as PropertyKey[];
   const nextKeys = Object.keys(next);
   // `value` can be a wrapped store (store-in-store) whose ownKeys trap tracks;

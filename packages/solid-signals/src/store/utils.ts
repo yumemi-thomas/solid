@@ -7,6 +7,8 @@ import {
   $TARGET,
   $TRACK,
   getKeys,
+  getStoreKeys,
+  getStoreSymbols,
   getPropertyDescriptor,
   isWrappable,
   mergedOverlay,
@@ -62,6 +64,21 @@ function snapshotImpl<T>(
         result[i] = unwrapped;
       }
     }
+    // Enumerate array symbols separately to avoid scanning indices twice.
+    // Spread copies omit symbols, so assign them after the numeric walk.
+    const symbols = lookup ? getStoreSymbols(item, override) : [];
+    for (let i = 0, l = symbols.length; i < l; i++) {
+      const prop = symbols[i];
+      const desc = getPropertyDescriptor(item, override, prop);
+      if (!desc || desc.get) continue;
+      v = override && prop in override ? override[prop] : item[prop];
+      if (track && isWrappable(v)) wrap(v, target);
+      unwrapped = snapshotImpl(v, track, map, lookup);
+      if (unwrapped !== v || result) {
+        if (!result) map.set(item, (result = Object.assign([...item], item)));
+        result[prop] = unwrapped;
+      }
+    }
     // Deleted trailing slots are skipped above, so restore length to preserve
     // holes instead of truncating the copy (#2846) — mirrors unwrapStoreValue.
     if (result) result.length = len;
@@ -69,7 +86,9 @@ function snapshotImpl<T>(
     // Specialized walk for the common no-overlay case (from #2756): the own
     // descriptor gives the value directly, so each property is read once with
     // no overlay membership checks.
-    const keys = getKeys(item, undefined);
+    // A lookup means this object belongs to an immutable store backing tree,
+    // even if that nested value has not needed its own proxy yet.
+    const keys = lookup ? getStoreKeys(item, undefined) : getKeys(item, undefined);
     for (let i = 0, l = keys.length; i < l; i++) {
       const prop = keys[i];
       const desc = Object.getOwnPropertyDescriptor(item, prop)!;
@@ -85,7 +104,9 @@ function snapshotImpl<T>(
       }
     }
   } else {
-    const keys = getKeys(item, override);
+    // An override only exists on a store record, and the target branch above
+    // always set `lookup` alongside it — so this branch is always store-keyed.
+    const keys = getStoreKeys(item, override);
     for (let i = 0, l = keys.length; i < l; i++) {
       let prop = keys[i];
       const desc = getPropertyDescriptor(item, override, prop)!;

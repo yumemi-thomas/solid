@@ -478,6 +478,186 @@ describe("store snapshot support", () => {
 
     expect(snapshot(store)).toEqual([]);
   });
+
+  it("preserves symbol-keyed properties after a write", () => {
+    const meta = Symbol("meta");
+    const [store, setStore] = createStore({ value: 1, [meta]: "keep" });
+
+    setStore(s => {
+      s.value = 2;
+    });
+    flush();
+
+    expect(snapshot(store)[meta]).toBe("keep");
+  });
+
+  it("captures a write inside a symbol-keyed subtree", () => {
+    const meta = Symbol("meta");
+    const [store, setStore] = createStore({ [meta]: { value: 1 } });
+
+    setStore(s => {
+      s[meta].value = 2;
+    });
+    flush();
+
+    expect(snapshot(store)[meta].value).toBe(2);
+  });
+
+  it("unwraps an unread symbol-keyed store-in-store value", () => {
+    const meta = Symbol("meta");
+    const [child] = createStore({ value: 1 });
+    const [parent] = createStore({ [meta]: child });
+
+    const plain = snapshot(parent);
+
+    expect(plain[meta]).not.toBe(child);
+    expect(plain[meta]).toEqual({ value: 1 });
+  });
+
+  it("preserves symbol-keyed array metadata after an index write", () => {
+    const meta = Symbol("meta");
+    const initial = Object.assign([1], { [meta]: "keep" });
+    const [store, setStore] = createStore(initial);
+
+    setStore(s => {
+      s[0] = 2;
+    });
+    flush();
+
+    expect(snapshot(store)[meta]).toBe("keep");
+  });
+
+  it("preserves a symbol-keyed property added after a snapshot", () => {
+    const meta = Symbol("meta");
+    const [store, setStore] = createStore<{ value: number; [meta]?: string }>({ value: 1 });
+
+    snapshot(store);
+    setStore(s => {
+      s[meta] = "added";
+    });
+    flush();
+
+    expect(snapshot(store)[meta]).toBe("added");
+  });
+
+  it("preserves symbols on an untouched nested store value", () => {
+    const meta = Symbol("meta");
+    const [store] = createStore({ child: { value: 1, [meta]: "keep" } });
+
+    expect(snapshot(store).child[meta]).toBe("keep");
+    expect(snapshot(store).child[meta]).toBe("keep");
+  });
+
+  it("drops a deleted symbol-keyed property", () => {
+    const meta = Symbol("meta");
+    const [store, setStore] = createStore<{ value: number; [meta]?: string }>({
+      value: 1,
+      [meta]: "gone"
+    });
+
+    setStore(s => {
+      delete s[meta];
+    });
+    flush();
+
+    expect(meta in snapshot(store)).toBe(false);
+  });
+
+  it("drops a deleted symbol-keyed array metadata property", () => {
+    const meta = Symbol("meta");
+    const initial = Object.assign([1], { [meta]: "gone" });
+    const [store, setStore] = createStore<number[] & { [meta]?: string }>(initial);
+
+    setStore(s => {
+      delete s[meta];
+    });
+    flush();
+
+    expect(meta in snapshot(store)).toBe(false);
+  });
+
+  it("excludes non-enumerable symbol-keyed properties from written copies", () => {
+    const meta = Symbol("meta");
+    const raw: { value: number; [meta]?: string } = { value: 1 };
+    Object.defineProperty(raw, meta, { value: "hidden", enumerable: false });
+    const [store, setStore] = createStore(raw);
+
+    setStore(s => {
+      s.value = 2;
+    });
+    flush();
+
+    expect(meta in snapshot(store)).toBe(false);
+  });
+
+  it("preserves a cycle reached through a symbol key", () => {
+    const meta = Symbol("meta");
+    const [store, setStore] = createStore<{ node: { name: string; [meta]?: unknown } }>({
+      node: { name: "n" }
+    });
+
+    setStore(s => {
+      s.node[meta] = s.node;
+    });
+    flush();
+
+    const snap = snapshot(store);
+    expect(snap.node[meta]).toBe(snap.node);
+  });
+
+  it("keeps shared references between symbol and string keys", () => {
+    const meta = Symbol("meta");
+    const shared = { value: 1 };
+    const [store, setStore] = createStore<{ named: typeof shared; [meta]?: typeof shared }>({
+      named: shared,
+      [meta]: shared
+    });
+
+    setStore(s => {
+      s.named.value = 2;
+    });
+    flush();
+
+    const snap = snapshot(store);
+    expect(snap[meta]).toBe(snap.named);
+    expect(snap.named.value).toBe(2);
+  });
+
+  it("unwraps a symbol-keyed store-in-store value under a written parent", () => {
+    const meta = Symbol("meta");
+    const [child] = createStore({ value: 1 });
+    const [parent, setParent] = createStore<{ label: string; [meta]?: typeof child }>({
+      label: "a",
+      [meta]: child
+    });
+
+    setParent(s => {
+      s.label = "b";
+    });
+    flush();
+
+    const plain = snapshot(parent);
+    expect(plain[meta]).not.toBe(child);
+    expect(plain[meta]).toEqual({ value: 1 });
+  });
+
+  it("preserves symbol-keyed properties when materializing a written subtree", () => {
+    const meta = Symbol("meta");
+    const [source, setSource] = createStore({ child: { value: 1, [meta]: "keep" } });
+
+    setSource(s => {
+      s.child.value = 2;
+    });
+    flush();
+
+    const [target, setTarget] = createStore<{ child?: typeof source.child }>({});
+    setTarget(s => {
+      s.child = source.child;
+    });
+    flush();
+
+    expect(target.child?.[meta]).toBe("keep");
+  });
 });
 
 describe("pending projection skips snapshot capture", () => {
