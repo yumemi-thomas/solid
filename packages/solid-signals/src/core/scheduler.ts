@@ -319,7 +319,9 @@ export class GlobalQueue extends Queue {
   static _update: (el: Computed<unknown>) => void;
   static _dispose: (el: Computed<unknown>, self: boolean, zombie: boolean) => void;
   static _runEffect: (el: Computed<unknown>) => void;
-  static _clearOptimisticStores: ((stores: Set<any>) => void) | null = null;
+  static _clearOptimisticStores:
+    | ((stores: Set<any>, completing: Transition | null) => void)
+    | null = null;
   // Store-side hook: drops a keyless affects() mark's identity scope when the
   // carrier node's last registration releases (wired by store.ts, mirroring
   // _clearOptimisticStore).
@@ -702,8 +704,10 @@ export function finalizePureQueue(
       : globalQueue._optimisticStores;
     // A non-empty set means trackOptimisticStore ran, which installed the
     // hook; the hook iterates, clears, and schedules (keeping the loop out of
-    // core lets esbuild shake it — rollup already folds the null guard).
-    if (optimisticStores.size) GlobalQueue._clearOptimisticStores!(optimisticStores);
+    // core lets esbuild shake it — rollup already folds the null guard). The
+    // completing transition scopes the clear to its own layer keys (#2899).
+    if (optimisticStores.size)
+      GlobalQueue._clearOptimisticStores!(optimisticStores, completingTransition);
     sweepTransientStoreNodes();
     // Lanes only enter activeLanes through the engine's getOrCreateLane.
     if (activeLanes.size) GlobalQueue._cleanupLanes!(completingTransition);

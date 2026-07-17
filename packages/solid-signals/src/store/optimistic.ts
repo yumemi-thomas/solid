@@ -7,11 +7,13 @@ import {
 } from "../core/index.js";
 import { installOptimisticEngine } from "../core/optimistic.js";
 import {
+  currentTransition,
   GlobalQueue,
   insertSubs,
   projectionWriteActive,
   schedule,
-  setProjectionWriteActive
+  setProjectionWriteActive,
+  type Transition
 } from "../core/scheduler.js";
 import { runProjectionComputed } from "./projection.js";
 import {
@@ -26,6 +28,7 @@ import {
   STORE_NODE,
   STORE_OPTIMISTIC,
   STORE_OPTIMISTIC_OVERRIDE,
+  STORE_OPTIMISTIC_OWNERS,
   STORE_VALUE,
   STORE_WRAP,
   notifySelf,
@@ -113,55 +116,90 @@ export function createOptimisticStore<T extends object = {}>(
 
 // Clear the optimistic overrides of a settling batch of stores and notify
 // signals. Owns the whole batch (iterate + clear + reschedule) so the
-// scheduler's flush tail carries only a size-guarded hook call.
-function clearOptimisticStores(stores: Set<any>): void {
+// scheduler's flush tail carries only a size-guarded hook call. The
+// completing transition scopes each clear to its own layer keys (#2899).
+function clearOptimisticStores(stores: Set<any>, completing: Transition | null): void {
   for (const store of stores) {
     const target = store[$TARGET] as StoreNode | undefined;
-    if (target?.[STORE_OPTIMISTIC_OVERRIDE]) clearOptimisticOverride(target);
+    if (target?.[STORE_OPTIMISTIC_OVERRIDE]) clearOptimisticOverride(target, completing);
   }
   stores.clear();
   schedule();
 }
 
-function clearOptimisticOverride(target: StoreNode): void {
+/**
+ * Consume optimistic layer entries and reset their backing nodes to base.
+ * With `completing` (settle path, #2899) only entries the settling
+ * transaction owns are consumed — the layer is store-wide but concurrent
+ * actions revert independently, so keys stamped by a still-in-flight
+ * transition survive (node-level overrides already have this granularity via
+ * _optimisticNodes; this is the layer's half). `null` consumes ambient
+ * (transaction-less) entries at plain flush end. Omitted (projection landing:
+ * fresh authoritative data) consumes everything — the correction supersedes
+ * every tentative layer.
+ */
+function clearOptimisticOverride(target: StoreNode, completing?: Transition | null): void {
   const override = target[STORE_OPTIMISTIC_OVERRIDE];
   if (!override) return;
   const nodes = target[STORE_NODE];
-  delete target[STORE_OPTIMISTIC_OVERRIDE];
+  const owners = target[STORE_OPTIMISTIC_OWNERS];
+  const scoped = completing !== undefined;
+  let cleared = false;
+  let remaining = false;
 
-  // Notify signals for all overridden properties
   // Use projectionWriteActive to bypass optimistic signal behavior (no lane creation)
   // This ensures reversion effects go to regular queues, not lane queues
   const wasProjectionWriteActive = projectionWriteActive;
   setProjectionWriteActive(true);
   try {
-    if (nodes) {
-      for (const key of Reflect.ownKeys(override)) {
-        if (nodes[key]) {
-          const node = nodes[key];
-          // Clear lane association so effects go to regular queue
-          node._optimisticLane = undefined;
-          // Re-read from base — the optimistic layer was deleted above, so the
-          // overlay resolves to STORE_OVERRIDE or STORE_VALUE.
-          const layer = getOverlayLayer(target, key);
-          const baseValue = layer ? layer[key] : target[STORE_VALUE][key];
-          const value = baseValue === $DELETED ? undefined : baseValue;
-          const next = isWrappable(value) ? wrap(value, target) : value;
-          const prev = visibleNodeValue(node);
-          node._overrideValue = NOT_PENDING;
-          node._pendingValue = NOT_PENDING;
-          node._value = next;
-          if (!node._equals || !node._equals(prev, next)) {
-            insertSubs(node, true);
-            schedule();
+    for (const key of Reflect.ownKeys(override)) {
+      if (scoped) {
+        let owner = owners?.[key] ?? null;
+        // Resolve merge chains (entangled actions settle as one); path-compress
+        // so later keys skip the walk. A dead owner (`_done === true`) settled
+        // through some other path — never strand its entry. A null owner is an
+        // ambient write: its batch belongs to whichever transaction adopted it
+        // (initTransition mid-batch) or to the plain flush, so it clears on
+        // whichever clear call reaches this store first.
+        if (owner) {
+          if (typeof owner._done === "object") owner = owners![key] = currentTransition(owner);
+          if (owner !== completing && owner._done !== true) {
+            remaining = true;
+            continue;
           }
         }
       }
-      // Notify $TRACK
-      if (nodes[$TRACK]) {
-        nodes[$TRACK]._optimisticLane = undefined;
-        notifySelf(target);
+      delete override[key];
+      if (owners) delete owners[key];
+      cleared = true;
+      const node = nodes?.[key];
+      if (node) {
+        // Clear lane association so effects go to regular queue
+        node._optimisticLane = undefined;
+        // Re-read from base — this key left the optimistic layer above, so the
+        // overlay resolves to STORE_OVERRIDE or STORE_VALUE.
+        const layer = getOverlayLayer(target, key);
+        const baseValue = layer ? layer[key] : target[STORE_VALUE][key];
+        const value = baseValue === $DELETED ? undefined : baseValue;
+        const next = isWrappable(value) ? wrap(value, target) : value;
+        const prev = visibleNodeValue(node);
+        node._overrideValue = NOT_PENDING;
+        node._pendingValue = NOT_PENDING;
+        node._value = next;
+        if (!node._equals || !node._equals(prev, next)) {
+          insertSubs(node, true);
+          schedule();
+        }
       }
+    }
+    if (!remaining) {
+      delete target[STORE_OPTIMISTIC_OVERRIDE];
+      delete target[STORE_OPTIMISTIC_OWNERS];
+    }
+    // Notify $TRACK
+    if (cleared && nodes?.[$TRACK]) {
+      nodes[$TRACK]._optimisticLane = undefined;
+      notifySelf(target);
     }
   } finally {
     setProjectionWriteActive(wasProjectionWriteActive);

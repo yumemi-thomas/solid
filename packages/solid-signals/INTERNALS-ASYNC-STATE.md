@@ -581,6 +581,18 @@ non-nullable types).
 
 ## 7. Decision log
 
+- 2026-07-17: **A18 store corollary — per-transaction optimistic layer**
+  (#2899). `createOptimisticStore`'s override layer is one record per store
+  target, but a settling action must consume only its own entries: layer
+  writes stamp their transaction in `STORE_OPTIMISTIC_OWNERS` (per key,
+  `null` = ambient), and `clearOptimisticOverride` scopes the settle-path
+  clear to keys whose resolved owner (merge chains via `currentTransition`,
+  dead owners never strand) is the completing transition. Node-level
+  overrides already had this granularity via `_optimisticNodes`; this is the
+  layer's half. Same-key writes entangle through the shared node as before;
+  projection landings still clear everything. Also fixed with #2898 in the
+  same window: literal-`undefined` optimistic writes land as
+  `OVERRIDE_UNDEFINED` so they can't erase the `_overrideValue` brand.
 - 2026-07-16: **A25 ruled — seed invisibility on derived stores** (#2897).
   The seed is a draft for the derive function; outside consumers get
   NotReady (dev strictRead scopes: `PENDING_ASYNC_UNTRACKED_READ` first)

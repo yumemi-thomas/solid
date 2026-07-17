@@ -30,10 +30,12 @@ import {
   type Signal
 } from "../core/index.js";
 import {
+  activeTransition,
   GlobalQueue,
   globalQueue,
   projectionWriteActive,
-  registerTransientStoreNode
+  registerTransientStoreNode,
+  type Transition
 } from "../core/scheduler.js";
 import { createProjectionInternal } from "./projection.js";
 
@@ -97,7 +99,8 @@ export const STORE_VALUE = "v",
   STORE_WRAP = "w",
   STORE_LOOKUP = "l",
   STORE_FIREWALL = "f",
-  STORE_OPTIMISTIC = "p";
+  STORE_OPTIMISTIC = "p",
+  STORE_OPTIMISTIC_OWNERS = "t";
 const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
@@ -105,6 +108,11 @@ export type StoreNode = {
   [STORE_VALUE]: Record<PropertyKey, any>;
   [STORE_OVERRIDE]?: Record<PropertyKey, any>;
   [STORE_OPTIMISTIC_OVERRIDE]?: Record<PropertyKey, any>;
+  // Per-key transition ownership of the optimistic layer (#2899): stamped at
+  // write time so a settling action only consumes its own entries. `null` =
+  // ambient write (clears at flush end). Nodes already get this granularity
+  // via _optimisticNodes; this is the layer's half.
+  [STORE_OPTIMISTIC_OWNERS]?: Record<PropertyKey, Transition | null>;
   [STORE_NODE]?: DataNodes;
   [STORE_HAS]?: DataNodes;
   [STORE_CUSTOM_PROTO]?: boolean;
@@ -601,6 +609,20 @@ function armOptimisticStoreWrite(target: StoreNode, store: any): void {
   }
 }
 
+/**
+ * Records which transition owns an optimistic layer entry (#2899), so a
+ * settling action only consumes its own keys — the layer is store-wide, but
+ * concurrent actions writing disjoint keys must revert independently, exactly
+ * like optimistic signal nodes do via the transition's _optimisticNodes.
+ * `activeTransition` is the write's transaction (action() opens it before the
+ * body runs); null marks an ambient write that clears at plain flush end.
+ * Same-key writes across actions keep last-write-wins layer semantics.
+ */
+function stampOptimisticOwner(target: StoreNode, overrideKey: string, property: PropertyKey): void {
+  if (overrideKey === STORE_OPTIMISTIC_OVERRIDE)
+    (target[STORE_OPTIMISTIC_OWNERS] ??= Object.create(null))[property] = activeTransition;
+}
+
 function upsertStoreNode(
   target: StoreNode,
   nodes: DataNodes,
@@ -830,12 +852,18 @@ export const storeTraps: ProxyHandler<StoreNode> = {
 
         if (prev === value && nextLength === undefined) return true;
         armOptimisticStoreWrite(target, store);
-        if (value !== undefined && value === base && nextLength === undefined)
+        if (value !== undefined && value === base && nextLength === undefined) {
           delete target[overrideKey]?.[property];
-        else {
+          if (overrideKey === STORE_OPTIMISTIC_OVERRIDE)
+            delete target[STORE_OPTIMISTIC_OWNERS]?.[property];
+        } else {
           const override = target[overrideKey] || (target[overrideKey] = Object.create(null));
           override[property] = value;
-          if (nextLength !== undefined) override.length = nextLength;
+          stampOptimisticOwner(target, overrideKey, property);
+          if (nextLength !== undefined) {
+            override.length = nextLength;
+            stampOptimisticOwner(target, overrideKey, "length");
+          }
         }
         notifyStoreProperty(target, property, "set", value, prev, prevHas);
         // Shrinking an array's length must remove the truncated indices, otherwise
@@ -854,6 +882,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
             const prevIndex = i in override ? override[i] : state[i];
             if (!(i in override) && !(i in state)) continue;
             override[i] = $DELETED;
+            stampOptimisticOwner(target, overrideKey, i);
             notifyStoreProperty(target, i, "delete", undefined, prevIndex, true);
           }
         }
@@ -898,6 +927,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           property,
           normalizedDescriptor
         );
+        stampOptimisticOwner(target, overrideKey, property);
 
         notifyStoreProperty(target, property, "invalidate");
 
@@ -930,9 +960,12 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         ) {
           armOptimisticStoreWrite(target, target[$PROXY]);
           (target[overrideKey] || (target[overrideKey] = Object.create(null)))[property] = $DELETED;
+          stampOptimisticOwner(target, overrideKey, property);
         } else if (target[overrideKey] && property in target[overrideKey]) {
           armOptimisticStoreWrite(target, target[$PROXY]);
           delete target[overrideKey][property];
+          if (overrideKey === STORE_OPTIMISTIC_OVERRIDE)
+            delete target[STORE_OPTIMISTIC_OWNERS]?.[property];
         } else return true;
         notifyStoreProperty(target, property, "delete", undefined, prev, true);
       });
