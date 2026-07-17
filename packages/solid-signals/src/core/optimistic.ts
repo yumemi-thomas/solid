@@ -17,7 +17,9 @@ import {
   EFFECT_TRACKED,
   EFFECT_USER,
   NOT_PENDING,
+  OVERRIDE_UNDEFINED,
   REACTIVE_MANUAL_WRITE,
+  unwrapOverride,
   REACTIVE_OPTIMISTIC_DIRTY,
   REACTIVE_ZOMBIE,
   STATUS_PENDING,
@@ -62,7 +64,7 @@ let stashedOptimisticReads: Set<Signal<any>> | null = null;
 /** The optimistic half of setSignal, fired when `_overrideValue !== undefined`. */
 function optimisticWrite<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T)): T {
   const hasOverride = el._overrideValue !== NOT_PENDING;
-  const currentValue = hasOverride ? (el._overrideValue as T) : el._value;
+  const currentValue = hasOverride ? unwrapOverride<T>(el._overrideValue) : el._value;
 
   if (typeof v === "function") v = (v as (prev: T) => T)(currentValue);
 
@@ -89,7 +91,10 @@ function optimisticWrite<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T)
   const lane = getOrCreateLane(el as Signal<any>);
   el._optimisticLane = lane;
 
-  el._overrideValue = v;
+  // Literal undefined must not land raw: the slot doubles as the optimistic
+  // brand, and erasing it makes the write invisible and routes follow-up
+  // writes off the optimistic path into permanent commits (#2898).
+  el._overrideValue = v === undefined ? (OVERRIDE_UNDEFINED as T) : v;
   if (__DEV__) devTrackOptimistic(el);
 
   GlobalQueue._syncCompanions !== null && GlobalQueue._syncCompanions(el, v);
@@ -171,7 +176,8 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
       (node as any)._statusFlags &= ~STATUS_UNINITIALIZED;
     const prevOverride = node._overrideValue;
     node._overrideValue = NOT_PENDING;
-    if (prevOverride !== NOT_PENDING && node._value !== prevOverride) insertSubs(node, true);
+    if (prevOverride !== NOT_PENDING && node._value !== unwrapOverride(prevOverride))
+      insertSubs(node, true);
     node._transition = null;
   }
   // Settlement checkpoint (#2838): companions caught in this batch (or owned

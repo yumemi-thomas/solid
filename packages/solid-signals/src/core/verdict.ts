@@ -5,6 +5,7 @@
  */
 import {
   NOT_PENDING,
+  unwrapOverride,
   REACTIVE_CHECK,
   REACTIVE_DIRTY,
   REACTIVE_DISPOSED,
@@ -122,7 +123,7 @@ function computePendingState(el: Signal<any> | Computed<any>): boolean {
   }
   if (el._pendingValue !== NOT_PENDING && !(comp._statusFlags & STATUS_UNINITIALIZED)) {
     if (hasActiveOverride(el))
-      return !el._equals || !el._equals(el._pendingValue as any, el._overrideValue as any);
+      return !el._equals || !el._equals(el._pendingValue as any, unwrapOverride(el._overrideValue));
     return true;
   }
   return newQuestionInFlight(comp);
@@ -222,7 +223,7 @@ function latestRead<T>(el: Signal<T> | Computed<T>): T {
   setLatestReadActive(false);
   const visibleValue = (
     el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING
-      ? el._overrideValue
+      ? unwrapOverride(el._overrideValue)
       : el._value
   ) as T;
   let value: T;

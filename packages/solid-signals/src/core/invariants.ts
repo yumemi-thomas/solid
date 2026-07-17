@@ -1,5 +1,6 @@
 import {
   NOT_PENDING,
+  unwrapOverride,
   REACTIVE_CHECK,
   REACTIVE_DIRTY,
   REACTIVE_DISPOSED,
@@ -203,7 +204,7 @@ export function devCensusCompanions(isQueuedForCommit?: (node: AnyNode) => boole
       // verdict legitimately lives in the companion's override.
       const cached =
         pendingSignal._overrideValue !== undefined && pendingSignal._overrideValue !== NOT_PENDING
-          ? pendingSignal._overrideValue
+          ? unwrapOverride(pendingSignal._overrideValue)
           : pendingSignal._value;
       const fresh = oracle(node);
       if (cached !== fresh) {
@@ -220,12 +221,16 @@ export function devCensusCompanions(isQueuedForCommit?: (node: AnyNode) => boole
     ) {
       // Latest-view oracle: override if active, else the held in-flight
       // value, else the committed value (A17/A20 read order) — on both sides.
-      const expected = hasOverride ? node._overrideValue : held ? node._pendingValue : node._value;
+      const expected = hasOverride
+        ? unwrapOverride(node._overrideValue)
+        : held
+          ? node._pendingValue
+          : node._value;
       const shadowOverride =
         shadow._overrideValue !== undefined && shadow._overrideValue !== NOT_PENDING;
       const shadowHeld = shadow._pendingValue !== NOT_PENDING;
       const effective = shadowOverride
-        ? shadow._overrideValue
+        ? unwrapOverride(shadow._overrideValue)
         : shadowHeld
           ? shadow._pendingValue
           : shadow._value;

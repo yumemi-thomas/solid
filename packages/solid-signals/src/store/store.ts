@@ -1,4 +1,4 @@
-import { STATUS_PENDING, STATUS_UNINITIALIZED } from "../core/constants.js";
+import { STATUS_PENDING, STATUS_UNINITIALIZED, unwrapOverride } from "../core/constants.js";
 import {
   pendingCheckActive,
   snapshotCaptureActive,
@@ -234,7 +234,7 @@ export function getOverlayLayer(
  */
 export function visibleNodeValue(node: DataNode): any {
   return node._overrideValue !== undefined && node._overrideValue !== NOT_PENDING
-    ? node._overrideValue
+    ? unwrapOverride(node._overrideValue)
     : node._pendingValue !== NOT_PENDING
       ? node._pendingValue
       : node._value;

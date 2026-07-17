@@ -13,6 +13,8 @@ import {
   EFFECT_USER,
   NO_SNAPSHOT,
   NOT_PENDING,
+  OVERRIDE_UNDEFINED,
+  unwrapOverride,
   REACTIVE_CHECK,
   REACTIVE_DIRTY,
   REACTIVE_DISPOSED,
@@ -286,7 +288,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   if (!el._error) {
     trimStaleDeps(el);
     const compareValue = hasOverride
-      ? el._overrideValue
+      ? unwrapOverride(el._overrideValue)
       : el._pendingValue === NOT_PENDING
         ? el._value
         : el._pendingValue;
@@ -331,7 +333,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         // own reveal schedule; drop any superseded older hold so its queued
         // commit can't clobber the fresh value.
         if (hasOverride && isOptimisticDirty) {
-          el._overrideValue = value;
+          el._overrideValue = value === undefined ? OVERRIDE_UNDEFINED : value;
           el._pendingValue = NOT_PENDING;
         }
       } else {
@@ -862,7 +864,7 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     // An active override means the engine is installed (A17: the override IS
     // the value for every reader — that check itself stays right here).
     if (c && stale && GlobalQueue._readStashed!(el as Signal<any>)) return el._value as T;
-    return el._overrideValue as T;
+    return unwrapOverride<T>(el._overrideValue);
   }
 
   // Entanglement gate: a reader recomputing under an optimistic lane that reads
