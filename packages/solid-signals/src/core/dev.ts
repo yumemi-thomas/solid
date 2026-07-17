@@ -138,6 +138,47 @@ export function emitDiagnostic(event: Omit<DiagnosticEvent, "sequence">): Diagno
   return entry;
 }
 
+/**
+ * Shared strict-read diagnostics for core read() and the store proxy traps.
+ * Single source for the message text — the #2897 safeguard parity between
+ * memos and stores is exactly these firing identically from both paths.
+ */
+export function throwPendingUntrackedRead(
+  strictReadLabel: string,
+  fields?: Partial<Omit<DiagnosticEvent, "sequence" | "data">>
+): never {
+  const message =
+    `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictReadLabel}. ` +
+    `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`;
+  emitDiagnostic({
+    code: "PENDING_ASYNC_UNTRACKED_READ",
+    kind: "async",
+    severity: "error",
+    message,
+    ...fields,
+    data: { strictRead: strictReadLabel }
+  });
+  throw new Error(message);
+}
+
+export function warnStrictReadUntracked(
+  strictReadLabel: string,
+  fields?: Partial<Omit<DiagnosticEvent, "sequence">>
+): void {
+  const message =
+    `[STRICT_READ_UNTRACKED] Reactive value read directly in ${strictReadLabel} will not update. ` +
+    `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
+  emitDiagnostic({
+    code: "STRICT_READ_UNTRACKED",
+    kind: "strict-read",
+    severity: "warn",
+    message,
+    data: { strictRead: strictReadLabel },
+    ...fields
+  });
+  console.warn(message);
+}
+
 export function registerGraph(value: any, owner: Owner | null): void {
   (value as any)._owner = owner;
   if (owner) {

@@ -5,7 +5,12 @@ import {
   snapshotSources,
   strictRead
 } from "../core/core.js";
-import { DEV, emitDiagnostic, registerGraph } from "../core/dev.js";
+import {
+  DEV,
+  registerGraph,
+  throwPendingUntrackedRead,
+  warnStrictReadUntracked
+} from "../core/dev.js";
 import {
   $REFRESH,
   getObserver,
@@ -762,32 +767,12 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       // check), so a derived store's in-flight firewall must be consulted
       // here — otherwise a component-body read of a refetching store silently
       // returns a value the reader can never observe updating.
-      if ((target[STORE_FIREWALL]?._statusFlags ?? 0) & STATUS_PENDING) {
-        const message =
-          `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictRead}. ` +
-          `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`;
-        emitDiagnostic({
-          code: "PENDING_ASYNC_UNTRACKED_READ",
-          kind: "async",
-          severity: "error",
-          message,
-          nodeName: String(property),
-          data: { strictRead }
-        });
-        throw new Error(message);
-      }
-      const message =
-        `[STRICT_READ_UNTRACKED] Reactive value read directly in ${strictRead} will not update. ` +
-        `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
-      emitDiagnostic({
-        code: "STRICT_READ_UNTRACKED",
-        kind: "strict-read",
-        severity: "warn",
-        message,
-        nodeName: String(property),
-        data: { strictRead, property: String(property), source: "store" }
+      if ((target[STORE_FIREWALL]?._statusFlags ?? 0) & STATUS_PENDING)
+        throwPendingUntrackedRead(strictRead, { nodeName: property });
+      warnStrictReadUntracked(strictRead, {
+        nodeName: property,
+        data: { strictRead, property, source: "store" }
       });
-      console.warn(message);
     }
     // Untracked fall-through (tracked reads already threw via their node in
     // read(); the dev strictRead error above wins first for memo parity).

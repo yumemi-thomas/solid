@@ -43,7 +43,13 @@ import {
   queueFor
 } from "./heap.js";
 import { type OptimisticLane } from "./lanes.js";
-import { clearSignals, DEV, emitDiagnostic } from "./dev.js";
+import {
+  clearSignals,
+  DEV,
+  emitDiagnostic,
+  throwPendingUntrackedRead,
+  warnStrictReadUntracked
+} from "./dev.js";
 import { devTrackHeldPending } from "./invariants.js";
 import { cleanup, disposeChildren, inheritId, markDisposal } from "./owner.js";
 import {
@@ -749,22 +755,12 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     return (!c || el._pendingValue === NOT_PENDING ? el._value : el._pendingValue) as T;
   }
 
-  if (__DEV__ && strictRead && owner._statusFlags & STATUS_PENDING) {
-    const message =
-      `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictRead}. ` +
-      `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`;
-    emitDiagnostic({
-      code: "PENDING_ASYNC_UNTRACKED_READ",
-      kind: "async",
-      severity: "error",
-      message,
+  if (__DEV__ && strictRead && owner._statusFlags & STATUS_PENDING)
+    throwPendingUntrackedRead(strictRead, {
       ownerId: c?.id,
       ownerName: (c as any)?._name,
-      nodeName: (owner as any)?._name,
-      data: { strictRead }
+      nodeName: (owner as any)?._name
     });
-    throw new Error(message);
-  }
 
   if (c && tracking) {
     link(el, c as Computed<any>, pendingCheckActive);
@@ -855,22 +851,12 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     }
   }
 
-  if (__DEV__ && strictRead) {
-    const message =
-      `[STRICT_READ_UNTRACKED] Reactive value read directly in ${strictRead} will not update. ` +
-      `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
-    emitDiagnostic({
-      code: "STRICT_READ_UNTRACKED",
-      kind: "strict-read",
-      severity: "warn",
-      message,
+  if (__DEV__ && strictRead)
+    warnStrictReadUntracked(strictRead, {
       ownerId: c?.id,
       ownerName: (c as any)?._name,
-      nodeName: (owner as any)?._name,
-      data: { strictRead }
+      nodeName: (owner as any)?._name
     });
-    console.warn(message);
-  }
 
   if (el._overrideValue !== undefined && el._overrideValue !== NOT_PENDING) {
     // An active override means the engine is installed (A17: the override IS
