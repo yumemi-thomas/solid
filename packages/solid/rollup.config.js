@@ -72,5 +72,38 @@ export default [
     ],
     external: ["@solidjs/signals"],
     plugins: [replaceDev(true)].concat(plugins)
+  },
+  // The refresh runtime imports the main entry ("solid-js") rather than
+  // relative sources so it shares module state ($DEVCOMP, DEV) with the
+  // solid-js instance the app resolves at build time.
+  {
+    input: "src/refresh/index.ts",
+    output: [
+      {
+        file: "dist/refresh.cjs",
+        format: "cjs"
+      },
+      {
+        file: "dist/refresh.js",
+        format: "es"
+      }
+    ],
+    external: ["solid-js", "@solidjs/signals"],
+    plugins: [replaceDev(false)].concat(plugins)
+  },
+  {
+    input: "src/refresh/index.ts",
+    output: [
+      {
+        file: "dist/refresh.dev.cjs",
+        format: "cjs"
+      },
+      {
+        file: "dist/refresh.dev.js",
+        format: "es"
+      }
+    ],
+    external: ["solid-js", "@solidjs/signals"],
+    plugins: [replaceDev(true)].concat(plugins)
   }
 ];
