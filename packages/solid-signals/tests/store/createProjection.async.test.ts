@@ -43,7 +43,10 @@ describe("Projection async behavior", () => {
     });
 
     flush();
-    expect(proj.value).toBe(0);
+    // The seed is a draft for the derive function, never an observable value
+    // (#2897): until the first resolution settles, reads throw NotReady.
+    expect(() => proj.value).toThrow(NotReadyError);
+    await Promise.resolve();
     await Promise.resolve();
     expect(proj.value).toBe(2);
     expect(runs).toBe(1);
@@ -131,6 +134,10 @@ describe("Projection async behavior", () => {
     });
 
     flush();
+    // Draft writes land on the store value one microtask before the async
+    // settles; the store stays unreadable (NotReady) until the settle (#2897).
+    await Promise.resolve();
+    expect(() => proj.a).toThrow(NotReadyError);
     await Promise.resolve();
 
     const firstProj = proj;
@@ -167,10 +174,16 @@ describe("Projection async behavior", () => {
     });
 
     flush();
+    // Uninitialized only until the first yield — but an async generator's
+    // first next() resolves in a microtask, so even the synchronous first
+    // yield can't beat the window: the seed ("init") is never observable, and
+    // reads throw until "start" lands two ticks later (#2897).
+    expect(() => proj.phase).toThrow(NotReadyError);
+    await Promise.resolve();
+    expect(() => proj.phase).toThrow(NotReadyError);
+    await Promise.resolve();
     expect(proj.phase).toBe("start");
 
-    await Promise.resolve();
-    await Promise.resolve();
     await Promise.resolve();
     expect(proj.phase).toBe("middle");
 
@@ -193,7 +206,9 @@ describe("Projection async behavior", () => {
     });
 
     flush();
-    expect(proj).toEqual({ a: 0, b: 0, c: 99 });
+    // Seed { a: 0, b: 0, c: 99 } is never observable — enumeration throws
+    // too, so its structure can't leak either (#2897).
+    expect(() => ({ ...proj })).toThrow(NotReadyError);
 
     await Promise.resolve();
     await Promise.resolve();
@@ -217,7 +232,8 @@ describe("Projection async behavior", () => {
     });
 
     flush();
-    expect(proj.a).toBe(0);
+    // Seed a: 0 is never observable (#2897).
+    expect(() => proj.a).toThrow(NotReadyError);
 
     await Promise.resolve();
     await Promise.resolve();
@@ -368,7 +384,9 @@ describe("Projection async behavior", () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(proj.value).toBe(null);
+    // The superseded run's yield is discarded, and nothing has landed yet —
+    // the store is still uninitialized, so the seed (null) stays hidden (#2897).
+    expect(() => proj.value).toThrow(NotReadyError);
 
     resolve2();
     await Promise.resolve();

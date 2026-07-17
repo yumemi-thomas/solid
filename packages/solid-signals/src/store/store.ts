@@ -1,4 +1,4 @@
-import { STATUS_PENDING } from "../core/constants.js";
+import { STATUS_PENDING, STATUS_UNINITIALIZED } from "../core/constants.js";
 import {
   pendingCheckActive,
   snapshotCaptureActive,
@@ -13,6 +13,7 @@ import {
   isEqual,
   NO_SNAPSHOT,
   NOT_PENDING,
+  NotReadyError,
   read,
   setSignal,
   signal,
@@ -655,6 +656,21 @@ function notifyStoreProperty(
 
 let Writing: Set<Object> | null = null;
 
+/**
+ * A derived store's seed is a draft for the derive function, never an
+ * observable value (#2897): until the firewall first resolves there is
+ * nothing to read, so every consumer path throws NotReady — tracked reads
+ * through their node (core read()), and the untracked fall-throughs in the
+ * traps through this guard. Returning the seed leaked it; returning
+ * `undefined` would break non-nullable types. Callers exempt the firewall
+ * itself (the derive function works its own draft while uninitialized).
+ */
+function throwIfUninitialized(target: StoreNode): void {
+  const firewall = target[STORE_FIREWALL];
+  if (firewall && firewall._statusFlags & STATUS_UNINITIALIZED)
+    throw firewall._error ?? new NotReadyError(firewall);
+}
+
 export const storeTraps: ProxyHandler<StoreNode> = {
   get(target, property, receiver) {
     if (property === $TARGET) return target;
@@ -744,8 +760,8 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       // Safeguard parity with core read() (#2897): untracked store reads skip
       // node creation (and with it read()'s PENDING_ASYNC_UNTRACKED_READ
       // check), so a derived store's in-flight firewall must be consulted
-      // here — otherwise a component-body read of a pending store silently
-      // returns the stale seed where the memo equivalent throws.
+      // here — otherwise a component-body read of a refetching store silently
+      // returns a value the reader can never observe updating.
       if ((target[STORE_FIREWALL]?._statusFlags ?? 0) & STATUS_PENDING) {
         const message =
           `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictRead}. ` +
@@ -773,6 +789,9 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       });
       console.warn(message);
     }
+    // Untracked fall-through (tracked reads already threw via their node in
+    // read(); the dev strictRead error above wins first for memo parity).
+    if (!selfRead) throwIfUninitialized(target);
     return isWrappable(value) ? wrap(value, target) : value;
   },
 
@@ -794,6 +813,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (getObserver()) {
       return read(getNode(target, nodes, property, has));
     }
+    throwIfUninitialized(target);
     return has;
   },
 
@@ -937,7 +957,15 @@ export const storeTraps: ProxyHandler<StoreNode> = {
 
   ownKeys(target: StoreNode) {
     if (pendingCheckActive) witnessAffectsMark(target);
-    if (getObserver() !== target[STORE_FIREWALL]) trackSelf(target);
+    if (getObserver() !== target[STORE_FIREWALL]) {
+      trackSelf(target);
+      // trackSelf no-ops untracked, so enumeration of an unresolved derived
+      // store would otherwise leak the seed's structure (#2897). The write
+      // path is exempt (like the get/has traps' writeOnly early returns):
+      // the first landing's reconcile enumerates the store while
+      // STATUS_UNINITIALIZED is still set — it IS the initialization.
+      if (!getObserver() && !writeOnly(target[$PROXY])) throwIfUninitialized(target);
+    }
     // Merge optimistic override with regular override for key enumeration
     let keys = getKeys(target[STORE_VALUE], target[STORE_OVERRIDE], false);
     if (target[STORE_OPTIMISTIC_OVERRIDE]) {

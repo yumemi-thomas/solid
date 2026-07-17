@@ -523,6 +523,38 @@ and list over-lighting both fall out (an optimistic increment can't silence
 an unrelated in-flight navigation; an optimistic list add doesn't pend
 sibling rows because the confirm refresh is a quiet re-ask).
 
+## 5h. Seed invisibility on derived stores (2026-07-16 — A25, #2897)
+
+A derived store's seed is a draft for the derive function, never a value an
+outside reader may observe. Memos already enforced this (untracked reads of
+an UNINITIALIZED node throw NotReady out of `read()`; strictRead scopes get
+the `PENDING_ASYNC_UNTRACKED_READ` dev error first), but the store proxy's
+untracked fall-throughs bypassed `read()` entirely — `get` returned the raw
+seed value, `has`/`ownKeys` leaked its structure.
+
+The guard is `throwIfUninitialized(target)` (store.ts): if the target's
+`STORE_FIREWALL` carries `STATUS_UNINITIALIZED`, throw `firewall._error ??
+new NotReadyError(firewall)`. Placement in the three read traps:
+
+- **get** — untracked fall-through only, after the dev strictRead checks
+  (the `PENDING_ASYNC_UNTRACKED_READ` error wins in component bodies for
+  the more descriptive message / infinite-loop prevention). Tracked reads
+  already throw through their node in `read()`. `selfRead` (observer IS the
+  firewall — the derive function working its own draft) is exempt: that is
+  what the seed is for. `writeOnly` paths return before the guard.
+- **has** — untracked fall-through; `writeOnly`/`selfRead` early-return
+  above the guard.
+- **ownKeys** — untracked and not `writeOnly` (reconcile's enumeration
+  during the first landing IS the initialization and must see the draft).
+
+The window closes when `STATUS_UNINITIALIZED` clears: first resolution for
+promise derives, **first yield landing** for async-iterator derives — later
+yields are revealed snapshots, readable between yields while the generator
+keeps running. Supersession keeps the window open (a discarded stale yield
+lands nothing). Rejected alternatives: returning the seed (leaks a value the
+reader can never observe updating), returning `undefined` (breaks
+non-nullable types).
+
 ## 6. Assumptions / open questions (feed into tier B/C propositions)
 
 - `[RULED 2026-07-07 → A19/V3]` When async is in flight on a node whose
@@ -549,6 +581,14 @@ sibling rows because the confirm refresh is a quiet re-ask).
 
 ## 7. Decision log
 
+- 2026-07-16: **A25 ruled — seed invisibility on derived stores** (#2897).
+  The seed is a draft for the derive function; outside consumers get
+  NotReady (dev strictRead scopes: `PENDING_ASYNC_UNTRACKED_READ` first)
+  from every untracked trap path — get, has, ownKeys — until the first
+  resolution / first yield lands. Self reads and write-path (reconcile)
+  reads exempt. Returning the seed leaked an unobservable value; returning
+  `undefined` breaks non-nullable types. Implementation in §5h; six
+  createProjection.async pins updated from the old seed-visible behavior.
 - 2026-07-13: **A20/A21 re-ruled — question-scoped pending** (supersedes the
   2026-07-07c mask; converged from the #2844/#2728 threads with GabbeV and
   brenelz after cause-scoped pending, per-path masking + UNCHANGED vouching,
