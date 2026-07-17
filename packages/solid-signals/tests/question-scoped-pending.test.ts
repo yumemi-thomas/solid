@@ -800,6 +800,111 @@ describe("affects — captured proxies (#2882)", () => {
   });
 });
 
+describe("affects — cross-family raw sharing (#2904)", () => {
+  // A derived store whose projection lands the SOURCE store's value adopts
+  // the source's raw object as its backing (reconcile's swap). Reads through
+  // the derived proxy then never touch the source family's node map, so a
+  // keyed mark carried only by the source's leaf node was invisible to them.
+  // Keyed marks now register an identity scope (owning raw + key), the same
+  // mechanism keyless marks use for captured proxies (#2882).
+
+  it("keyed affects(source, key) is visible through a derived optimistic store (the issue repro)", () => {
+    const [s] = createOptimisticStore<{ a: number }>(() => ({ a: 1 }), { a: 0 });
+    const [s2] = createOptimisticStore<{ a: number }>(() => s, { a: 0 } as any);
+    flush();
+
+    expect(isPending(() => s.a)).toBe(false);
+    expect(isPending(() => s2.a)).toBe(false);
+
+    affects(s, "a");
+    expect(isPending(() => s.a)).toBe(true);
+    expect(isPending(() => s2.a)).toBe(true);
+    flush(); // ambient mark releases at flush end
+    expect(isPending(() => s.a)).toBe(false);
+    expect(isPending(() => s2.a)).toBe(false);
+  });
+
+  it("keyless affects(source) is visible through a derived optimistic store", () => {
+    const [s] = createOptimisticStore<{ a: number }>(() => ({ a: 1 }), { a: 0 });
+    const [s2] = createOptimisticStore<{ a: number }>(() => s, { a: 0 } as any);
+    flush();
+
+    affects(s);
+    expect(isPending(() => s.a)).toBe(true);
+    expect(isPending(() => s2.a)).toBe(true);
+  });
+
+  it("keyed marks stay scoped to their key across families", () => {
+    const [s] = createOptimisticStore<{ a: number; b: number }>(() => ({ a: 1, b: 2 }), {
+      a: 0,
+      b: 0
+    });
+    const [s2] = createOptimisticStore<{ a: number; b: number }>(() => s, {
+      a: 0,
+      b: 0
+    } as any);
+    flush();
+
+    affects(s, "a");
+    expect(isPending(() => s2.a)).toBe(true);
+    expect(isPending(() => s2.b)).toBe(false); // other keys of the shared record stay crisp
+  });
+
+  it("keyed mark held by an action releases at settle, through both proxies", async () => {
+    const [s] = createOptimisticStore<{ a: number }>(() => ({ a: 1 }), { a: 0 });
+    const [s2] = createOptimisticStore<{ a: number }>(() => s, { a: 0 } as any);
+    flush();
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(s, "a");
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+
+    const done = act();
+    flush();
+    expect(isPending(() => s.a)).toBe(true);
+    expect(isPending(() => s2.a)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(isPending(() => s.a)).toBe(false);
+    expect(isPending(() => s2.a)).toBe(false);
+  });
+
+  it("a node born in the other family during a keyed window inherits the mark", async () => {
+    const [s] = createOptimisticStore<{ a: number }>(() => ({ a: 1 }), { a: 0 });
+    const [s2] = createOptimisticStore<{ a: number }>(() => s, { a: 0 } as any);
+    flush();
+
+    let resolveIt!: () => void;
+    const act = action(function* () {
+      affects(s, "a");
+      yield new Promise<void>(r => (resolveIt = r));
+    });
+    const done = act();
+    flush();
+
+    // Tracked read during the window: materializes s2's own node for "a",
+    // which must be born marked (birth inheritance, keyed-narrowed).
+    const log: boolean[] = [];
+    createRoot(() => {
+      const pending = createMemo(() => isPending(() => s2.a));
+      createRenderEffect(pending, v => {
+        log.push(v);
+      });
+    });
+    flush();
+    expect(log.at(-1)).toBe(true);
+
+    resolveIt();
+    await done;
+    flush();
+    expect(log.at(-1)).toBe(false); // released with the action's settle
+  });
+});
+
 describe("digestion windows (same-question landings are ordinary changes downstream)", () => {
   it("4b: a quiet landing that changes data pends downstream async until it settles", async () => {
     const [id] = createSignal(1);

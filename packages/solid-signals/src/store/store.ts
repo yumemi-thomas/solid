@@ -338,23 +338,29 @@ function getNode<T>(
   }
   if (typeof property === "symbol" && property !== $TRACK && property !== $AFFECTS)
     symbolKeyedRecords.add(nodes);
-  // A node born inside a live keyless mark's identity scope inherits the mark
+  // A node born inside a live mark's identity scope inherits the mark
   // (the declaration walk could only cover nodes that existed then). The
   // record's own $AFFECTS carrier is the mark's channel, never a member.
-  if (property !== $AFFECTS && affectsScopes.size) inheritAffectsMarks(s, target[STORE_VALUE]);
+  if (property !== $AFFECTS && affectsScopes.size)
+    inheritAffectsMarks(s, target[STORE_VALUE], property);
   return (nodes[property] = s);
 }
 
 /**
- * Scope inheritance for late-created nodes: every live keyless mark whose
- * identity scope contains the owning record's raw gets counted on the new
- * node. Inherited marks live exactly as long as the scope's carrier — the
- * release hook below drops them with the entry.
+ * Scope inheritance for late-created nodes: every live mark whose identity
+ * scope contains the owning record's raw — and, for keyed marks, whose key
+ * is this property — gets counted on the new node. Inherited marks live
+ * exactly as long as the scope's carrier — the release hook below drops
+ * them with the entry.
  */
-function inheritAffectsMarks(node: DataNode, raw: object): void {
+function inheritAffectsMarks(node: DataNode, raw: object, property: PropertyKey): void {
   // A live scope exists, so affects.ts already installed the mark engine.
   for (const [carrier, entry] of affectsScopes) {
-    if (carrier._affectsCount && entry.scope.has(raw)) {
+    if (
+      carrier._affectsCount &&
+      entry.scope.has(raw) &&
+      (entry.key === undefined || entry.key === property)
+    ) {
       GlobalQueue._markAffects!(node);
       entry.inherited.push(node);
     }
@@ -362,18 +368,22 @@ function inheritAffectsMarks(node: DataNode, raw: object): void {
 }
 
 /**
- * Live keyless-mark scopes: the mark's carrier `$AFFECTS` node → the raw
- * identities reachable from the marked record when the mark was declared,
- * plus the nodes created inside that scope since (inherited marks). A
- * keyless mark covers the record's subtree by IDENTITY, not read path —
- * captured descendant proxies (`<For>` rows) never traverse the marked
- * record, so coverage resolves against raw identity here (#2882). Entries
+ * Live mark scopes: the mark's carrier node → the raw identities the mark
+ * covers, plus the nodes created inside that scope since (inherited marks).
+ * Marks cover by IDENTITY, not read path — captured or re-wrapped proxies
+ * (`<For>` rows, derived stores sharing the source's raw) never traverse
+ * the declaration's proxy, so coverage resolves against raw identity here
+ * (#2882). Keyless marks: carrier is the record's `$AFFECTS` node and
+ * `scope` holds every raw reachable at declaration. Keyed marks (#2904):
+ * carrier is the slot's leaf node, `scope` holds just the owning record's
+ * raw, and `key` narrows witness/inheritance to that one property. Entries
  * die with the carrier's last registration (scheduler release hook), which
  * also releases every inherited mark.
  */
 interface AffectsScope {
   scope: Set<object>;
   inherited: DataNode[];
+  key?: PropertyKey;
 }
 const affectsScopes = new Map<DataNode, AffectsScope>();
 
@@ -462,7 +472,7 @@ function collectRecordNodes(nodes: DataNodes | undefined, found: DataNode[]): vo
  *
  * @internal
  */
-export function witnessAffectsMark(target: StoreNode): void {
+export function witnessAffectsMark(target: StoreNode, property?: PropertyKey): void {
   // Callers guard on `pendingCheckActive`, which only flips inside
   // isPending() — the verdict layer is loaded and its hook installed.
   const own = target[STORE_NODE]?.[$AFFECTS];
@@ -470,7 +480,12 @@ export function witnessAffectsMark(target: StoreNode): void {
   if (affectsScopes.size) {
     const raw = target[STORE_VALUE];
     for (const [carrier, entry] of affectsScopes) {
-      if (carrier !== own && carrier._affectsCount && entry.scope.has(raw))
+      if (
+        carrier !== own &&
+        carrier._affectsCount &&
+        entry.scope.has(raw) &&
+        (entry.key === undefined || entry.key === property)
+      )
         GlobalQueue._witnessAffects!(carrier);
     }
   }
@@ -489,26 +504,42 @@ export function witnessAffectsMark(target: StoreNode): void {
  */
 export function getStoreAffectsNodes(target: StoreNode, key?: PropertyKey): DataNode[] {
   const nodes = getNodes(target, STORE_NODE);
+  GlobalQueue._releaseAffectsScope ||= node => {
+    const entry = affectsScopes.get(node as DataNode);
+    if (!entry) return;
+    affectsScopes.delete(node as DataNode);
+    for (let i = 0; i < entry.inherited.length; i++)
+      GlobalQueue._releaseAffectsMark!(entry.inherited[i]);
+  };
   if (key === undefined) {
     const carrier = getNode(target, nodes, $AFFECTS, undefined, false);
-    GlobalQueue._releaseAffectsScope ||= node => {
-      const entry = affectsScopes.get(node as DataNode);
-      if (!entry) return;
-      affectsScopes.delete(node as DataNode);
-      for (let i = 0; i < entry.inherited.length; i++)
-        GlobalQueue._releaseAffectsMark!(entry.inherited[i]);
-    };
     let entry = affectsScopes.get(carrier);
     if (!entry) affectsScopes.set(carrier, (entry = { scope: new Set(), inherited: [] }));
     const result = [carrier];
     walkAffectsScope(target[$PROXY], entry, result, target[STORE_LOOKUP], new Set());
     return result;
   }
-  if (nodes[key]) return [nodes[key]];
-  const layer = getOverlayLayer(target, key);
-  const raw = layer ? layer[key] : target[STORE_VALUE][key];
-  const prev = raw === $DELETED ? undefined : raw;
-  return [upsertStoreNode(target, nodes, key, prev, target[STORE_SNAPSHOT_PROPS])];
+  let node = nodes[key];
+  if (!node) {
+    const layer = getOverlayLayer(target, key);
+    const raw = layer ? layer[key] : target[STORE_VALUE][key];
+    node = upsertStoreNode(
+      target,
+      nodes,
+      key,
+      raw === $DELETED ? undefined : raw,
+      target[STORE_SNAPSHOT_PROPS]
+    );
+  }
+  // Keyed marks resolve by identity too (#2904): another store family's
+  // proxy can share this record's raw (a derived store swaps its backing to
+  // the source's raw when its projection lands), and reads through it never
+  // touch this target's node map. Scope is exactly the owning record's raw,
+  // narrowed to this key for witness and birth inheritance.
+  let entry = affectsScopes.get(node);
+  if (!entry) affectsScopes.set(node, (entry = { scope: new Set(), inherited: [], key }));
+  entry.scope.add(target[STORE_VALUE]);
+  return [node];
 }
 
 export function trackSelf(target: StoreNode, symbol: symbol = $TRACK) {
@@ -779,7 +810,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (property === $TARGET) return target;
     if (property === $PROXY) return receiver;
     if (property === $REFRESH) return target[STORE_FIREWALL];
-    if (pendingCheckActive) witnessAffectsMark(target);
+    if (pendingCheckActive) witnessAffectsMark(target, property);
     if (property === $TRACK) {
       trackSelf(target);
       return receiver;
@@ -880,7 +911,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
 
   has(target, property) {
     if (property === $PROXY || property === $TRACK || property === "__proto__") return true;
-    if (pendingCheckActive) witnessAffectsMark(target);
+    if (pendingCheckActive) witnessAffectsMark(target, property);
     const hasLayer = getOverlayLayer(target, property);
     const has = hasLayer ? hasLayer[property] !== $DELETED : property in target[STORE_VALUE];
 
