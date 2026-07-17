@@ -13,6 +13,14 @@ minimumReleaseAgeExclude:
   - '@dom-expressions/tagged-jsx'
 
 overrides:
+  # TEMPORARY: the native JSX transform used by the test infrastructure
+  # (scripts/solid-jsx.mjs) needs the current state of the native compiler,
+  # which is not published yet (0.50.0-next.22 predates it). Link the sibling
+  # checkout until the next release, then remove this override and pin the
+  # released version. The link needs a locally built binary:
+  #   pnpm --filter @dom-expressions/compiler run build:debug   (in ../dom-expressions)
+  # (the .node artifacts are gitignored local builds).
+  '@dom-expressions/compiler': link:../dom-expressions/packages/compiler
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*

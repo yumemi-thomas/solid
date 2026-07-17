@@ -1,7 +1,9 @@
 /// <reference types="vitest" />
 
 import { defineConfig } from "vitest/config";
-import solidPlugin from "vite-plugin-solid";
+// JSX for tests compiles through scripts/solid-jsx.mjs: Babel by default,
+// `JSX_COMPILER=native` switches to the native Rust compiler for A/B.
+import solidPlugin from "../../scripts/solid-jsx.mjs";
 import { resolve } from "path";
 
 const rootDir = resolve(__dirname);

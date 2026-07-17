@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@dom-expressions/compiler': link:../dom-expressions/packages/compiler
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
@@ -35,6 +36,9 @@ importers:
       '@dom-expressions/babel-plugin-jsx':
         specifier: 0.50.0-next.22
         version: 0.50.0-next.22(@babel/core@7.29.0)
+      '@dom-expressions/compiler':
+        specifier: link:../dom-expressions/packages/compiler
+        version: link:../dom-expressions/packages/compiler
       '@dom-expressions/hyperscript':
         specifier: 0.50.0-next.22
         version: 0.50.0-next.22

@@ -5,7 +5,9 @@
 // `*.bench.tsx` files in `test/server/`. Run via `pnpm bench:server`.
 
 import { defineConfig } from "vitest/config";
-import solidPlugin from "vite-plugin-solid";
+// JSX for tests compiles through scripts/solid-jsx.mjs: Babel by default,
+// `JSX_COMPILER=native` switches to the native Rust compiler for A/B.
+import solidPlugin from "../../scripts/solid-jsx.mjs";
 import codspeedPlugin from "@codspeed/vitest-plugin";
 import { resolve } from "path";
 

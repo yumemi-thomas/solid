@@ -30,6 +30,7 @@
     "@changesets/cli": "^2.25.2",
     "@codspeed/vitest-plugin": "^5.4.0",
     "@dom-expressions/babel-plugin-jsx": "0.50.0-next.22",
+    "@dom-expressions/compiler": "link:../dom-expressions/packages/compiler",
     "@dom-expressions/hyperscript": "0.50.0-next.22",
     "@dom-expressions/runtime": "0.50.0-next.22",
     "@dom-expressions/tagged-jsx": "0.50.0-next.22",
