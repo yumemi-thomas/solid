@@ -69,6 +69,19 @@ function render(proxy: (props: any) => any): () => CounterInstance {
   return out;
 }
 
+function renderDisposable(proxy: (props: any) => any): {
+  out: () => CounterInstance;
+  dispose: () => void;
+} {
+  let out!: () => CounterInstance;
+  let dispose!: () => void;
+  createRoot(d => {
+    dispose = d;
+    out = createComponent(proxy as any, {}) as unknown as () => CounterInstance;
+  });
+  return { out, dispose };
+}
+
 afterEach(() => {
   configureRefresh({ invalidate: undefined });
 });
@@ -166,17 +179,39 @@ describe("$$component proxy swapping (vite mode)", () => {
     expect(out().version).toBe(2);
   });
 
-  test("context identity: symbol id is carried over to the new registration", () => {
+  test("context identity: symbol id is carried over while the old provider is mounted", () => {
     const { hot, fireAccept } = createViteHot();
     const id = Symbol("ctx");
     const oldContext = Object.assign(() => null, { id, defaultValue: undefined });
     const newContext = Object.assign(() => null, { id: Symbol("ctx"), defaultValue: undefined });
 
-    executeModule(hot, { Ctx: { impl: oldContext } });
+    const first = executeModule(hot, { Ctx: { impl: oldContext } });
+    // Keep an instance of the old registration alive across the update —
+    // its consumers resolve by the old symbol, so the re-evaluated context
+    // must adopt it.
+    render(first.proxies.Ctx);
     executeModule(hot, { Ctx: { impl: newContext } });
     fireAccept({});
 
     expect(newContext.id).toBe(id);
+  });
+
+  test("context identity is NOT rewritten when nothing is mounted anymore", () => {
+    const { hot, fireAccept } = createViteHot();
+    const id = Symbol("ctx");
+    const oldContext = Object.assign(() => null, { id, defaultValue: undefined });
+    const freshId = Symbol("ctx");
+    const newContext = Object.assign(() => null, { id: freshId, defaultValue: undefined });
+
+    // First execution's provider was torn down (e.g. the entry module's
+    // render disposer ran via hot.dispose), and the re-execution has already
+    // rendered fresh providers using the new context's own symbol. Stamping
+    // the old symbol over it would orphan those live consumers.
+    executeModule(hot, { Ctx: { impl: oldContext } });
+    executeModule(hot, { Ctx: { impl: newContext } });
+    fireAccept({});
+
+    expect(newContext.id).toBe(freshId);
   });
 });
 
@@ -212,11 +247,12 @@ describe("$$refresh registration bookkeeping (vite mode)", () => {
     expect(first.registry.components.get("Extra")).toBe(second.registry.components.get("Extra"));
   });
 
-  test("re-executed module renders through the first proxy", () => {
+  test("re-executed module renders through the first proxy while it is mounted", () => {
     const { hot, fireAccept } = createViteHot();
-    executeModule(hot, {
+    const first = executeModule(hot, {
       Counter: { impl: makeCounter(1), options: { signature: "sig-a" } }
     });
+    render(first.proxies.Counter);
 
     // Same signature, so the original component stays mounted; the new
     // module's proxy must still render the surviving (v1) registration.
@@ -228,6 +264,31 @@ describe("$$refresh registration bookkeeping (vite mode)", () => {
 
     const out = render(second.proxies.Counter);
     expect(out().version).toBe(1);
+  });
+
+  test("unmounted registrations adopt the re-executed component (solid-refresh#85)", () => {
+    const { hot, fireAccept } = createViteHot();
+    const first = executeModule(hot, {
+      Counter: { impl: makeCounter(1), options: { signature: "sig-a" } }
+    });
+    // Simulates the entry-module flow: the previous tree was disposed via
+    // the render disposer registered with hot.dispose before re-execution.
+    const { dispose } = renderDisposable(first.proxies.Counter);
+    dispose();
+
+    const second = executeModule(hot, {
+      Counter: { impl: makeCounter(2), options: { signature: "sig-a" } }
+    });
+    fireAccept({});
+    flush();
+
+    // Nothing from the first execution is alive, so rendering (through
+    // either proxy) must yield the re-executed component, not the stale v1
+    // closure environment.
+    const out = render(second.proxies.Counter);
+    expect(out().version).toBe(2);
+    const outFirst = render(first.proxies.Counter);
+    expect(outFirst().version).toBe(2);
   });
 
   test("removed component invalidates the module", () => {

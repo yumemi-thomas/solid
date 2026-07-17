@@ -24,7 +24,7 @@
  * `$$component` returns the component unwrapped and `$$refresh`/`$$decline`
  * warn once and do nothing.
  */
-import { $DEVCOMP, createMemo, createSignal, untrack, DEV } from "solid-js";
+import { $DEVCOMP, createMemo, createSignal, getOwner, onCleanup, untrack, DEV } from "solid-js";
 import { IS_DEV } from "../client/core.js";
 import type { Element as SolidElement } from "../types.js";
 
@@ -46,19 +46,37 @@ function setComponentProperty(component: object, key: string, value: string): vo
   }
 }
 
+/** Mutable live-mount counter shared between a proxy and its registration. */
+interface LiveInstances {
+  count: number;
+}
+
 /**
  * Wraps the current registration of a component in a stable proxy identity.
  * Renders subscribe to `source` through a transparent memo, so swapping the
  * underlying component re-renders in place while sibling state (and the dev
  * owner-id scheme, thanks to `transparent`) is preserved.
+ *
+ * Every render through the proxy is counted in `instances` for as long as
+ * its owner lives, so `patchComponent` can tell whether a registration still
+ * has mounted instances or whether everything rendered through it was torn
+ * down (e.g. by the `render()` disposer that the transform registers via
+ * `hot.dispose`).
  */
 function createProxy<P extends Record<string, any>>(
   source: () => BaseComponent<P>,
   name: string,
+  instances: LiveInstances,
   location?: string
 ): (props: P) => SolidElement {
   const refreshName = `[solid-refresh]${name}`;
   function HMRComp(props: P): SolidElement {
+    if (getOwner()) {
+      instances.count++;
+      onCleanup(() => {
+        instances.count--;
+      });
+    }
     const s = untrack(source);
     if (!s || $DEVCOMP in s) {
       return createMemo(
@@ -136,6 +154,8 @@ export interface ComponentRegistrationData<P> extends ComponentOptions {
   component: (props: P) => SolidElement;
   proxy: (props: P) => SolidElement;
   update: (action: () => (props: P) => SolidElement) => void;
+  /** Live renders through this registration's proxy (owner not yet disposed). */
+  instances: LiveInstances;
 }
 
 export interface Registry {
@@ -164,12 +184,14 @@ export function $$component<P extends Record<string, any>>(
     current = action();
     setComp(() => current);
   };
-  const proxy = createProxy(comp, id, options.location);
+  const instances: LiveInstances = { count: 0 };
+  const proxy = createProxy(comp, id, instances, options.location);
   registry.components.set(id, {
     id,
     component,
     proxy,
     update,
+    instances,
     ...options
   });
   return proxy;
@@ -179,27 +201,47 @@ function patchComponent<P>(
   oldData: ComponentRegistrationData<P>,
   newData: ComponentRegistrationData<P>
 ): void {
-  // Preserve context identity: contexts (createContext) are components in
-  // Solid 2.0, but useContext looks values up by the context's stable
-  // symbol `.id` — carry the old symbol onto the re-evaluated context.
-  const oldComp = oldData.component as any;
-  const newComp = newData.component as any;
-  if (oldComp.id != null && typeof oldComp.id === "symbol") {
-    newComp.id = oldComp.id;
-  }
-  if (newData.signature) {
-    const oldDeps = oldData.dependencies?.call(oldData);
-    const newDeps = newData.dependencies?.call(newData);
-    if (newData.signature !== oldData.signature || isListUpdated(newDeps, oldDeps)) {
-      // Signature or captured bindings changed: swap in the new component
-      // (remounts that component subtree; unrelated state is preserved).
-      oldData.dependencies = newDeps ? () => newDeps : undefined;
-      oldData.signature = newData.signature;
+  if (oldData.instances.count === 0) {
+    // Nothing rendered through the old registration is alive. This is the
+    // entry-module shape of solid-refresh#85: the transform registers the
+    // `render()` disposer via `hot.dispose`, so by the time this accept
+    // callback runs, the previous tree is gone and the re-execution has
+    // already rendered a fresh tree through the NEW registration. The
+    // signature/dependency short-circuit below exists to protect mounted
+    // state — with no live instances it must not apply, because leaving the
+    // old component in place resurrects the previous execution's module
+    // scope (dead createContext instances, prior sibling imports) when the
+    // redirect below routes the live render through the canonical proxy.
+    // Swap unconditionally to the fresh component and skip the context
+    // symbol carry-over: everything alive was rendered against the new
+    // context's own symbol.
+    oldData.dependencies = newData.dependencies;
+    oldData.signature = newData.signature;
+    oldData.update(() => newData.component);
+  } else {
+    // Preserve context identity: contexts (createContext) are components in
+    // Solid 2.0, but useContext looks values up by the context's stable
+    // symbol `.id` — carry the old symbol onto the re-evaluated context so
+    // consumers of the still-mounted provider keep resolving.
+    const oldComp = oldData.component as any;
+    const newComp = newData.component as any;
+    if (oldComp.id != null && typeof oldComp.id === "symbol") {
+      newComp.id = oldComp.id;
+    }
+    if (newData.signature) {
+      const oldDeps = oldData.dependencies?.call(oldData);
+      const newDeps = newData.dependencies?.call(newData);
+      if (newData.signature !== oldData.signature || isListUpdated(newDeps, oldDeps)) {
+        // Signature or captured bindings changed: swap in the new component
+        // (remounts that component subtree; unrelated state is preserved).
+        oldData.dependencies = newDeps ? () => newDeps : undefined;
+        oldData.signature = newData.signature;
+        oldData.update(() => newData.component);
+      }
+    } else {
+      // No granular signature info — always remount.
       oldData.update(() => newData.component);
     }
-  } else {
-    // No granular signature info — always remount.
-    oldData.update(() => newData.component);
   }
   // Always point the new registration at the first proxy, so modules newly
   // importing the re-evaluated module still render through the proxy that is
