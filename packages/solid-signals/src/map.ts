@@ -105,6 +105,15 @@ export function mapArray<Item, MappedItem>(
 }
 
 const pureOptions = { ownedWrite: true };
+// Exception safety (#2903): a map callback can throw NotReadyError mid-pass
+// (async read), and the computed re-runs the whole pass after settle. Every
+// pass therefore STAGES its work — new rows are created into temp arrays and
+// removals are deferred — and commits to `this` only after every mapper
+// succeeded. An aborted pass disposes just the owners it created and leaves
+// `_items`/`_mappings`/`_nodes`/`_rows`/`_indexes`/`_len` exactly as they
+// were, so the retry diffs against uncorrupted state. Consequence of the
+// strong-abort ordering: removed rows now dispose AFTER the pass's new rows
+// are created (you cannot destroy state before knowing the pass will land).
 function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[] {
   const newItems = this._list() || [],
     newLen = newItems.length;
@@ -113,25 +122,29 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
   runWithOwner(this._owner, () => {
     let i: number,
       j: number,
+      rows: Signal<Item>[] | undefined,
+      indexes: Signal<number>[] | undefined,
+      // Mappers write freshly-created row/index signals into the STAGE
+      // arrays (`rows`/`indexes`), never into `this._rows`/`this._indexes`.
       mapper = this._rows
         ? this._byIndex
           ? () => {
-              this._rows![j] = signal(newItems[j], pureOptions);
-              return this._map(accessor(this._rows![j]), j);
+              rows![j] = signal(newItems[j], pureOptions);
+              return this._map(accessor(rows![j]), j);
             }
           : () => {
-              this._rows![j] = signal(newItems[j], pureOptions);
-              this._indexes && (this._indexes![j] = signal(j, pureOptions));
+              rows![j] = signal(newItems[j], pureOptions);
+              indexes && (indexes[j] = signal(j, pureOptions));
               return this._map(
-                accessor(this._rows![j]),
-                this._indexes ? accessor(this._indexes![j]) : (undefined as any)
+                accessor(rows![j]),
+                indexes ? accessor(indexes[j]) : (undefined as any)
               );
             }
         : this._indexes
           ? () => {
               const item = newItems[j];
-              this._indexes![j] = signal(j, pureOptions);
-              return this._map(item, accessor<number>(this._indexes![j]));
+              indexes![j] = signal(j, pureOptions);
+              return this._map(item, accessor<number>(indexes![j]));
             }
           : () => {
               const item = newItems[j];
@@ -150,7 +163,9 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         this._indexes && (this._indexes = []);
       }
       if (this._fallback && !this._mappings[0]) {
-        // create fallback
+        // an aborted fallback attempt leaves an owner without a mapping;
+        // dispose it before re-creating
+        this._nodes[0]?.dispose();
         this._mappings[0] = runWithOwner<MappedItem>(
           (this._nodes[0] = createOwner()),
           this._fallback
@@ -159,15 +174,26 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
     }
     // fast path for new create
     else if (this._len === 0) {
-      // dispose previous fallback
-      if (this._nodes[0]) this._nodes[0].dispose();
-      this._mappings = new Array(newLen);
+      const mappings: MappedItem[] = new Array(newLen);
+      const nodes: Root[] = new Array(newLen);
+      rows = this._rows && new Array(newLen);
+      indexes = this._indexes && new Array(newLen);
 
-      for (j = 0; j < newLen; j++) {
-        this._items[j] = newItems[j];
-        this._mappings[j] = runWithOwner<MappedItem>((this._nodes[j] = createOwner()), mapper);
+      try {
+        for (j = 0; j < newLen; j++)
+          mappings[j] = runWithOwner<MappedItem>((nodes[j] = createOwner()), mapper)!;
+      } catch (err) {
+        for (i = 0; i <= j!; i++) nodes[i]?.dispose();
+        throw err;
       }
 
+      // commit
+      if (this._nodes[0]) this._nodes[0].dispose(); // previous fallback
+      this._mappings = mappings;
+      this._nodes = nodes;
+      rows && (this._rows = rows);
+      indexes && (this._indexes = indexes);
+      this._items = newItems.slice(0);
       this._len = newLen;
     } else {
       let start: number,
@@ -177,10 +203,12 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         key: any,
         newIndices: Map<Item, number>,
         newIndicesNext: number[],
+        removed: Root[] | undefined,
+        created: Root[] | undefined,
         temp: MappedItem[] = new Array(newLen),
-        tempNodes: Root[] = new Array(newLen),
-        tempRows: Signal<Item>[] | undefined = this._rows ? new Array(newLen) : undefined,
-        tempIndexes: Signal<number>[] | undefined = this._indexes ? new Array(newLen) : undefined;
+        tempNodes: Root[] = new Array(newLen);
+      rows = this._rows ? new Array(newLen) : undefined;
+      indexes = this._indexes ? new Array(newLen) : undefined;
 
       // skip common prefix
       for (
@@ -204,8 +232,8 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
       ) {
         temp[newEnd] = this._mappings[end];
         tempNodes[newEnd] = this._nodes[end];
-        tempRows && (tempRows[newEnd] = this._rows![end]);
-        tempIndexes && (tempIndexes[newEnd] = this._indexes![end]);
+        rows && (rows[newEnd] = this._rows![end]);
+        indexes && (indexes[newEnd] = this._indexes![end]);
       }
 
       // 0) prepare a map of all indices in newItems, scanning backwards so we encounter them in natural order
@@ -219,7 +247,7 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         newIndices.set(key, j);
       }
 
-      // 1) step through all old items and see if they can be found in the new set; if so, save them in a temp array and mark them moved; if not, exit them
+      // 1) step through all old items and see if they can be found in the new set; if so, save them in a temp array and mark them moved; if not, queue them for disposal at commit
       for (i = start; i <= end; i++) {
         item = this._items[i];
         key = this._key ? this._key(item) : item;
@@ -227,35 +255,44 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         if (j !== undefined && j !== -1) {
           temp[j] = this._mappings[i];
           tempNodes[j] = this._nodes[i];
-          tempRows && (tempRows[j] = this._rows![i]);
-          tempIndexes && (tempIndexes[j] = this._indexes![i]);
+          rows && (rows[j] = this._rows![i]);
+          indexes && (indexes[j] = this._indexes![i]);
           j = newIndicesNext[j];
           newIndices.set(key, j);
-        } else this._nodes[i].dispose();
+        } else (removed ??= []).push(this._nodes[i]);
       }
 
-      // 2) set all the new values, pulling from the temp array if copied, otherwise entering the new value
+      // 2) create new rows into the temp arrays; an abort disposes only these
+      try {
+        for (j = start; j < newLen; j++) {
+          if (j in temp) continue;
+          (created ??= []).push((tempNodes[j] = createOwner()));
+          temp[j] = runWithOwner<MappedItem>(tempNodes[j], mapper)!;
+        }
+      } catch (err) {
+        if (created) for (i = 0; i < created.length; i++) created[i].dispose();
+        throw err;
+      }
+
+      // 3) commit: land positions, then dispose exited rows
       for (j = start; j < newLen; j++) {
-        if (j in temp) {
-          this._mappings[j] = temp[j];
-          this._nodes[j] = tempNodes[j];
-          if (tempRows) {
-            this._rows![j] = tempRows[j];
-            setSignal(this._rows![j], newItems[j]);
-          }
-          if (tempIndexes) {
-            this._indexes![j] = tempIndexes[j];
-            setSignal(this._indexes![j], j);
-          }
-        } else {
-          this._mappings[j] = runWithOwner<MappedItem>((this._nodes[j] = createOwner()), mapper);
+        this._mappings[j] = temp[j];
+        this._nodes[j] = tempNodes[j];
+        if (rows) {
+          this._rows![j] = rows[j];
+          setSignal(this._rows![j], newItems[j]);
+        }
+        if (indexes) {
+          this._indexes![j] = indexes[j];
+          setSignal(this._indexes![j], j);
         }
       }
+      if (removed) for (i = 0; i < removed.length; i++) removed[i].dispose();
 
-      // 3) in case the new set is shorter than the old, set the length of the mapped array
+      // 4) in case the new set is shorter than the old, set the length of the mapped array
       this._mappings = this._mappings.slice(0, (this._len = newLen));
 
-      // 4) save a copy of the mapped items for the next update
+      // 5) save a copy of the mapped items for the next update
       this._items = newItems.slice(0);
     }
   });
@@ -298,23 +335,33 @@ export function repeat(
           }
         }
       : map;
-  const node = computed(
-    updateRepeat.bind({
-      _owner: createOwner(),
-      _len: 0,
-      _offset: 0,
-      _count: count,
-      _map: wrappedMap,
-      _nodes: [],
-      _mappings: [],
-      _from: options?.from,
-      _fallback: options?.fallback
-    })
-  );
+  const data: RepeatData = {
+    _owner: createOwner(),
+    _len: 0,
+    _offset: 0,
+    _count: count,
+    _map: wrappedMap,
+    _nodes: [],
+    _mappings: [],
+    _from: options?.from,
+    _fallback: options?.fallback
+  };
+  const node = computed(updateRepeat.bind(data));
+  // Same as mapArray: untracked reads inside the internal owner resolve via
+  // _parentComputed, so async reads in row callbacks register with the node
+  // (pending tracking + post-settle retry) instead of vanishing.
+  data._owner._parentComputed = node;
   node._config &= ~CONFIG_AUTO_DISPOSE;
   return accessor(node);
 }
 
+// Same staged-commit discipline as `updateKeyedMap` (#2903): the retained
+// window overlap is copied into fresh arrays, missing indexes are created
+// into them, and `this` is only touched — including disposal of rows leaving
+// the window — after every `_map` call succeeded. A NotReadyError mid-pass
+// disposes only the owners this pass created and leaves prior state intact
+// for the post-settle retry. The overlap math also subsumes the previous
+// disjoint-window/front-clear/end-clear/shift special cases.
 function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
   const newLen = this._count();
   const from = this._from?.() || 0;
@@ -325,14 +372,13 @@ function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
         this._nodes = [];
         this._mappings = [];
         this._len = 0;
-        // Reset offset to match the cleared data. Without this, a subsequent
-        // nonzero render with a smaller `from` would enter the end-clear loop
-        // with `prevTo = stale_offset + 0` > `to` and dispose `_nodes[-1]`
-        // (#2767, repro 2).
+        // Reset offset to match the cleared data (#2767, repro 2).
         this._offset = 0;
       }
       if (this._fallback && !this._mappings[0]) {
-        // create fallback
+        // an aborted fallback attempt leaves an owner without a mapping;
+        // dispose it before re-creating
+        this._nodes[0]?.dispose();
         this._mappings[0] = runWithOwner<MappedItem>(
           (this._nodes[0] = createOwner()),
           this._fallback
@@ -342,59 +388,37 @@ function updateRepeat<MappedItem>(this: RepeatData<MappedItem>): any[] {
     }
     const to = from + newLen;
     const prevTo = this._offset + this._len;
+    // Retained overlap [keepStart, keepEnd) in global indexes; empty when the
+    // windows are disjoint or when coming from empty/fallback.
+    const keepStart = Math.max(from, this._offset);
+    const keepEnd = Math.min(to, prevTo);
 
-    // remove fallback
-    if (this._len === 0 && this._nodes[0]) this._nodes[0].dispose();
-
-    // Disjoint windows have no rows to retain; replace them wholesale.
-    if (from >= prevTo || to <= this._offset) {
-      for (let i = 0; i < this._len; i++) this._nodes[i].dispose();
-      this._nodes = new Array(newLen);
-      this._mappings = new Array(newLen);
-      for (let i = 0; i < newLen; i++)
-        this._mappings[i] = runWithOwner<MappedItem>((this._nodes[i] = createOwner()), () =>
-          this._map(from + i)
-        );
-      this._offset = from;
-      this._len = newLen;
-      return;
+    const mappings: MappedItem[] = new Array(newLen);
+    const nodes: Root[] = new Array(newLen);
+    for (let i = keepStart; i < keepEnd; i++) {
+      nodes[i - from] = this._nodes[i - this._offset];
+      mappings[i - from] = this._mappings[i - this._offset];
     }
-
-    // clear the end
-    for (let i = to; i < prevTo; i++) this._nodes[i - this._offset].dispose();
-
-    if (this._offset < from) {
-      // clear beginning — `_nodes` is local-indexed, so the rows leaving the
-      // front sit at local positions 0..(from - _offset), clamped to old len.
-      const removed = from - this._offset;
-      for (let i = 0; i < removed && i < this._len; i++) this._nodes[i].dispose();
-      // shift indexes
-      this._nodes.splice(0, removed);
-      this._mappings.splice(0, removed);
-    } else if (this._offset > from) {
-      // shift indexes
-      let i = prevTo - this._offset - 1;
-      let difference = this._offset - from;
-      this._nodes.length = this._mappings.length = newLen;
-      while (i >= difference) {
-        this._nodes[i] = this._nodes[i - difference];
-        this._mappings[i] = this._mappings[i - difference];
-        i--;
+    try {
+      for (let i = from; i < to; i++) {
+        if (i >= keepStart && i < keepEnd) continue;
+        mappings[i - from] = runWithOwner<MappedItem>((nodes[i - from] = createOwner()), () =>
+          this._map(i)
+        )!;
       }
-      for (let i = 0; i < difference; i++) {
-        this._mappings[i] = runWithOwner<MappedItem>((this._nodes[i] = createOwner()), () =>
-          this._map(i + from)
-        );
-      }
+    } catch (err) {
+      for (let i = from; i < to; i++)
+        if ((i < keepStart || i >= keepEnd) && nodes[i - from]) nodes[i - from].dispose();
+      throw err;
     }
 
-    for (let i = prevTo; i < to; i++) {
-      this._mappings[i - from] = runWithOwner<MappedItem>(
-        (this._nodes[i - from] = createOwner()),
-        () => this._map(i)
-      );
-    }
-    this._mappings = this._mappings.slice(0, newLen);
+    // commit: dispose the previous fallback or the rows leaving the window
+    if (this._len === 0) this._nodes[0]?.dispose();
+    else
+      for (let i = this._offset; i < prevTo; i++)
+        if (i < from || i >= to) this._nodes[i - this._offset].dispose();
+    this._mappings = mappings;
+    this._nodes = nodes;
     this._offset = from;
     this._len = newLen;
   });
