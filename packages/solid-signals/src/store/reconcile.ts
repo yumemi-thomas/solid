@@ -5,7 +5,9 @@ import {
   $TARGET,
   $TRACK,
   getKeys,
+  getStoreSymbols,
   isWrappable,
+  STORE_DESC,
   STORE_HAS,
   STORE_LOOKUP,
   STORE_NODE,
@@ -149,6 +151,52 @@ function applyArrayItem(
   } else node && setSignal(node, wrapValue(next, target));
 }
 
+/**
+ * The captured-proxy half of the object diff (#2902): descend into keyed-
+ * matching children that have NO node at this level but shelter subscribers
+ * somewhere below (their target's sticky `STORE_DESC` flag, bubbled up by
+ * `getNode`). Without this, a proxy captured through untracked reads — a
+ * `<For>` row handed to a child component — detaches from the diff the
+ * moment no intermediate level happens to be tracked, and its live
+ * subscribers go permanently stale. Never-subscribed branches have no flag
+ * and stay pruned exactly as before; keys the main loop already visited
+ * (node present) are skipped. Callers gate on the parent's own flag and on
+ * `$TRACK` absence (an enumeration-tracked record already diffs every key).
+ */
+function applyDescendants(
+  previous: any,
+  next: any,
+  target: any,
+  nodes: any,
+  keyFn: (item: NonNullable<any>) => any,
+  override?: any,
+  optOverride?: any
+) {
+  const lookup = target[STORE_LOOKUP] || storeLookup;
+  const keys = (
+    override ? getKeys(previous, override) : (Object.keys(previous) as PropertyKey[])
+  ).concat(getStoreSymbols(previous, override));
+  for (let i = 0, len = keys.length; i < len; i++) {
+    const key = keys[i];
+    if (nodes?.[key]) continue; // main loop already diffed this slot
+    const previousValue = unwrap(
+      override ? getOverrideValue(previous, override, key, optOverride) : previous[key]
+    );
+    if (!isWrappable(previousValue)) continue;
+    const childTarget = (lookup.get(previousValue) ?? storeLookup.get(previousValue))?.[$TARGET];
+    if (!childTarget?.[STORE_DESC]) continue;
+    const nextValue = unwrap(next[key]);
+    if (
+      previousValue === nextValue ||
+      !isWrappable(nextValue) ||
+      Array.isArray(previousValue) !== Array.isArray(nextValue) ||
+      (keyFn(previousValue) != null && keyFn(previousValue) !== keyFn(nextValue))
+    )
+      continue;
+    applyState(nextValue, wrap(previousValue, target), keyFn);
+  }
+}
+
 // Dispatcher: every applyState call (including recursion) checks for the
 // presence of override / optimistic-override slots once and routes to the
 // appropriate body. The fast body never calls `getOverrideValue` and never
@@ -274,8 +322,9 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
 
   // values
   let nodes = target[STORE_NODE];
+  let tracked;
   if (nodes) {
-    const tracked = nodes[$TRACK];
+    tracked = nodes[$TRACK];
     const keys = tracked ? getAllKeys(previous, undefined, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
@@ -295,6 +344,7 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       } else applyState(nextValue, wrap(previousValue, target), keyFn);
     }
   }
+  if (!tracked && target[STORE_DESC]) applyDescendants(previous, next, target, nodes, keyFn);
 
   // has
   if ((nodes = target[STORE_HAS])) {
@@ -426,8 +476,9 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
   }
 
   // values
+  let tracked;
   if (nodes) {
-    const tracked = nodes[$TRACK];
+    tracked = nodes[$TRACK];
     const keys = tracked ? getAllKeys(previous, override, next) : nodeKeys(nodes);
     for (let i = 0, len = keys.length; i < len; i++) {
       const key = keys[i];
@@ -447,6 +498,8 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
       } else applyState(nextValue, wrap(previousValue, target), keyFn);
     }
   }
+  if (!tracked && target[STORE_DESC])
+    applyDescendants(previous, next, target, nodes, keyFn, override, optOverride);
 
   // has
   if ((nodes = target[STORE_HAS])) {

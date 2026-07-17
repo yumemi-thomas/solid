@@ -100,7 +100,9 @@ export const STORE_VALUE = "v",
   STORE_LOOKUP = "l",
   STORE_FIREWALL = "f",
   STORE_OPTIMISTIC = "p",
-  STORE_OPTIMISTIC_OWNERS = "t";
+  STORE_OPTIMISTIC_OWNERS = "t",
+  STORE_PARENT = "u",
+  STORE_DESC = "d";
 const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
@@ -121,6 +123,16 @@ export type StoreNode = {
   [STORE_FIREWALL]?: Computed<any>;
   [STORE_OPTIMISTIC]?: boolean;
   [STORE_SNAPSHOT_PROPS]?: Record<PropertyKey, any>;
+  // Wrap-time back-link to the target this one was first wrapped under.
+  // Serves node-presence bubbling (#2902); roots and store-in-store roots
+  // have none. First wrapper wins — diamond reachability is untracked.
+  [STORE_PARENT]?: StoreNode;
+  // Sticky "this subtree (self included) carries signal nodes" flag, set by
+  // getNode and bubbled up STORE_PARENT. Reconcile's object diff descends
+  // into node-less children only when this is set, so never-subscribed
+  // branches stay pruned (#2902). Never cleared: precision degrades toward
+  // over-descent only for subscribe-then-unsubscribe churn.
+  [STORE_DESC]?: boolean;
 };
 
 export namespace SolidStore {
@@ -164,9 +176,17 @@ export const storeLookup = new WeakMap();
 // Lets reconcile enumerate symbols only for records that need it (#2851).
 export const symbolKeyedRecords = new WeakSet<object>();
 export function wrap<T extends Record<PropertyKey, any>>(value: T, target?: StoreNode): T {
-  if (target?.[STORE_WRAP]) return target[STORE_WRAP](value, target);
+  if (target?.[STORE_WRAP]) {
+    const p = target[STORE_WRAP](value, target);
+    const t: StoreNode | undefined = p[$TARGET];
+    if (t && !t[STORE_PARENT] && t !== target) t[STORE_PARENT] = target;
+    return p;
+  }
   let p = value[$PROXY] || storeLookup.get(value);
-  if (!p) storeLookup.set(value, (p = createStoreProxy(value)));
+  if (!p) {
+    storeLookup.set(value, (p = createStoreProxy(value)));
+    if (target) p[$TARGET][STORE_PARENT] = target;
+  }
   return p;
 }
 
@@ -343,6 +363,15 @@ function getNode<T>(
   // record's own $AFFECTS carrier is the mark's channel, never a member.
   if (property !== $AFFECTS && affectsScopes.size)
     inheritAffectsMarks(s, target[STORE_VALUE], property);
+  // Node presence bubbles up the wrap chain (sticky), so reconcile can see
+  // "subscribers live somewhere below" through node-less intermediate
+  // records — the captured-proxy diff gate (#2902). Amortized O(1): stops at
+  // the first already-flagged ancestor.
+  let t: StoreNode | undefined = target;
+  while (t && !t[STORE_DESC]) {
+    t[STORE_DESC] = true;
+    t = t[STORE_PARENT];
+  }
   return (nodes[property] = s);
 }
 
