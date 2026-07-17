@@ -319,6 +319,13 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
         node.id = undefined;
         ownerPool.push(node);
       }
+    } else {
+      // Id slots can be consumed without creating child owners
+      // (createUniqueId, ssrScope reservations, client-computed slots), so a
+      // retry reset (`self=false`) must still rewind the counter — otherwise
+      // every boundary discovery pass drifts the ids of the eventual
+      // successful run past the client's (#2900).
+      node._childCount = 0;
     }
     return;
   }
@@ -348,6 +355,23 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
     node.id = undefined;
     ownerPool.push(node);
   }
+}
+
+/**
+ * Client parity for async retries (#2900): on the client every recompute
+ * disposes the owner's children and resets `_childCount`, so child hydration
+ * ids are stable across reruns. Call before re-running a compute under the
+ * same owner. Runs the owner's own `_disposal` too — the failed run's
+ * onCleanups must fire like any recompute's — which is why the retrying
+ * primitives register their lifecycle cleanup (`comp.disposed`) on the
+ * creation context rather than on `owner`: a retry must not cancel itself.
+ *
+ * @internal
+ */
+export function resetOwnerForRerun(owner: Owner): void {
+  const node = owner as unknown as SSROwner;
+  if (node._firstChild || node._disposal) disposeOwner(owner, false);
+  node._childCount = 0;
 }
 
 export function createRoot<T>(
@@ -602,18 +626,21 @@ export function createMemo<T>(
     computed: false,
     disposed: false
   };
-  // When the owner is disposed (e.g., Loading boundary retries), mark the computation
-  // so in-flight Promise chains don't produce stale serialization.
-  runWithOwner(owner, () =>
-    onCleanup(() => {
-      comp.disposed = true;
-    })
-  );
+  // When the surrounding scope is disposed (e.g., Loading boundary retries),
+  // mark the computation so in-flight Promise chains don't produce stale
+  // serialization. Registered on the creation context, NOT on `owner`:
+  // async-retry reruns reset `owner` via resetOwnerForRerun (which runs its
+  // `_disposal`), and a self-registered flag would cancel the retry (#2900).
+  onCleanup(() => {
+    comp.disposed = true;
+  });
 
   function update() {
     if (comp.disposed) return;
-    const run = () =>
-      runWithOwner(owner, () => runWithObserver(comp, () => comp.compute(comp.value)));
+    const run = () => {
+      resetOwnerForRerun(owner);
+      return runWithOwner(owner, () => runWithObserver(comp, () => comp.compute(comp.value)));
+    };
     try {
       comp.error = undefined;
       comp.errored = false;
@@ -701,14 +728,12 @@ function createSyncMemo<T>(
     const prev = currentOwner;
     currentOwner = owner as unknown as SSROwner;
     // A pull after `NotReadyError` re-runs the compute under the same owner.
-    // The client resets an owner's child state on every recompute (dispose +
-    // `_childCount = 0`), so mirror that here — otherwise every failed pull
-    // leaks the child-id slots it consumed (e.g. the compiler-emitted inner
-    // memo of `{cond && <jsx>}`) and the hydration keys of everything created
-    // by the eventual successful pull drift ahead of the client's (#2801).
-    const o = owner as unknown as SSROwner;
-    if (o._firstChild || o._disposal) disposeOwner(owner, false);
-    o._childCount = 0;
+    // Mirror the client's per-recompute child reset — otherwise every failed
+    // pull leaks the child-id slots it consumed (e.g. the compiler-emitted
+    // inner memo of `{cond && <jsx>}`) and the hydration keys of everything
+    // created by the eventual successful pull drift ahead of the client's
+    // (#2801, generalized to all retry paths in #2900).
+    resetOwnerForRerun(owner);
     try {
       value = compute(value) as T;
       error = undefined;
@@ -1023,11 +1048,10 @@ function serverEffect<T>(
     disposed: false
   };
   if (ssrSource || effectFn) {
-    runWithOwner(owner, () =>
-      onCleanup(() => {
-        comp.disposed = true;
-      })
-    );
+    // On the creation context, not `owner` — retry resets `owner` (#2900).
+    onCleanup(() => {
+      comp.disposed = true;
+    });
   }
   try {
     const result = runWithOwner(owner, () =>
@@ -1058,6 +1082,7 @@ function serverEffect<T>(
         const retry = () => {
           if (comp.disposed) return;
           try {
+            resetOwnerForRerun(owner);
             const result = runWithOwner(owner, () =>
               runWithObserver(comp, () => (compute as ComputeFunction<any, T>)(undefined))
             );
@@ -1216,18 +1241,20 @@ export function createProjection<T extends object>(
   }
 
   let disposed = false;
-  runWithOwner(owner, () =>
-    onCleanup(() => {
-      disposed = true;
-    })
-  );
+  // On the creation context, not `owner` — retry resets `owner` (#2900).
+  onCleanup(() => {
+    disposed = true;
+  });
 
   const ssrSource = options?.ssrSource;
   const useProxy = ssrSource !== "hybrid";
   const patches: PatchOp[] = [];
   const draft = useProxy ? createDeepProxy(state as any, patches) : (state as any as T);
 
-  const runProjection = () => runWithOwner(owner, () => fn(draft));
+  const runProjection = () => {
+    resetOwnerForRerun(owner);
+    return runWithOwner(owner, () => fn(draft));
+  };
   let result: void | T | Promise<void | T> | AsyncIterable<void | T>;
   try {
     result = runProjection();
