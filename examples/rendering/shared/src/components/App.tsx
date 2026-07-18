@@ -2,11 +2,13 @@ import { isPending, lazy, Match, Switch } from "solid-js";
 import { Link, RouteHOC, useRouter } from "../router";
 import Profile from "./Profile";
 
-const Home = lazy(() => import("./Home"), "./Home");
-const Settings = lazy(() => import("./Settings"), "./Settings");
-const Stream = lazy(() => import("./Stream"), "./Stream");
-const ErrorStream = lazy(() => import("./ErrorStream"), "./ErrorStream");
-const RevealPage = lazy(() => import("./Reveal"), "./Reveal");
+// vite-plugin-solid's lazy() module-URL pass keys these against the client
+// manifest automatically — no hand-written module keys needed.
+const Home = lazy(() => import("./Home"));
+const Settings = lazy(() => import("./Settings"));
+const Stream = lazy(() => import("./Stream"));
+const ErrorStream = lazy(() => import("./ErrorStream"));
+const RevealPage = lazy(() => import("./Reveal"));
 
 const App = RouteHOC(() => {
   const [location, { matches }] = useRouter();

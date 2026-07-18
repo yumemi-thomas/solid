@@ -1,7 +1,7 @@
 import { createMemo, lazy } from "solid-js";
 import type { User } from "./Profile";
 
-const Profile = lazy(() => import("./Profile"), "./Profile/Profile");
+const Profile = lazy(() => import("./Profile"));
 
 // this component lazy loads data and code in parallel
 export default () => {

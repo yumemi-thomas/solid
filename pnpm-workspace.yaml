@@ -21,6 +21,13 @@ overrides:
   #   pnpm --filter @dom-expressions/compiler run build:debug   (in ../dom-expressions)
   # (the .node artifacts are gitignored local builds).
   '@dom-expressions/compiler': link:../dom-expressions/packages/compiler
+  # TEMPORARY: the examples and the test infrastructure dogfood the current
+  # vite-plugin-solid pipeline (native-first JSX, native lazy/refresh passes,
+  # solid-js/refresh runtime), which is not published yet. Link the sibling
+  # checkout (branch `next`) until the next release, then remove this
+  # override and pin the released version. The link resolves its own deps
+  # (including @dom-expressions/compiler) from that checkout's node_modules.
+  vite-plugin-solid: link:../vite-plugin-solid
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
