@@ -2,11 +2,11 @@
 
 import { defineConfig } from "vitest/config";
 // vite-plugin-solid is TEMPORARILY linked to the sibling checkout (see
-// pnpm-workspace.yaml). Test JSX compiles with Babel by default;
-// `JSX_COMPILER=native` switches to the native Rust compiler for A/B.
+// pnpm-workspace.yaml). Test JSX compiles with the native Rust compiler by
+// default; `JSX_COMPILER=babel` switches to the Babel transform for A/B.
 import solidPlugin from "vite-plugin-solid";
 
-const compiler = process.env.JSX_COMPILER === "native" ? "native" : "babel";
+const compiler = process.env.JSX_COMPILER === "babel" ? "babel" : "native";
 import { resolve } from "path";
 
 const rootDir = resolve(import.meta.dirname);
