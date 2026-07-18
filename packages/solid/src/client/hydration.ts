@@ -283,13 +283,22 @@ function syncThenable(value: any) {
   };
 }
 
-const NO_HYDRATED_VALUE = Symbol("NO_HYDRATED_VALUE");
-
+/**
+ * Unwrap a serialized hydration map entry. Only call when the map HAS an
+ * entry for this id — presence is the caller's decision (`sharedConfig.has`),
+ * because the serialized value itself may be null/undefined (#2914).
+ *
+ * Settled serialization refs are (promise) objects stamped with a numeric
+ * status `s` (1 = fulfilled, 2 = rejected) and payload `v`. The payload is
+ * read directly — `v ?? ref` would leak the ref object for nullish payloads.
+ */
 function readHydratedValue(initP: any, refresh: () => void) {
-  if (initP == null) return NO_HYDRATED_VALUE;
   refresh();
-  if (typeof initP === "object" && initP.s === 2) throw initP.v;
-  return initP?.v ?? initP;
+  if (initP != null && typeof initP === "object") {
+    if (initP.s === 2) throw initP.v;
+    if (initP.s === 1) return initP.v;
+  }
+  return initP;
 }
 
 /** Shared “serialized init or run compute” path for memo/signal/optimistic/effect under hydration. */
@@ -301,11 +310,8 @@ function readSerializedOrCompute(compute: (prev: any) => any, prev: any) {
   // there would commit a fresh Promise and orphan the server-streamed fragment.
   // So short-circuit to the server value whenever one is still waiting; once
   // hydration is `done`, always compute.
-  const hasSerialized = !sharedConfig.done && sharedConfig.has!(o.id!);
-  if (!sharedConfig.hydrating && !hasSerialized) return compute(prev);
-  const initP = hasSerialized ? sharedConfig.load!(o.id!) : undefined;
-  const init = readHydratedValue(initP, () => subFetch(compute, prev));
-  return init !== NO_HYDRATED_VALUE ? init : compute(prev);
+  if (sharedConfig.done || !sharedConfig.has!(o.id!)) return compute(prev);
+  return readHydratedValue(sharedConfig.load!(o.id!), () => subFetch(compute, prev));
 }
 
 function forwardIteratorReturn(it: any, value?: any) {
@@ -678,11 +684,8 @@ function hydrateStoreLikeFn(
       (draft: any) => {
         const o = getOwner()!;
         if (!hydrated()) {
-          if (sharedConfig.has!(o.id!)) {
-            const initP = sharedConfig.load!(o.id!);
-            const init = readHydratedValue(initP, () => subFetch(fn, draft));
-            if (init !== NO_HYDRATED_VALUE) return init;
-          }
+          if (sharedConfig.has!(o.id!))
+            return readHydratedValue(sharedConfig.load!(o.id!), () => subFetch(fn, draft));
           return fn(draft);
         }
         const { proxy, activate } = createShadowDraft(draft);

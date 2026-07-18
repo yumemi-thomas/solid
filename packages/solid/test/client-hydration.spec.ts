@@ -490,6 +490,89 @@ describe("Error Boundary Hydration", () => {
   });
 });
 
+describe("Nullish serialized values (#2914)", () => {
+  afterEach(() => {
+    stopHydration();
+  });
+
+  test("settled ref { s: 1, v: null } hydrates to null, not the ref object", () => {
+    startHydration({ t0: { s: 1, v: null } });
+
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() => "client")();
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(result).toBeNull();
+  });
+
+  test("settled ref { s: 1, v: undefined } hydrates to undefined", () => {
+    startHydration({ t0: { s: 1, v: undefined } });
+
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() => "client")();
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(result).toBeUndefined();
+  });
+
+  test("directly serialized null adopts the server value instead of computing", () => {
+    startHydration({ t0: null });
+
+    let result: any;
+    createRoot(
+      () => {
+        // The compute body still runs under subFetch (fetch-replay priming),
+        // but its return value must be discarded in favor of the server null.
+        result = createMemo(() => "client")();
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(result).toBeNull();
+  });
+
+  test("directly serialized undefined adopts the server value instead of computing", () => {
+    startHydration({ t0: undefined });
+
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() => "client")();
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(result).toBeUndefined();
+  });
+
+  test("hybrid store: settled ref with null payload hydrates to null", () => {
+    startHydration({ t0: { s: 1, v: null } });
+
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() => "client", { ssrSource: "hybrid" })();
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(result).toBeNull();
+  });
+});
+
 describe("createOptimistic Hydration", () => {
   afterEach(() => {
     stopHydration();
