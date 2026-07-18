@@ -170,6 +170,8 @@ export function Switch(props: { fallback?: SolidElement; children: SolidElement 
       if (!Array.isArray(conds)) conds = [conds];
 
       for (let i = 0; i < conds.length; i++) {
+        // Nullish slots come from conditionally excluded Matches (#2911).
+        if (conds[i] == null) continue;
         const w = conds[i].when;
         if (w) {
           const c = conds[i].children;

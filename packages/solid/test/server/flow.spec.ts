@@ -117,6 +117,24 @@ describe("Server Switch/Match", () => {
     );
   });
 
+  test("skips nullish child slots from conditionally excluded Matches (#2911)", () => {
+    createRoot(
+      () => {
+        const result = Switch({
+          fallback: "none",
+          children: [
+            undefined, // false <Show> around a <Match> resolves to this
+            Match({ when: false, children: "first" }),
+            null,
+            Match({ when: true, children: "second" })
+          ] as any
+        });
+        expect(typeof result === "function" ? (result as any)() : result).toBe("second");
+      },
+      { id: "test" }
+    );
+  });
+
   test("passes raw value to keyed matching case", () => {
     createRoot(
       () => {

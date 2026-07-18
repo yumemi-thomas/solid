@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "vitest";
 import { render } from "../src/index.js";
-import { createRoot, createSignal, Switch, Match, For, createStore, flush } from "solid-js";
+import { createRoot, createSignal, Switch, Match, For, Show, createStore, flush } from "solid-js";
 
 describe("Testing a single match switch control flow", () => {
   let div!: HTMLDivElement, disposer: () => void;
@@ -433,6 +433,60 @@ describe("Testing a For in a Switch control flow", () => {
     });
     flush();
     expect(div.innerHTML).toBe("Gordy");
+  });
+
+  test("dispose", () => disposer());
+});
+
+describe("Conditionally included Match children (#2911)", () => {
+  // A false <Show> (feature flag, permission, route guard) resolves to
+  // undefined in Switch's children array. Switch must skip the nullish slot
+  // — same tolerance boolean children already get — not crash the app.
+  let div!: HTMLDivElement, disposer: () => void;
+  const [extra, setExtra] = createSignal(false);
+  const [route, setRoute] = createSignal("b");
+  const Component = () => (
+    <div ref={div}>
+      <Switch fallback={<span>none</span>}>
+        <Show when={extra()}>
+          <Match when={route() === "b"}>
+            <span>EXTRA-B</span>
+          </Match>
+        </Show>
+        <Match when={route() === "a"}>
+          <span>A</span>
+        </Match>
+        <Match when={route() === "b"}>
+          <span>B</span>
+        </Match>
+      </Switch>
+    </div>
+  );
+
+  test("mounts with the gate off (nullish child slot)", () => {
+    createRoot(dispose => {
+      disposer = dispose;
+      <Component />;
+    });
+    expect(div.innerHTML).toBe("<span>B</span>");
+  });
+
+  test("gate on: gated Match participates in selection order", () => {
+    setExtra(true);
+    flush();
+    expect(div.innerHTML).toBe("<span>EXTRA-B</span>");
+  });
+
+  test("gate back off: selection falls through to later matches", () => {
+    setExtra(false);
+    flush();
+    expect(div.innerHTML).toBe("<span>B</span>");
+    setRoute("a");
+    flush();
+    expect(div.innerHTML).toBe("<span>A</span>");
+    setRoute("x");
+    flush();
+    expect(div.innerHTML).toBe("<span>none</span>");
   });
 
   test("dispose", () => disposer());

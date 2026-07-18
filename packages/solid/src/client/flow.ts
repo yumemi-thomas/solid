@@ -252,6 +252,9 @@ export function Switch(props: { fallback?: SolidElement; children: SolidElement 
       for (let i = 0; i < mps.length; i++) {
         const index = i;
         const mp = mps[i];
+        // A conditionally excluded Match (false <Show> around it) resolves to
+        // a nullish slot — skip it like boolean children already are (#2911).
+        if (mp == null) continue;
         const prevFunc = func;
         // Per-match `mp.when` is user input — keep async-shape aware.
         const conditionValue = createMemo(
