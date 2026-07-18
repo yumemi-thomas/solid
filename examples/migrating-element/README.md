@@ -76,7 +76,12 @@ migration becomes a single move.
 ```bash
 pnpm install
 pnpm --filter migrating-element-example dev
-# in another terminal
+```
+
+Or for a production build served by `vite preview`:
+
+```bash
+pnpm --filter migrating-element-example build
 pnpm --filter migrating-element-example start
 ```
 

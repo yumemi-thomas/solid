@@ -95,6 +95,26 @@
         "default": "./dist/solid.cjs"
       }
     },
+    "./refresh": {
+      "development": {
+        "import": {
+          "types": "./types/refresh/index.d.ts",
+          "default": "./dist/refresh.dev.js"
+        },
+        "require": {
+          "types": "./types-cjs/refresh/index.d.cts",
+          "default": "./dist/refresh.dev.cjs"
+        }
+      },
+      "import": {
+        "types": "./types/refresh/index.d.ts",
+        "default": "./dist/refresh.js"
+      },
+      "require": {
+        "types": "./types-cjs/refresh/index.d.cts",
+        "default": "./dist/refresh.cjs"
+      }
+    },
     "./types/*": "./types/*",
     "./package.json": "./package.json"
   },

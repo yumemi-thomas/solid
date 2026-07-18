@@ -4,7 +4,7 @@ import App from "../shared/src/components/App";
 
 hydrate(
   () => (
-    <Shell>
+    <Shell clientEntry="/client.tsx">
       <App />
     </Shell>
   ),

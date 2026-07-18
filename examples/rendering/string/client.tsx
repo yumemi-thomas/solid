@@ -8,7 +8,7 @@ import App from "../shared/src/components/App";
 // for async routes. Hydration must render the same tree shape.
 hydrate(
   () => (
-    <Shell>
+    <Shell clientEntry="/client.tsx">
       <Loading fallback={<div>Loading…</div>}>
         <App />
       </Loading>

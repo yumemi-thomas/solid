@@ -22,7 +22,7 @@ pnpm --filter todos-example start
 
 Then open <http://localhost:3002>.
 
-For a watch build:
+For the dev server (HMR via the plugin's refresh pipeline):
 
 ```bash
 pnpm --filter todos-example dev

@@ -1,5 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
+  "globalEnv": ["JSX_COMPILER"],
   "tasks": {
     "build": {
       "dependsOn": ["^build", "^types"],
