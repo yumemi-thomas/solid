@@ -11,19 +11,9 @@ minimumReleaseAgeExclude:
   - '@dom-expressions/hyperscript'
   - '@dom-expressions/runtime'
   - '@dom-expressions/tagged-jsx'
+  - 'vite-plugin-solid'
 
 overrides:
-  # TEMPORARY: the examples and the test infrastructure dogfood the current
-  # vite-plugin-solid pipeline (native-first JSX, native lazy/refresh passes,
-  # solid-js/refresh runtime), which is not published yet. Link the sibling
-  # checkout (branch `next`) until the next release, then remove this
-  # override and pin the released version. The link resolves its own deps
-  # from that checkout's node_modules — including @dom-expressions/compiler,
-  # which is itself linked there to the sibling dom-expressions checkout and
-  # needs a locally built binary:
-  #   pnpm --filter @dom-expressions/compiler run build:debug   (in ../dom-expressions)
-  # (the .node artifacts are gitignored local builds).
-  vite-plugin-solid: link:../vite-plugin-solid
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*

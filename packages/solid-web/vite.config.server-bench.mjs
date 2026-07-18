@@ -5,9 +5,8 @@
 // `*.bench.tsx` files in `test/server/`. Run via `pnpm bench:server`.
 
 import { defineConfig } from "vitest/config";
-// vite-plugin-solid is TEMPORARILY linked to the sibling checkout (see
-// pnpm-workspace.yaml). Test JSX compiles with the native Rust compiler by
-// default; `JSX_COMPILER=babel` switches to the Babel transform for A/B.
+// Test JSX compiles with the native Rust compiler by default;
+// `JSX_COMPILER=babel` switches to the Babel transform for A/B.
 import solidPlugin from "vite-plugin-solid";
 
 const compiler = process.env.JSX_COMPILER === "babel" ? "babel" : "native";

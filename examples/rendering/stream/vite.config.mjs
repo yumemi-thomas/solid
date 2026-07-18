@@ -1,7 +1,6 @@
 import { defineConfig } from "vite";
-// vite-plugin-solid is TEMPORARILY linked to the sibling checkout (see
-// pnpm-workspace.yaml) to dogfood the current pipeline: native JSX compiler
-// by default, native lazy/refresh passes, solid-js/refresh HMR runtime, and
+// Exercises the current vite-plugin-solid pipeline: native JSX compiler by
+// default, native lazy/refresh passes, solid-js/refresh HMR runtime, and
 // the built-in lazy() manifest handling (`virtual:solid-manifest`).
 import solid from "vite-plugin-solid";
 
