@@ -29,10 +29,22 @@ function restoreTransition<T>(transition: Transition, fn: () => T): T {
  * surrounding UI sees one atomic update per yielded step; nothing is committed
  * until the action either completes or the next `yield` resolves.
  *
- * Yield promises (or any awaitable) inside the generator — the action waits
- * for each before continuing, but the writes you made beforehand are already
- * visible (or held by `<Loading>` if optimistic). Yield bare values for
- * synchronous batched steps.
+ * `yield` is the transaction-safe suspension point: the action waits for a
+ * yielded promise and re-enters the transaction before running the code after
+ * it. A plain `await` does NOT — the runtime has no hook into an async
+ * generator's internal await continuations, so writes to fresh signals
+ * between an `await` and the next `yield` escape the transaction and commit
+ * immediately. `await` is still the ergonomic choice for typed results; just
+ * put a bare `yield` before any writes that follow it:
+ *
+ * ```ts
+ * const saved = await api.createTodo(text); // typed result
+ * yield; // re-enter the transaction before writing
+ * setTodos(t => { ... });
+ * ```
+ *
+ * (For the same reason, don't call `flush()` inside an action body — it
+ * drains the transaction mid-step.)
  *
  * Each call returns a `Promise` that resolves with the generator's return
  * value, or rejects if it throws. Pair with `createOptimistic` /
@@ -43,10 +55,11 @@ function restoreTransition<T>(transition: Transition, fn: () => T): T {
  * ```ts
  * const [todos, setTodos] = createOptimisticStore<Todo[]>([]);
  *
- * const addTodo = action(function* (text: string) {
+ * const addTodo = action(async function* (text: string) {
  *   const tempId = crypto.randomUUID();
  *   setTodos(t => { t.push({ id: tempId, text, pending: true }); }); // optimistic
- *   const saved = yield api.createTodo(text); // network round-trip
+ *   const saved = await api.createTodo(text); // network round-trip, typed
+ *   yield; // re-enter the transaction
  *   setTodos(t => {
  *     const i = t.findIndex(x => x.id === tempId);
  *     if (i >= 0) t[i] = saved;
