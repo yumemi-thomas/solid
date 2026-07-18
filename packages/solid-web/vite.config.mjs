@@ -1,16 +1,19 @@
 /// <reference types="vitest" />
 
 import { defineConfig } from "vitest/config";
-// JSX for tests compiles through scripts/solid-jsx.mjs: Babel by default,
+// vite-plugin-solid is TEMPORARILY linked to the sibling checkout (see
+// pnpm-workspace.yaml). Test JSX compiles with Babel by default;
 // `JSX_COMPILER=native` switches to the native Rust compiler for A/B.
-import solidPlugin from "../../scripts/solid-jsx.mjs";
+import solidPlugin from "vite-plugin-solid";
 import codspeedPlugin from "@codspeed/vitest-plugin";
+
+const compiler = process.env.JSX_COMPILER === "native" ? "native" : "babel";
 import { resolve } from "path";
 
 const rootDir = resolve(__dirname);
 
 export default defineConfig({
-  plugins: [solidPlugin(), codspeedPlugin()],
+  plugins: [solidPlugin({ compiler }), codspeedPlugin()],
   server: {
     port: 3000
   },

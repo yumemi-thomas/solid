@@ -1,9 +1,12 @@
 /// <reference types="vitest" />
 
 import { defineConfig } from "vitest/config";
-// JSX for tests compiles through scripts/solid-jsx.mjs: Babel by default,
+// vite-plugin-solid is TEMPORARILY linked to the sibling checkout (see
+// pnpm-workspace.yaml). Test JSX compiles with Babel by default;
 // `JSX_COMPILER=native` switches to the native Rust compiler for A/B.
-import solidPlugin from "../../scripts/solid-jsx.mjs";
+import solidPlugin from "vite-plugin-solid";
+
+const compiler = process.env.JSX_COMPILER === "native" ? "native" : "babel";
 import { resolve } from "path";
 
 const rootDir = resolve(__dirname);
@@ -12,7 +15,7 @@ export default defineConfig({
   // hot: false — solid-refresh wraps top-level components (e.g. the shared
   // parity-harness scenarios) in HMR wrappers that add owners and break
   // hydration id parity.
-  plugins: [solidPlugin({ hot: false, solid: { dev: true, hydratable: true } })],
+  plugins: [solidPlugin({ compiler, hot: false, solid: { dev: true, hydratable: true } })],
   test: {
     environment: "jsdom",
     pool: "threads",
