@@ -18,7 +18,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  action,
   affects,
+  createMemo,
   createOptimistic,
   createOptimisticStore,
   createRenderEffect,
@@ -109,6 +111,83 @@ describe("loading vs pending: uninitialized derived stores (#2910)", () => {
     expect(isPending(() => s2.s?.a)).toBe(true); // reads through s's proxy
 
     dS.resolve({ a: 1 });
+    await settle();
+    dispose();
+  });
+});
+
+/**
+ * affects() throw surface (ruled 2026-07-17): affects() itself never throws
+ * on any target form — the keyless scope walk reads raw values (never
+ * traps), keyed marks resolve via overlay/raw, and the accessor form uses
+ * the $REFRESH backref without calling the accessor. The ONLY throw surface
+ * is the caller's argument expression: `affects(s.nested, "b")` reads
+ * `s.nested` under normal read semantics, which throw during the
+ * uninitialized window (A25) — before affects() is entered. Nothing to be
+ * done API-side ("even wrapped in a function it'd throw before it returned
+ * the desired store"); during initial load, mark the root instead.
+ */
+describe("affects() throw surface on uninitialized targets", () => {
+  it("never throws for keyless/keyed/accessor forms; only the nested arg fetch throws", async () => {
+    const dStore = deferred<{ a: number; nested: { b: number } }>();
+    const dMemo = deferred<number>();
+    let s!: any, m!: any, dispose!: () => void;
+    createRoot(disp => {
+      dispose = disp;
+      [s] = createOptimisticStore(async () => dStore.promise, { a: 0, nested: { b: 1 } });
+      m = createMemo(async () => dMemo.promise);
+      createRenderEffect(
+        () => {
+          try {
+            m();
+          } catch {}
+          return s;
+        },
+        () => {}
+      );
+    });
+    flush();
+
+    // All three target forms register without reading through the proxy.
+    expect(() => affects(s)).not.toThrow();
+    expect(() => affects(s, "a")).not.toThrow();
+    expect(() => affects(m)).not.toThrow();
+    expect(isPending(() => s.a)).toBe(true);
+
+    // The argument expression is the one throw surface: `s.nested` is an
+    // ordinary read and reads throw while uninitialized.
+    expect(() => affects(s.nested, "b")).toThrow(NotReadyError);
+
+    dStore.resolve({ a: 1, nested: { b: 2 } });
+    dMemo.resolve(1);
+    await settle();
+    // Once landed, the same fetch is fine even mid-refetch/mark windows
+    // (marks are value-transparent; untracked reads see the landed value).
+    expect(() => affects(s.nested, "b")).not.toThrow();
+    dispose();
+  });
+
+  it("inside an action, an uninitialized nested arg fetch rejects the action (loud, typed)", async () => {
+    const d = deferred<{ nested: { b: number } }>();
+    let s!: any, dispose!: () => void;
+    createRoot(disp => {
+      dispose = disp;
+      [s] = createOptimisticStore(async () => d.promise, { nested: { b: 0 } });
+      createRenderEffect(
+        () => s,
+        () => {}
+      );
+    });
+    flush();
+
+    const gate = deferred<void>();
+    const act = action(function* () {
+      affects(s.nested, "b"); // throws fetching s.nested — action rejects
+      yield gate.promise;
+    });
+    await expect(act()).rejects.toBeInstanceOf(NotReadyError);
+
+    d.resolve({ nested: { b: 2 } });
     await settle();
     dispose();
   });
