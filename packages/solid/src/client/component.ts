@@ -112,23 +112,27 @@ export function lazy<T extends Component<any>>(
   fn: () => Promise<{ default: T }>,
   moduleUrl?: string
 ): T & { preload: () => Promise<{ default: T }>; moduleUrl?: string } {
-  let comp: () => T | undefined;
+  let comp: (() => T | undefined) | undefined;
   let p: Promise<{ default: T }> | undefined;
   const wrap: T & { preload?: () => void; moduleUrl?: string } = ((props: any) => {
     // `hydrating` can only be true once enableHydration() installed the slot.
     if (sharedConfig.hydrating) comp = _lazyHydrationLookup!(comp, moduleUrl) as () => T;
-    if (!comp) {
+    // The import (`p`) is shared across instances, but the memo tracking it
+    // must be owned per instance: a shared memo dies with whichever instance
+    // rendered first, stranding survivors mid-flight (#2915).
+    let local = comp;
+    if (!local) {
       p || (p = fn());
       p.then(mod => {
         comp = () => mod.default as T;
       });
-      comp = createMemo<T>(() => p!.then(mod => mod.default));
+      local = createMemo<T>(() => p!.then(mod => mod.default));
     }
 
     let Comp: T | undefined;
     return createMemo(
       () =>
-        (Comp = comp!())
+        (Comp = (comp || local)!())
           ? untrack(() => {
               if (IS_DEV) Object.assign(Comp!, { [$DEVCOMP]: true });
               return Comp!(props);

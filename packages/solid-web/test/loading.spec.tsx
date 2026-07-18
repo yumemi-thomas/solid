@@ -111,6 +111,54 @@ describe("Testing Loading", () => {
     expect(div.innerHTML).toBe("Hi, Jo.Hello Jo");
   });
 
+  test("disposing the first in-flight lazy instance doesn't strand survivors (#2915)", async () => {
+    const localDiv = document.createElement("div");
+    let resolveModule!: (mod: { default: Component<{ tag: string }> }) => void;
+    let importCalls = 0;
+
+    const LazyComponent = lazy<Component<{ tag: string }>>(() => {
+      importCalls++;
+      return new Promise(resolve => {
+        resolveModule = resolve;
+      });
+    });
+
+    const [showFirst, setShowFirst] = createSignal(true);
+    const localDispose = render(
+      () => (
+        <Loading fallback="loading">
+          <Show when={showFirst()}>
+            <LazyComponent tag="first" />
+          </Show>
+          <LazyComponent tag="second" />
+        </Loading>
+      ),
+      localDiv
+    );
+    flush();
+    expect(localDiv.innerHTML).toBe("loading");
+
+    // Dispose the instance that initiated the shared import while in flight.
+    setShowFirst(false);
+    flush();
+
+    resolveModule({ default: props => <b>{props.tag}</b> });
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+
+    expect(localDiv.innerHTML).toBe("<b>second</b>");
+    expect(importCalls).toBe(1);
+
+    // A late instance mounts synchronously from the resolved module.
+    setShowFirst(true);
+    flush();
+    expect(localDiv.innerHTML).toBe("<b>first</b><b>second</b>");
+    expect(importCalls).toBe(1);
+
+    localDispose();
+  });
+
   test("bare async memo as direct Loading child (issue #2677)", async () => {
     const localDiv = document.createElement("div");
     let resolveData!: (value: string) => void;
