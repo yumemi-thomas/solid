@@ -51,6 +51,15 @@ export interface RawSignal<T> {
   _transition: Transition | null;
   _pendingValue: T | typeof NOT_PENDING;
   _overrideValue?: T | typeof NOT_PENDING;
+  /**
+   * The transaction that owns the active override (stamped at optimistic
+   * write, cleared at settle). Ownership must live on the node: a lane's
+   * _transition is a scheduling affinity that a shared subscriber can merge
+   * across transactions (#2912) — following it would let one action's settle
+   * revert another action's live override. Node-level sibling of the store
+   * layer's STORE_OPTIMISTIC_OWNERS stamps (#2899). `null` = ambient write.
+   */
+  _overrideOwner?: Transition | null;
   _optimisticLane?: OptimisticLane;
   _pendingSignal?: Signal<boolean>; // Lazy signal for isPending()
   _latestValueComputed?: Computed<T>; // Lazy computed for latest()

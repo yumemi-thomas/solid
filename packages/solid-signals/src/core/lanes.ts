@@ -1,5 +1,10 @@
 import { NOT_PENDING } from "./constants.js";
-import { activeTransition, type QueueCallback, type Transition } from "./scheduler.js";
+import {
+  activeTransition,
+  currentTransition,
+  type QueueCallback,
+  type Transition
+} from "./scheduler.js";
 import type { Computed, Signal } from "./types.js";
 
 // ============================================================================
@@ -118,7 +123,19 @@ export function resolveLane(el: { _optimisticLane?: OptimisticLane }): Optimisti
 export function resolveTransition(el: {
   _optimisticLane?: OptimisticLane;
   _transition?: Transition | null;
+  _overrideValue?: any;
+  _overrideOwner?: Transition | null;
 }): Transition | null | undefined {
+  // An active override answers with its owner, not its lane: lanes are
+  // scheduling affinity and a shared subscriber merges them across
+  // transactions (#2912) — the merged root's _transition would hand this
+  // node's override to whichever action wrote last through the shared
+  // reader. Chase merge chains; a dead owner settled through another path.
+  if (hasActiveOverride(el) && el._overrideOwner) {
+    const owner = (el._overrideOwner = currentTransition(el._overrideOwner));
+    if (owner._done !== true) return owner;
+    el._overrideOwner = null;
+  }
   return resolveLane(el)?._transition ?? el._transition;
 }
 

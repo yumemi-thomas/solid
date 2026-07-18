@@ -184,6 +184,7 @@ function clearOptimisticOverride(target: StoreNode, completing?: Transition | nu
         const next = isWrappable(value) ? wrap(value, target) : value;
         const prev = visibleNodeValue(node);
         node._overrideValue = NOT_PENDING;
+        node._overrideOwner = null;
         node._pendingValue = NOT_PENDING;
         node._value = next;
         if (!node._equals || !node._equals(prev, next)) {

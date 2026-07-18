@@ -88,6 +88,11 @@ function optimisticWrite<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T)
   // reverting is just dropping the override — _value is already correct.
   else globalQueue._batch._optimisticNodes.push(el);
 
+  // Stamp ownership on the node (post-merge, so entangled writers share the
+  // joint root). resolveTransition prefers this over the lane's _transition,
+  // which a shared subscriber can merge across transactions (#2912).
+  el._overrideOwner = activeTransition;
+
   const lane = getOrCreateLane(el as Signal<any>);
   el._optimisticLane = lane;
 
@@ -179,6 +184,7 @@ function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
     if (prevOverride !== NOT_PENDING && node._value !== unwrapOverride(prevOverride))
       insertSubs(node, true);
     node._transition = null;
+    node._overrideOwner = null;
   }
   // Settlement checkpoint (#2838): companions caught in this batch (or owned
   // by a node in it) re-derive from committed state, so verdicts survive the
