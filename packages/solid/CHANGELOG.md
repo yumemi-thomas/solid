@@ -1,5 +1,28 @@
 # solid-js
 
+## 2.0.0-beta.20
+
+### Patch Changes
+
+- 729a5e1: Add a dev-only `solid-js/refresh` subpath entry hosting the HMR component-swap runtime (ported from the standalone `solid-refresh` package). Compiled HMR wrappers keep the frozen `$$registry`/`$$component`/`$$refresh`/`$$decline` ABI and the `hot.data` protocol; the production build resolves to inert stubs. The "cannot hot-swap" bail path is now configurable via `configureRefresh({ invalidate })` instead of hardcoding `window.location.reload()`.
+- ff5c321: Fix hydration of nullish serialized values (#2914). A settled serialization ref `{ s: 1, v: null }` previously hydrated to the internal ref object instead of `null`, and a directly serialized `null`/`undefined` was treated as "no server value", running the client compute instead of adopting it. The unwrap now reads the ref payload directly and presence is decided by `sharedConfig.has` rather than nullish-checking the loaded value.
+- bbc5ac8: Fix `lazy()` stranding surviving instances when the first in-flight instance is disposed (#2915). The memo tracking the shared import was owned by whichever instance rendered first; disposing that instance killed the memo and survivors never saw the module resolve. The import promise stays shared (still fetched once), but each in-flight instance now owns its own tracking memo.
+- a24a4de: Fix the `solid-js/refresh` runtime resurrecting stale module scopes when a hot update re-executes a module whose rendered tree was already torn down (solid-refresh#85). The Babel transform's `fixRender` feature registers the `render()` disposer with `hot.dispose`, so on entry-module (or multi-boundary) updates the previous tree is disposed and a fresh one is rendered through the _new_ registrations before the accept callback patches the registry — but `patchComponent` still treated the first execution's registration as the mounted one, redirecting the live render back through the previous execution's component closure (dead `createContext` instances, prior-generation imports). In Solid 2.0 this crashed the reactive system with `ContextNotFoundError` (dead UI); on earlier betas it appended duplicate trees on every save. Registrations now track live rendered instances, and when none survive the update the registry adopts the re-executed component instead of resurrecting the old one.
+- c7bb2c8: Fix SSR async retry paths re-running computes without resetting owner child state (#2900). The client disposes children and resets the child-id counter on every recompute; on the server only `createSyncMemo` did. Every other retry path — serverEffect retries, async `createMemo` reruns, `createProjection` reruns, and `disposeOwner`'s leaf fast path hit by the Loading discovery retry — kept allocating child hydration ids where the failed run left off, drifting the successful run's ids past the client's so serialized values and DOM nodes hydrated under the wrong keys. Retries now reset child state first (failed runs' onCleanups fire at retry instead of leaking to root disposal), with the retrying primitives' lifecycle cleanups moved to the creation context so a retry can't cancel itself.
+- 9f27cdf: Fix `<Switch>` crashing (and halting the reactive system) when a child resolves to a nullish value, e.g. a `<Match>` gated behind a false `<Show>` (#2911). Nullish child slots are now skipped during match selection on both client and server, matching the existing tolerance for boolean children.
+- Updated dependencies [aa39752]
+- Updated dependencies [a224f2d]
+- Updated dependencies [f6dce8a]
+- Updated dependencies [e156386]
+- Updated dependencies [5ab7d17]
+- Updated dependencies [66a6c13]
+- Updated dependencies [d57d2c9]
+- Updated dependencies [8c864ea]
+- Updated dependencies [d2f83c0]
+- Updated dependencies [2dc2c8f]
+- Updated dependencies [d07a9af]
+  - @solidjs/signals@2.0.0-beta.20
+
 ## 2.0.0-beta.19
 
 ### Patch Changes
