@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
@@ -39,8 +40,8 @@ importers:
         specifier: 0.50.0-next.23
         version: 0.50.0-next.23
       '@dom-expressions/runtime':
-        specifier: 0.50.0-next.23
-        version: 0.50.0-next.23(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)
+        specifier: link:../dom-expressions/packages/runtime
+        version: link:../dom-expressions/packages/runtime
       '@dom-expressions/tagged-jsx':
         specifier: 0.50.0-next.23
         version: 0.50.0-next.23
@@ -1040,14 +1041,6 @@ packages:
 
   '@dom-expressions/hyperscript@0.50.0-next.23':
     resolution: {integrity: sha512-ARmtXo2XVM1/zOIQJP9PVaE4L6Mo4TkYVpEknMg5mMfcc4kyJbaZCbZiO3Ic0L68IagLgPRecSDF8MzUWjbgWg==}
-
-  '@dom-expressions/runtime@0.50.0-next.23':
-    resolution: {integrity: sha512-wzMWIuqV+NylRUw5v+XtDxJJg6nCvDP3Wowzt0ydIthFeOAniRvS7QSqPtPHwPuTOsdxqcvTSqLw9KXOMtVkBQ==}
-    hasBin: true
-    peerDependencies:
-      csstype: ^3.0
-      seroval: ~1.5.4
-      seroval-plugins: ~1.5.4
 
   '@dom-expressions/tagged-jsx@0.50.0-next.23':
     resolution: {integrity: sha512-shbyqpiOjp7THW7PTWM6lZXVwhzdQerOWOADE0bxtLbCz7jA25suqYRzXyWTGgPWxkpolpG4GDm5Bwa+6gvgdQ==}
@@ -4187,13 +4180,6 @@ snapshots:
       '@dom-expressions/compiler-win32-x64-msvc': 0.50.0-next.23
 
   '@dom-expressions/hyperscript@0.50.0-next.23': {}
-
-  '@dom-expressions/runtime@0.50.0-next.23(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)':
-    dependencies:
-      babel-plugin-transform-rename-import: 2.3.0
-      csstype: 3.2.3
-      seroval: 1.5.5
-      seroval-plugins: 1.5.5(seroval@1.5.5)
 
   '@dom-expressions/tagged-jsx@0.50.0-next.23': {}
 

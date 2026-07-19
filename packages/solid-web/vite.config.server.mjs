@@ -22,6 +22,11 @@ export default defineConfig({
     conditions: ["node"],
     alias: {
       rxcore: resolve(rootDir, "src/core"),
+      // The server-functions specs exercise the built bundles (the published
+      // artifact), so the subpaths resolve to dist — listed before the bare
+      // entry, which alias-matches any @solidjs/web/* prefix.
+      "@solidjs/web/server-functions/server": resolve(rootDir, "server-functions/dist/server.js"),
+      "@solidjs/web/server-functions/client": resolve(rootDir, "server-functions/dist/client.js"),
       "@solidjs/web": resolve(rootDir, "server/index.ts"),
       "solid-js": resolve(rootDir, "../solid/src/server/index.ts"),
     }

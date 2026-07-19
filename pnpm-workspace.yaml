@@ -14,6 +14,12 @@ minimumReleaseAgeExclude:
   - 'vite-plugin-solid'
 
 overrides:
+  # TEMPORARY: the server-functions bridge needs the current single-flight
+  # protocol surface (subscribeFlightData, collectFlightData,
+  # SingleFlightPayload), which is not published yet (0.50.0-next.23
+  # predates it). Link the sibling checkout (branch `next`) until the next
+  # release, then remove this override and pin the released version.
+  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime
   babel-preset-solid: workspace:*
   '@solidjs/signals': workspace:*
   solid-js: workspace:*

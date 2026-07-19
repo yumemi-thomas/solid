@@ -32,6 +32,9 @@ Promise.all([
   import("@solidjs/web/jsx-runtime").catch(checkError),
   import("@solidjs/web/jsx-dev-runtime").catch(checkError),
   import("@solidjs/web/storage").catch(checkError),
+  import("@solidjs/web/server-functions").catch(checkError),
+  import("@solidjs/web/server-functions/server").catch(checkError),
+  import("@solidjs/web/server-functions/client").catch(checkError),
 
   import("@solidjs/h").catch(checkError),
   import("@solidjs/h/jsx-runtime").catch(checkError),
