@@ -236,7 +236,9 @@ function drainHydrationCallbacks() {
 }
 
 function checkHydrationComplete() {
-  if (_pendingBoundaries === 0) drainHydrationCallbacks();
+  // Not while a root's synchronous pass is running: a disposal-time release
+  // (#2917) may hit zero while another root is still claiming DOM.
+  if (!_hydratingValue && _pendingBoundaries === 0) drainHydrationCallbacks();
 }
 
 // Backing values for property interceptors (installed by enableHydration)
@@ -853,7 +855,10 @@ export function enableHydration() {
       if (!was && v) {
         _hydrationDone = false;
         _doneValue = false;
-        _pendingBoundaries = 0;
+        // Deliberately NOT zeroing _pendingBoundaries: a second hydration
+        // root can start while an earlier root still has pending boundaries
+        // (#2917). The counter spans roots — hydration is globally done only
+        // when every root's boundaries have resumed.
         setSnapshotCapture(true);
         _snapshotRootOwner = null;
       } else if (was && !v) {
@@ -1329,8 +1334,15 @@ function createBoundaryTrigger(): () => void {
   return set;
 }
 
-function resumeBoundaryHydration(o: Owner, id: string, set: () => void, shouldHydrate = true) {
-  _pendingBoundaries--;
+function resumeBoundaryHydration(
+  o: Owner,
+  id: string,
+  set: () => void,
+  release: () => boolean,
+  shouldHydrate = true
+) {
+  // Disposal already released this boundary's pending count (#2917).
+  if (!release()) return;
   if (isDisposed(o)) {
     checkHydrationComplete();
     return;
@@ -1353,14 +1365,26 @@ function resumeBoundaryHydration(o: Owner, id: string, set: () => void, shouldHy
 function initBoundaryResume(
   o: Owner,
   id: string
-): [trigger: () => void, resume: (shouldHydrate?: boolean) => void] {
+): [trigger: () => void, resume: (shouldHydrate?: boolean) => void, release: () => boolean] {
   _pendingBoundaries++;
+  // Each registration releases its pending count exactly once — via resume,
+  // the $$f asset path, or disposal. The counter now spans hydration roots
+  // (#2917), so a boundary that can never resume must not hold global
+  // hydration open forever.
+  let released = false;
+  const release = () => {
+    if (released) return false;
+    released = true;
+    _pendingBoundaries--;
+    return true;
+  };
   onCleanup(() => {
     if (!isDisposed(o as Owner)) return;
     sharedConfig.cleanupFragment?.(id);
+    if (release()) checkHydrationComplete();
   });
   const set = createBoundaryTrigger();
-  return [set, shouldHydrate => resumeBoundaryHydration(o, id, set, shouldHydrate)];
+  return [set, shouldHydrate => resumeBoundaryHydration(o, id, set, release, shouldHydrate), release];
 }
 
 function waitAndResume(
@@ -1501,12 +1525,12 @@ function hydratedCreateLoadingBoundary<T, U>(
         return coreLoadingBoundary(fn, fallback, options);
       }
       if (p) {
-        const [set, resume] = initBoundaryResume(o, id);
+        const [set, resume, release] = initBoundaryResume(o, id);
         if (p !== "$$f") {
           waitAndResume(p, resume, assetPromise);
         } else {
           const afterAssets = () => {
-            _pendingBoundaries--;
+            if (!release()) return;
             set();
             checkHydrationComplete();
           };

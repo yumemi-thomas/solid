@@ -1969,8 +1969,10 @@ describe("Loading + asset waiting during hydration", () => {
     });
 
     let result: any;
+    let dispose!: () => void;
     createRoot(
-      () => {
+      d => {
+        dispose = d;
         result = Loading({
           fallback: "loading...",
           get children() {
@@ -1985,6 +1987,11 @@ describe("Loading + asset waiting during hydration", () => {
     expect(typeof result).toBe("function");
     const initial = result();
     expect(initial).toBe("loading...");
+
+    // The boundary never resumes in this test; dispose so its pending count
+    // releases instead of holding global hydration open (#2917 semantics).
+    dispose();
+    flush();
   });
 
   test("Loading returns undefined when server data resolved but assets pending", () => {
@@ -2006,8 +2013,10 @@ describe("Loading + asset waiting during hydration", () => {
     });
 
     let result: any;
+    let dispose!: () => void;
     createRoot(
-      () => {
+      d => {
+        dispose = d;
         result = Loading({
           fallback: "loading...",
           get children() {
@@ -2022,6 +2031,11 @@ describe("Loading + asset waiting during hydration", () => {
     expect(typeof result).toBe("function");
     const initial = result();
     expect(initial).toBeUndefined();
+
+    // Assets never resolve here; dispose so the boundary's pending count
+    // releases instead of holding global hydration open (#2917 semantics).
+    dispose();
+    flush();
   });
 
   test("Loading returns undefined when only assets pending (no server data)", () => {
@@ -2041,8 +2055,10 @@ describe("Loading + asset waiting during hydration", () => {
     });
 
     let result: any;
+    let dispose!: () => void;
     createRoot(
-      () => {
+      d => {
+        dispose = d;
         result = Loading({
           fallback: "loading...",
           get children() {
@@ -2057,6 +2073,11 @@ describe("Loading + asset waiting during hydration", () => {
     expect(typeof result).toBe("function");
     const initial = result();
     expect(initial).toBeUndefined();
+
+    // Assets never resolve here; dispose so the boundary's pending count
+    // releases instead of holding global hydration open (#2917 semantics).
+    dispose();
+    flush();
   });
 
   test("Loading hydrates immediately when no assets and no server data", () => {
