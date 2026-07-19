@@ -12,7 +12,7 @@ The RFCs below are **deep dives** on specific topic areas. Over time, it’s exp
 
 ---
 
-## RFC index (9)
+## RFC index (10)
 
 | #   | RFC                                                                                    | One-line summary                                                                                 |
 | --- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -25,3 +25,4 @@ The RFCs below are **deep dives** on specific topic areas. Over time, it’s exp
 | 07  | [DOM](07-dom.md)                                                                       | HTML standards, class, booleans                                                                  |
 | 08  | [Dev-mode diagnostics](08-dev-diagnostics.md)                                          | All dev warnings/errors, diagnostic codes, programmatic API                                      |
 | 09  | [TypeScript and JSX ownership](09-typescript-jsx.md)                                   | Renderer-owned JSX namespaces, `jsxImportSource`, and core renderable types                      |
+| 10  | [Server functions](10-server-functions.md)                                             | `"use server"` runtime, response helpers, single-flight, GET/metadata/prepareRequest, validation |
