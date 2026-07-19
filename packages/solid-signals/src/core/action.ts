@@ -127,11 +127,33 @@ export function action<Args extends any[], Y, R>(
 
       const run = (r: IteratorResult<Y, R>) => {
         if (r.done) return done(r.value);
-        if (isThenable(r.value))
-          return void r.value.then(
-            v => restoreTransition(ctx, () => step(v)),
-            e => restoreTransition(ctx, () => step(e, true))
-          );
+        // Thenable assimilation can itself throw synchronously (a `then`
+        // getter, or a `then()` method that throws — #2918). Match `await`
+        // semantics: the failure is thrown back into the generator at the
+        // yield point (catchable there); if uncaught, step()'s guard settles
+        // the action so its iterator never leaks in the transition. The
+        // settled flag implements A+ 2.3.3.3.4.1: a throw after the thenable
+        // already called a callback is ignored.
+        let settled = false;
+        try {
+          if (isThenable(r.value))
+            return void r.value.then(
+              v => {
+                if (settled) return;
+                settled = true;
+                restoreTransition(ctx, () => step(v));
+              },
+              e => {
+                if (settled) return;
+                settled = true;
+                restoreTransition(ctx, () => step(e, true));
+              }
+            );
+        } catch (e) {
+          if (settled) return;
+          settled = true;
+          return void restoreTransition(ctx, () => step(e, true));
+        }
         restoreTransition(ctx, () => step(r.value));
       };
 
