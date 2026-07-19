@@ -132,6 +132,25 @@ type SharedConfig = {
   // Assigned by enableHydration(); callers only reach it behind a
   // `sharedConfig.hydrating` check, which can never be true before that.
   getNextContextId?: () => string;
+  /**
+   * Whether a hydration pass is still claiming server-rendered DOM — true
+   * from hydrate()'s synchronous walk until every streamed boundary has
+   * resumed or been cancelled. Consumed by dev tooling (the refresh runtime
+   * defers hot swaps that would race the claim, #2919). Absent on the server
+   * sharedConfig. Cross-package wiring; not part of the user-facing API.
+   *
+   * @internal
+   */
+  isHydrationInProgress?: () => boolean;
+  /**
+   * Registers a callback to run once when all hydration completes (all
+   * boundaries hydrated or cancelled). If hydration is already complete (or
+   * not hydrating), fires via queueMicrotask. Absent on the server
+   * sharedConfig. Cross-package wiring; not part of the user-facing API.
+   *
+   * @internal
+   */
+  onHydrationEnd?: (callback: () => void) => void;
 };
 
 /**
@@ -144,7 +163,11 @@ type SharedConfig = {
 export const sharedConfig: SharedConfig = {
   hydrating: false,
   registry: undefined,
-  done: false
+  done: false,
+  // Unlike getNextContextId (see below), these only close over module-local
+  // state, so declaring them here retains nothing extra in CSR bundles.
+  isHydrationInProgress,
+  onHydrationEnd
 };
 
 // Installed on sharedConfig by enableHydration(): defining it in the object
@@ -174,25 +197,19 @@ function markTopLevelSnapshotScope() {
   _snapshotRootOwner = owner;
 }
 
-/**
- * Whether a hydration pass is still claiming server-rendered DOM — true from
- * hydrate()'s synchronous walk until every streamed boundary has resumed or
- * been cancelled. Consumed by dev tooling (the refresh runtime defers hot
- * swaps that would race the claim, #2919). Cross-package wiring; not part of
- * the user-facing API.
- *
- * @internal
- */
-export function isHydrationInProgress(): boolean {
+// Whether a hydration pass is still claiming server-rendered DOM. Reached by
+// the refresh runtime as `sharedConfig.isHydrationInProgress` (#2919) —
+// deliberately NOT a named export so app code isn't invited to branch on
+// hydration state.
+function isHydrationInProgress(): boolean {
   return !_hydrationDone && (sharedConfig.hydrating || _pendingBoundaries > 0);
 }
 
-/**
- * Registers a callback to run once when all hydration completes
- * (all boundaries hydrated or cancelled). If hydration is already
- * complete (or not hydrating), fires via queueMicrotask.
- */
-export function onHydrationEnd(callback: () => void): void {
+// Registers a callback to run once when all hydration completes (all
+// boundaries hydrated or cancelled). If hydration is already complete (or not
+// hydrating), fires via queueMicrotask. Reached as
+// `sharedConfig.onHydrationEnd`.
+function onHydrationEnd(callback: () => void): void {
   if (_hydrationDone || (!sharedConfig.hydrating && _pendingBoundaries === 0)) {
     queueMicrotask(callback);
     return;

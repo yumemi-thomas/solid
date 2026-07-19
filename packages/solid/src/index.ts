@@ -89,8 +89,6 @@ export type { ArrayElement, Element } from "./types.js";
 export {
   sharedConfig,
   enableHydration,
-  isHydrationInProgress,
-  onHydrationEnd,
   createErrorBoundary,
   createLoadingBoundary,
   createRevealOrder,

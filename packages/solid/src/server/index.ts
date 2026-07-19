@@ -102,8 +102,6 @@ export {
   createLoadingBoundary,
   ssrHandleError,
   ssrScope,
-  isHydrationInProgress,
-  onHydrationEnd,
   NoHydration,
   Hydration,
   NoHydrateContext

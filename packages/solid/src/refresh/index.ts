@@ -29,9 +29,8 @@ import {
   createMemo,
   createSignal,
   getOwner,
-  isHydrationInProgress,
   onCleanup,
-  onHydrationEnd,
+  sharedConfig,
   untrack,
   DEV
 } from "solid-js";
@@ -290,9 +289,14 @@ function patchRegistry(oldRegistry: Registry, newRegistry: Registry): boolean {
  * patch until hydration settles lets the old component finish claiming the
  * DOM the server rendered for it — the swap then reconciles live, correctly
  * tracked nodes. Outside a hydration pass the patch applies synchronously.
+ *
+ * The probes live on sharedConfig (internal machinery channel) rather than as
+ * named solid-js exports, so app code isn't invited to branch on hydration
+ * state. They are absent on the server sharedConfig, where there is no client
+ * hydration pass — the optional call falls through to the synchronous path.
  */
 function runAfterHydration(fn: () => void): void {
-  if (isHydrationInProgress()) onHydrationEnd(fn);
+  if (sharedConfig.isHydrationInProgress?.()) sharedConfig.onHydrationEnd!(fn);
   else fn();
 }
 

@@ -17,8 +17,7 @@ import {
   createOptimistic,
   createProjection,
   createStore,
-  createOptimisticStore,
-  onHydrationEnd
+  createOptimisticStore
 } from "../src/client/hydration.js";
 import { lazy } from "../src/client/component.js";
 import { Errored, Loading } from "../src/client/flow.js";
@@ -2427,7 +2426,7 @@ describe("Snapshot Hydration", () => {
       () => {
         createMemo(() => 0, { ssrSource: "client" });
         coreMemo(() => x());
-        onHydrationEnd(() => {
+        sharedConfig.onHydrationEnd!(() => {
           callbackFired = true;
           // After cleanup, reads return current values
           valueAtCallback = x();
