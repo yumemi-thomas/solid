@@ -175,6 +175,19 @@ function markTopLevelSnapshotScope() {
 }
 
 /**
+ * Whether a hydration pass is still claiming server-rendered DOM — true from
+ * hydrate()'s synchronous walk until every streamed boundary has resumed or
+ * been cancelled. Consumed by dev tooling (the refresh runtime defers hot
+ * swaps that would race the claim, #2919). Cross-package wiring; not part of
+ * the user-facing API.
+ *
+ * @internal
+ */
+export function isHydrationInProgress(): boolean {
+  return !_hydrationDone && (sharedConfig.hydrating || _pendingBoundaries > 0);
+}
+
+/**
  * Registers a callback to run once when all hydration completes
  * (all boundaries hydrated or cancelled). If hydration is already
  * complete (or not hydrating), fires via queueMicrotask.

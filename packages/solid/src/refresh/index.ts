@@ -24,7 +24,17 @@
  * `$$component` returns the component unwrapped and `$$refresh`/`$$decline`
  * warn once and do nothing.
  */
-import { $DEVCOMP, createMemo, createSignal, getOwner, onCleanup, untrack, DEV } from "solid-js";
+import {
+  $DEVCOMP,
+  createMemo,
+  createSignal,
+  getOwner,
+  isHydrationInProgress,
+  onCleanup,
+  onHydrationEnd,
+  untrack,
+  DEV
+} from "solid-js";
 import { IS_DEV } from "../client/core.js";
 import type { Element as SolidElement } from "../types.js";
 
@@ -271,6 +281,21 @@ function patchRegistry(oldRegistry: Registry, newRegistry: Registry): boolean {
   return patchComponents(oldRegistry, newRegistry);
 }
 
+/**
+ * Hot swaps must not race an active hydration pass (#2919). A swap disposes
+ * the mounted component while a streamed `<Loading>` boundary may still be
+ * waiting to claim its revealed server DOM; the boundary's cleanup can no
+ * longer find the fragment markers once `$df` has swapped the content in, so
+ * the revealed nodes leak and show up as duplicated content. Deferring the
+ * patch until hydration settles lets the old component finish claiming the
+ * DOM the server rendered for it — the swap then reconciles live, correctly
+ * tracked nodes. Outside a hydration pass the patch applies synchronously.
+ */
+function runAfterHydration(fn: () => void): void {
+  if (isHydrationInProgress()) onHydrationEnd(fn);
+  else fn();
+}
+
 const SOLID_REFRESH = "solid-refresh";
 const SOLID_REFRESH_PREV = "solid-refresh-prev";
 
@@ -440,9 +465,18 @@ function $$refreshESM(type: ESMRuntimeType, hot: ESMHot, registry: Registry): vo
     hot.data[SOLID_REFRESH] = hot.data[SOLID_REFRESH] || registry;
     hot.data[SOLID_REFRESH_PREV] = registry;
     hot.accept(mod => {
-      if (mod == null || patchRegistry(hot.data[SOLID_REFRESH], hot.data[SOLID_REFRESH_PREV])) {
+      if (mod == null) {
         hot.invalidate();
+        return;
       }
+      // hot.data is re-read when the deferred patch fires, so a module that
+      // re-executed again while hydration was still settling patches straight
+      // to its latest registry.
+      runAfterHydration(() => {
+        if (patchRegistry(hot.data[SOLID_REFRESH], hot.data[SOLID_REFRESH_PREV])) {
+          hot.invalidate();
+        }
+      });
     });
   } else {
     // No hot.data — nothing to persist registries on, so just decline.
@@ -456,9 +490,11 @@ function $$refreshStandard(type: StandardRuntimeType, hot: StandardHot, registry
   } else {
     const current = hot.data;
     if (current && current[SOLID_REFRESH]) {
-      if (patchRegistry(current[SOLID_REFRESH], registry)) {
-        $$decline(type, hot, true);
-      }
+      runAfterHydration(() => {
+        if (patchRegistry(current[SOLID_REFRESH], registry)) {
+          $$decline(type, hot, true);
+        }
+      });
     }
     hot.dispose((data: HotData) => {
       data[SOLID_REFRESH] = current ? current[SOLID_REFRESH] : registry;

@@ -220,6 +220,27 @@ function ssrLoadingBoundary(
 export { ssrScope } from "./signals.js";
 
 /**
+ * Client hydration-progress probe; on the server there is no client hydration
+ * pass, so this is always false. Keeps the export surface isomorphic (the
+ * refresh runtime imports it from "solid-js" unconditionally).
+ *
+ * @internal
+ */
+export function isHydrationInProgress(): boolean {
+  return false;
+}
+
+/**
+ * Client hydration-end hook; inert on the server (fires on a microtask like
+ * the client's not-hydrating path). Keeps the export surface isomorphic.
+ *
+ * @internal
+ */
+export function onHydrationEnd(callback: () => void): void {
+  queueMicrotask(callback);
+}
+
+/**
  * Disables hydration for its children during SSR.
  * Elements inside will not receive hydration keys (`_hk`) and signals will not be serialized.
  * Use `Hydration` to re-enable hydration within a `NoHydration` zone.
