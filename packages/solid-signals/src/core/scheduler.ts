@@ -426,8 +426,12 @@ export class GlobalQueue extends Queue {
           const stashedTransition = activeTransition!;
           runHeap(zombieQueue, GlobalQueue._update);
           // Detach: the stashed transition keeps its batch; ambient work that
-          // follows lands in a fresh one.
-          currentBatch = this._batch = createBatch();
+          // follows lands in a fresh one. If the batch is already a separate
+          // ambient one — action done() restored activeTransition without
+          // adopting the batch, and an ordinary write landed there before
+          // the scheduled flush (#2916) — keep it: replacing it would strand
+          // its queued pending nodes with held _pendingValues forever.
+          if (this._batch === stashedTransition) currentBatch = this._batch = createBatch();
 
           // Run lane effects immediately (before stashing) - lanes with no pending async
           if (activeLanes.size) {
@@ -437,7 +441,10 @@ export class GlobalQueue extends Queue {
 
           this.stashQueues(stashedTransition._queueStash);
           clock++;
-          scheduled = dirtyQueue._max >= dirtyQueue._min;
+          // A kept ambient batch may hold pending nodes (#2916): stay
+          // scheduled so the outer drain loop commits them via the plain
+          // flush path instead of leaving them until the next natural flush.
+          scheduled = dirtyQueue._max >= dirtyQueue._min || this._batch._pendingNodes.length > 0;
           reassignPendingTransition(stashedTransition._pendingNodes);
           activeTransition = null;
           // The stash pass (committed-view rerun of plain optimistic signals)
