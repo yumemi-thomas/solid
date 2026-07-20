@@ -11,9 +11,16 @@
 //    already contains the comments AND the client wrappers' markup; slots
 //    claim their rendered DOM via ctx.existing (Astro-style opaque slots) —
 //    zero hydration data, the page source carries each text once.
-import { describe, expect, test } from "vitest";
-import { createRoot, createSignal, flush } from "solid-js";
-import { createServerComponent, createFrame, createFrameHost } from "../frames/src/client.js";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { createRoot, createSignal, flush, Loading } from "solid-js";
+import { dynamic } from "../src/index.js";
+import {
+  installServerComponents,
+  createFrame,
+  createFrameHost,
+  createJSONDataTable
+} from "../frames/src/client.js";
+import { createServerReference } from "@dom-expressions/runtime/src/server-functions/client.js";
 import { createChunk } from "@dom-expressions/runtime/src/server-functions/shared.js";
 
 const settle = () => new Promise(r => setTimeout(r));
@@ -56,41 +63,53 @@ function storyResponse(version: number, title: string, texts: string[]) {
 }
 
 describe("HN slice — collapse UX", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   test("global client-only collapse affects current and future navigated stories", async () => {
     const [story, setStory] = createSignal(1);
     const [collapsed, setCollapsed] = createSignal(false);
-    const requests: string[] = [];
-    const Story = createServerComponent(
-      () => {
-        requests.push(`story=${story()}`); // everything the "server" ever sees
-        return story() === 1
-          ? storyResponse(1, "One", ["alpha-text", "beta-text"])
-          : storyResponse(2, "Two", ["gamma-text"]);
-      },
-      { id: "hn", host: undefined as any }
+    const getStory = createServerReference("hn/story");
+    const table = createJSONDataTable();
+    installServerComponents(
+      createFrameHost({ applyData: (c: any) => table.apply(c), resolve: (r: any) => table.resolve(r) })
     );
+    // Everything the "server" ever sees is the request itself: the story id
+    // in the codec-encoded args, and nothing else.
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", async (_base: any, init: any) => {
+      const id = Number(/"s":(\d+)/.exec(String(init.body))![1]);
+      requests.push(`story=${id}`);
+      return id === 1
+        ? storyResponse(1, "One", ["alpha-text", "beta-text"])
+        : storyResponse(2, "Two", ["gamma-text"]);
+    });
+    const Story = dynamic(() => getStory(story()) as any);
 
     const container = document.createElement("div");
     document.body.appendChild(container);
     let div!: HTMLDivElement;
     const dispose = createRoot(d => {
       <div ref={div}>
-        <Story
-          comment={(p: any) => {
-            const wrap = document.createElement("div");
-            wrap.className = "comment";
-            // Global collapse read at mount; per-comment toggle overrides.
-            if (collapsed()) wrap.classList.add("collapsed");
-            const btn = document.createElement("button");
-            btn.addEventListener("click", () => wrap.classList.toggle("collapsed"));
-            wrap.append(btn, p.children);
-            return wrap;
-          }}
-        />
+        <Loading fallback={<span>...</span>}>
+          <Story
+            comment={(p: any) => {
+              const wrap = document.createElement("div");
+              wrap.className = "comment";
+              // Global collapse read at mount; per-comment toggle overrides.
+              if (collapsed()) wrap.classList.add("collapsed");
+              const btn = document.createElement("button");
+              btn.addEventListener("click", () => wrap.classList.toggle("collapsed"));
+              wrap.append(btn, p.children);
+              return wrap;
+            }}
+          />
+        </Loading>
       </div>;
       container.appendChild(div);
       return d;
     });
+    flush();
+    await settle();
     flush();
     await settle();
 
@@ -106,6 +125,8 @@ describe("HN slice — collapse UX", () => {
     // proves the server only ever saw story ids.
     setCollapsed(true);
     setStory(2);
+    flush();
+    await settle();
     flush();
     await settle();
     expect(div.querySelector("h1")!.textContent).toBe("Two");
