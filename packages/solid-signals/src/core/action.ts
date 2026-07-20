@@ -24,6 +24,22 @@ function restoreTransition<T>(transition: Transition, fn: () => T): T {
 }
 
 /**
+ * The primitive for mutations: imperative async workflows whose *writes span
+ * an async gap* — optimistic write, server round-trip, reconciling write —
+ * where intermediate state must not leak and failure must revert cleanly
+ * (pair with `createOptimistic` / `createOptimisticStore`).
+ *
+ * Navigation-shaped updates do not need an action. A plain setter call is
+ * enough: reads pull the async, and downstream async computeds hold their
+ * previous values per-node until the new ones are ready (`isPending` /
+ * `latest` expose the in-flight state). Reach for `action` only when writes
+ * happen *after* async work, not merely upstream of it.
+ *
+ * Framework-level actions (router form actions, server actions) are
+ * specializations of this primitive: they are actions in exactly this sense —
+ * the same transactional semantics — with form binding, serialization, and
+ * submission tracking layered on top. The shared name is deliberate.
+ *
  * Wraps a generator function so each invocation runs as a single transaction
  * (a "transition") that batches every signal/store write between yields. The
  * surrounding UI sees one atomic update per yielded step; nothing is committed

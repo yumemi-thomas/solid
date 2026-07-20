@@ -112,13 +112,17 @@ isPending(data); // true while an unrevealed value change is in flight for this 
 latest(data); // last resolved value; follows the not-ready path if no value has resolved yet
 ```
 
-Use `action()` to coordinate async workflows with the reactive graph:
+Use `action()` for mutations — imperative async workflows whose writes span an async gap. Each invocation runs as a single transaction: every write between yields batches into one atomic update, and nothing commits until the action completes or the next `yield` resolves.
 
 ```typescript
 const save = action(function* (item) {
   yield fetch("/api/save", { method: "POST", body: JSON.stringify(item) });
 });
 ```
+
+Navigation-shaped updates don't need an action. A plain setter call is enough — reads pull the async, downstream async computeds hold their previous values until new ones are ready, and `isPending`/`latest` expose the in-flight state. Reach for `action` when writes happen *after* async work (pairing with optimistic primitives for tentative state that reverts on failure), not when the async is merely downstream of a synchronous write.
+
+Framework-level actions (router form actions, server actions) are specializations of this primitive: the same transactional semantics with form binding, serialization, and submission tracking layered on top.
 
 ## Optimistic Updates
 
