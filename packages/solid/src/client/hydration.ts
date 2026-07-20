@@ -122,6 +122,16 @@ type SharedConfig = {
   load?: (id: string) => Promise<any> | any;
   has?: (id: string) => boolean;
   gather?: (key: string) => void;
+  /**
+   * Per-boundary capture of the root-scoped registry/gather pair, installed
+   * by the DOM runtime's hydrate(). Boundary registration stores the current
+   * pair keyed by the full boundary id; the resume path swaps it in for its
+   * synchronous window so a late resume claims against the root it
+   * registered under, not whichever root hydrated last (#2917). Entries are
+   * removed when the boundary's pending count releases.
+   */
+  boundaryScopes?: Map<string, { registry?: Map<string, object>; gather?: (key: string) => void }>;
+  captureBoundaryScope?: (id: string) => void;
   cleanupFragment?: (id: string) => void;
   loadModuleAssets?: (mapping: Record<string, string>) => Promise<void> | undefined;
   registry?: Map<string, object>;
@@ -1341,24 +1351,43 @@ function resumeBoundaryHydration(
   release: () => boolean,
   shouldHydrate = true
 ) {
+  // Read before release(): releasing removes the boundaryScopes entry.
+  const scope = sharedConfig.boundaryScopes?.get(id);
   // Disposal already released this boundary's pending count (#2917).
   if (!release()) return;
   if (isDisposed(o)) {
     checkHydrationComplete();
     return;
   }
-  if (shouldHydrate) sharedConfig.gather?.(id);
-  _hydratingValue = shouldHydrate;
-  if (shouldHydrate) {
-    markSnapshotScope(o);
-    _snapshotRootOwner = o;
+  // A late resume must claim against the root this boundary registered
+  // under — another hydrate() root may have replaced the global
+  // registry/gather since (#2917). Swap the captured pair in for the
+  // synchronous resume window; without a capture the live globals apply.
+  const prevRegistry = sharedConfig.registry;
+  const prevGather = sharedConfig.gather;
+  if (scope) {
+    sharedConfig.registry = scope.registry;
+    sharedConfig.gather = scope.gather;
   }
-  set();
-  flush();
-  if (shouldHydrate) _snapshotRootOwner = null;
-  _hydratingValue = false;
-  if (shouldHydrate) releaseSnapshotScope(o);
-  flush();
+  try {
+    if (shouldHydrate) sharedConfig.gather?.(id);
+    _hydratingValue = shouldHydrate;
+    if (shouldHydrate) {
+      markSnapshotScope(o);
+      _snapshotRootOwner = o;
+    }
+    set();
+    flush();
+    if (shouldHydrate) _snapshotRootOwner = null;
+    _hydratingValue = false;
+    if (shouldHydrate) releaseSnapshotScope(o);
+    flush();
+  } finally {
+    if (scope) {
+      sharedConfig.registry = prevRegistry;
+      sharedConfig.gather = prevGather;
+    }
+  }
   checkHydrationComplete();
 }
 
@@ -1367,6 +1396,11 @@ function initBoundaryResume(
   id: string
 ): [trigger: () => void, resume: (shouldHydrate?: boolean) => void, release: () => boolean] {
   _pendingBoundaries++;
+  // Capture the current root's registry/gather pair for this boundary's
+  // late resume (#2917). Runs while the registering root's globals are live:
+  // during its hydrate() pass, or — for nested streamed boundaries — inside
+  // an ancestor's resume window where that root's pair is swapped in.
+  sharedConfig.captureBoundaryScope?.(id);
   // Each registration releases its pending count exactly once — via resume,
   // the $$f asset path, or disposal. The counter now spans hydration roots
   // (#2917), so a boundary that can never resume must not hold global
@@ -1376,6 +1410,7 @@ function initBoundaryResume(
     if (released) return false;
     released = true;
     _pendingBoundaries--;
+    sharedConfig.boundaryScopes?.delete(id);
     return true;
   };
   onCleanup(() => {
@@ -1384,7 +1419,11 @@ function initBoundaryResume(
     if (release()) checkHydrationComplete();
   });
   const set = createBoundaryTrigger();
-  return [set, shouldHydrate => resumeBoundaryHydration(o, id, set, release, shouldHydrate), release];
+  return [
+    set,
+    shouldHydrate => resumeBoundaryHydration(o, id, set, release, shouldHydrate),
+    release
+  ];
 }
 
 function waitAndResume(
