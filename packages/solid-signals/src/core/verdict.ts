@@ -34,11 +34,19 @@ import {
 } from "./core.js";
 import { NotReadyError } from "./error.js";
 import { link } from "./graph.js";
-import { insertIntoHeap, queueFor } from "./heap.js";
+import { insertIntoHeap, markHeap, queueFor } from "./heap.js";
 import { devTrackCompanionOwner, InvariantHooks } from "./invariants.js";
 import { findLane, hasActiveOverride } from "./lanes.js";
 import { installOptimisticEngine } from "./optimistic.js";
-import { clock, dirtyQueue, GlobalQueue, insertSubs, schedule, zombieQueue } from "./scheduler.js";
+import {
+  activeTransition,
+  clock,
+  dirtyQueue,
+  GlobalQueue,
+  insertSubs,
+  schedule,
+  zombieQueue
+} from "./scheduler.js";
 import type { Computed, FirewallSignal, Signal } from "./types.js";
 
 // Companions (pending signals / latest shadows) are optimistic nodes: their
@@ -227,6 +235,19 @@ function latestRead<T>(el: Signal<T> | Computed<T>): T {
   ) as T;
   let value: T;
   try {
+    // An untracked latest() read has no reading context, so read() never
+    // performs its mid-tick pull — a plain write queued between two latest()
+    // calls left a still-subscribed shadow at its previous speculative value
+    // until the flush (#2922). Mirror the tracked-read pull here: mark the
+    // queued staleness through the graph, then bring the shadow up to date.
+    const queue = queueFor(pendingComputed);
+    if (
+      pendingComputed._height >= queue._min &&
+      !(pendingComputed._flags & (REACTIVE_DISPOSED | REACTIVE_ZOMBIE))
+    ) {
+      markHeap(queue);
+      prepareComputed(pendingComputed as Computed<unknown>, true);
+    }
     value = read(pendingComputed);
   } catch (e) {
     if (
@@ -246,6 +267,16 @@ function latestRead<T>(el: Signal<T> | Computed<T>): T {
       return visibleValue;
     }
   }
+  // A shadow recomputed by the pull above (not at creation) holds its fresh
+  // speculative value in _pendingValue; a contextless read() only surfaces
+  // _value. Overrides stay authoritative (A17), and stale readers keep the
+  // other transition's committed view, matching read()'s own selection.
+  if (
+    pendingComputed._pendingValue !== NOT_PENDING &&
+    !hasActiveOverride(pendingComputed) &&
+    !(stale && pendingComputed._transition && activeTransition !== pendingComputed._transition)
+  )
+    return pendingComputed._pendingValue as T;
   return value as T;
 }
 
