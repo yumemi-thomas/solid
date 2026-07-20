@@ -1,5 +1,14 @@
 # @solidjs/signals
 
+## 2.0.0-beta.21
+
+### Patch Changes
+
+- 615bb17: Yielding a thenable whose `then` getter or `then()` method throws synchronously no longer leaks the action's iterator in its transaction (#2918). Assimilation failures now match `await` semantics: the error is thrown back into the generator at the yield point (catchable there); if uncaught, the action settles through its normal rejection path, the iterator is removed from the transition, and plain writes made before the yield commit. Previously the exception escaped the Promise executor — the returned promise rejected, but the transition stayed incomplete forever and every write to the affected signals was permanently held.
+- 99b2b8e: Document the action naming rationale: actions are the mutation primitive (writes spanning an async gap), navigation is a plain setter call handled by per-node async holding, and framework-level actions (router form actions, server actions) are specializations of this primitive sharing the name deliberately.
+- e8fb215: `latest()` on a memo now recomputes after every unflushed write instead of freezing at the first speculative value (#2922). Two staleness holes closed: the heap's mark memo (`_marked`) is only reset by a flush, so a plain write landing between two mid-tick pulls left its subscribers unmarked and every later pull stale; and an untracked `latest()` read has no reading context, so `read()` never performed its mid-tick pull on a still-subscribed shadow. Writes now invalidate the mark memo when an unmarked node enters a marked heap, and the latest() read path pulls its shadow up to date (and surfaces the shadow's held speculative value) before answering.
+- 18f0135: An ordinary signal write made in the microtask window between one action's completion and its scheduled flush no longer freezes the signal when another action keeps the shared transaction incomplete (#2916). Action `done()` restores the active transition without adopting the ambient batch, so such writes queue in a detached ambient batch; the incomplete-transition stash then replaced that batch wholesale, stranding the queued pending node — the write never committed and every later write to the same signal stayed held (dev INV-7). The stash now only installs a fresh ambient batch when the current batch is the stashed transition itself, and stays scheduled so a kept batch's pending nodes commit on the next drain.
+
 ## 2.0.0-beta.20
 
 ### Patch Changes

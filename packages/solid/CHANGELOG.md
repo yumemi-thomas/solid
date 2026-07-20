@@ -1,5 +1,19 @@
 # solid-js
 
+## 2.0.0-beta.21
+
+### Patch Changes
+
+- b1b2f82: Fix `lazy()` hydration crashing when Solid Refresh registers a component in the dynamically imported chunk (#2920). The module-scope `$$component(...)` registration created its bookkeeping signal through the hydration-aware `createSignal`, which requires a reactive owner to consume a hydration child id — at module evaluation time there is none, so `peekNextChildId` threw and hydration fell back to client rendering. Registration signals are dev bookkeeping and never participate in hydration: the component is now stored in a plain-object signal (`createSignal({ current })`), so no hydration-aware computation is created and no hydration child ids are consumed.
+- a79f974: Fix streamed `<Loading>` boundaries duplicating resolved content when a Solid Refresh HMR update lands while hydration is still in progress (#2919). A hot swap disposes the mounted component; if a streamed boundary's `$df` reveal had already swapped its settled content into the DOM but the boundary had not yet resumed to claim it, disposal could no longer find the fragment markers and the revealed server nodes leaked as duplicate content. The refresh runtime now defers registry patching until the hydration pass settles (via the internal `sharedConfig.onHydrationEnd` hook), letting the old component finish claiming its server-rendered DOM before the swap reconciles it; patches outside a hydration pass still apply synchronously.
+- e3d5fed: Starting hydration for a second root no longer resets the pending-boundary bookkeeping of an earlier root that is still waiting on a serialized `<Loading>` boundary (#2917). The pending-boundary counter now spans hydration roots: `sharedConfig.done` only flips once every root's boundaries have resumed, instead of a later root's completion draining hydration (and clearing snapshots) out from under an earlier pending root and driving the counter negative when it finally resumed. Each boundary registration now releases its pending count exactly once — via resume, the fallback asset path, or disposal — so a disposed boundary whose promise never settles cannot hold global hydration open.
+- c4fad7a: A `<Loading>` boundary that resumes after another `hydrate()` root has started now claims server DOM against the root it registered under (#2917, follow-up to the pending-boundary counter fix). Boundary registration captures the current root's registry/gather pair via the DOM runtime's `sharedConfig.captureBoundaryScope`, keyed by the full boundary id; the resume path swaps the captured pair in for its synchronous window and restores the globals afterwards, falling back to the live globals when no capture exists. Previously a late resume gathered against the last-hydrated root's container and registry, so the server-streamed fragment went unclaimed and the boundary's reactive bindings attached to orphaned client nodes. Captures are cleaned up when the boundary's pending count releases (resume, fallback asset path, or disposal).
+- Updated dependencies [615bb17]
+- Updated dependencies [99b2b8e]
+- Updated dependencies [e8fb215]
+- Updated dependencies [18f0135]
+  - @solidjs/signals@2.0.0-beta.21
+
 ## 2.0.0-beta.20
 
 ### Patch Changes
