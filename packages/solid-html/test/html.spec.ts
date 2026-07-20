@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "vitest";
-import { createSignal, flush, For } from "solid-js";
+import { createRoot, createSignal, flush, For } from "solid-js";
 import { render } from "@solidjs/web";
 import html from "@solidjs/html";
 
@@ -73,17 +73,23 @@ describe("@solidjs/html", () => {
   });
 
   test("multi-root templates return an iterable of nodes", () => {
-    const result = html`<span class="a"></span><span class="b"></span>`;
-    expect(Array.isArray(result)).toBe(true);
-    const nodes = result as Node[];
-    expect(nodes).toHaveLength(2);
-    expect((nodes[0] as HTMLElement).className).toBe("a");
-    expect((nodes[1] as HTMLElement).className).toBe("b");
+    createRoot(dispose => {
+      const result = html`<span class="a"></span><span class="b"></span>`;
+      expect(Array.isArray(result)).toBe(true);
+      const nodes = result as Node[];
+      expect(nodes).toHaveLength(2);
+      expect((nodes[0] as HTMLElement).className).toBe("a");
+      expect((nodes[1] as HTMLElement).className).toBe("b");
+      dispose();
+    });
   });
 
   test("single-root template returns a single node", () => {
-    const result = html`<span class="solo"></span>`;
-    expect(Array.isArray(result)).toBe(false);
-    expect((firstNode(result) as HTMLElement).className).toBe("solo");
+    createRoot(dispose => {
+      const result = html`<span class="solo"></span>`;
+      expect(Array.isArray(result)).toBe(false);
+      expect((firstNode(result) as HTMLElement).className).toBe("solo");
+      dispose();
+    });
   });
 });
