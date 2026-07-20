@@ -1,0 +1,153 @@
+/**
+ * The server-function extension surface through the @solidjs/web bridge:
+ * `GET`, the metadata channel (`withMeta`, `getServerFunctionMetadata`,
+ * `isServerFunction`), the `prepareRequest` client hook, and method
+ * enforcement.
+ *
+ * Like the single-flight specs, these run against the built bundles
+ * (server-functions/dist/*, wired up in vite.config.server.mjs) — the same
+ * artifacts the package publishes. The client and server bundles each carry
+ * their own copy of the shared layer, so cross-bundle assertions here also
+ * verify the registered-symbol metadata brand does its job.
+ */
+import { AsyncLocalStorage } from "node:async_hooks";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  GET as serverGET,
+  createServerReference as createServerSideReference,
+  getServerFunctionMetadata as getServerFunctionMetadataServer,
+  handleServerFunctionRequest,
+  isServerFunction as isServerFunctionServer,
+  registerServerFunction,
+  registerServerReference,
+  withMeta as withMetaServer
+} from "@solidjs/web/server-functions/server";
+import {
+  GET,
+  configureServerFunctionsClient,
+  createServerReference,
+  getServerFunctionMetadata,
+  isServerFunction,
+  withMeta
+} from "@solidjs/web/server-functions/client";
+import type { PrepareRequestHook } from "@solidjs/web/server-functions/client";
+
+const RequestContext = Symbol.for("solid.RequestContext");
+
+beforeAll(() => {
+  (globalThis as any)[RequestContext] = new AsyncLocalStorage();
+});
+
+afterAll(() => {
+  delete (globalThis as any)[RequestContext];
+});
+
+// The client transport's fetch dispatches straight into the built server
+// handler — a full round trip through both published bundles.
+function connectTransport() {
+  const original = globalThis.fetch;
+  globalThis.fetch = ((url: string, init?: RequestInit) =>
+    handleServerFunctionRequest(
+      new Request(new URL(url, "http://localhost"), init)
+    )) as typeof fetch;
+  return () => {
+    globalThis.fetch = original;
+  };
+}
+
+describe("server-function extension surface (built bundles)", () => {
+  it("GET round-trips through both bundles and the handler enforces it", async () => {
+    serverGET(
+      createServerSideReference(registerServerReference("ext-get-0", async (n: number) => n * 2))
+    );
+    const restore = connectTransport();
+    try {
+      const declared = GET(createServerReference("ext-get-0"));
+      expect(await declared(21)).toBe(42);
+      expect(getServerFunctionMetadata(declared)?.method).toBe("GET");
+      expect(declared.id).toBe("ext-get-0");
+    } finally {
+      restore();
+    }
+
+    // POST contradicting the GET declaration answers 405
+    const contradiction = await handleServerFunctionRequest(
+      new Request("http://localhost/_server", {
+        method: "POST",
+        headers: {
+          "X-Server-Function-Id": "ext-get-0",
+          "X-Server-Function-Instance": "server-function:test"
+        }
+      })
+    );
+    expect(contradiction.status).toBe(405);
+    expect(contradiction.headers.get("Allow")).toBe("GET");
+
+    // and GET without a declaration answers 405 too
+    registerServerFunction("ext-post-0", async () => "x");
+    const undeclared = await handleServerFunctionRequest(
+      new Request("http://localhost/_server?id=ext-post-0", { method: "GET" })
+    );
+    expect(undeclared.status).toBe(405);
+    expect(undeclared.headers.get("Allow")).toBe("POST");
+  });
+
+  it("metadata written by one bundle is read by the other", () => {
+    // server bundle writes, client bundle reads — the registered-symbol
+    // brand keeps the channel one channel across bundled copies
+    const server = withMetaServer(
+      createServerSideReference(registerServerReference("ext-meta-0", async () => {})),
+      { requiresAuth: true }
+    );
+    expect(isServerFunction(server)).toBe(true);
+    expect(getServerFunctionMetadata(server)).toEqual({ requiresAuth: true });
+
+    // and the other direction
+    const client = withMeta(createServerReference("ext-meta-0"), { tenant: "x" });
+    expect(isServerFunctionServer(client)).toBe(true);
+    expect(getServerFunctionMetadataServer(client)).toEqual({ tenant: "x" });
+
+    expect(isServerFunction(() => {})).toBe(false);
+    expect(getServerFunctionMetadata(() => {})).toBeUndefined();
+  });
+
+  it("prepareRequest keys per-function behavior on withMeta declarations", async () => {
+    registerServerFunction("ext-auth-0", async () => {
+      const store = (globalThis as any)[RequestContext].getStore();
+      return store.request.headers.get("Authorization");
+    });
+    registerServerFunction("ext-auth-1", async () => {
+      const store = (globalThis as any)[RequestContext].getStore();
+      return store.request.headers.get("Authorization");
+    });
+    const hook: PrepareRequestHook = (init, { meta }) =>
+      meta?.requiresAuth
+        ? {
+            ...init,
+            headers: {
+              ...(init.headers as Record<string, string>),
+              Authorization: "Bearer secret"
+            }
+          }
+        : init;
+    configureServerFunctionsClient({ prepareRequest: hook });
+    const restore = connectTransport();
+    try {
+      const authed = withMeta(createServerReference("ext-auth-0"), { requiresAuth: true });
+      const plain = createServerReference("ext-auth-1");
+      expect(await authed()).toBe("Bearer secret");
+      expect(await plain()).toBe(null);
+    } finally {
+      configureServerFunctionsClient({ prepareRequest: null as any });
+      restore();
+    }
+  });
+
+  it("references expose id and drop the legacy escape hatches", () => {
+    const ref = createServerReference("ext-contract-0");
+    expect(ref.id).toBe("ext-contract-0");
+    expect(ref.url).toContain("id=ext-contract-0");
+    expect((ref as any).GET).toBeUndefined();
+    expect((ref as any).withOptions).toBeUndefined();
+  });
+});

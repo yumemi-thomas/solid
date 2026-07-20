@@ -22,6 +22,7 @@ import type {
   SingleFlightPayload
 } from "@solidjs/web/server-functions/server";
 import {
+  configureServerFunctionsClient,
   createServerReference,
   subscribeFlightData as subscribeFlightDataClient
 } from "@solidjs/web/server-functions/client";
@@ -115,14 +116,6 @@ describe("single-flight client bridge (built client bundle)", () => {
     };
   }
 
-  // The client half of the opt-in: the header rides on withOptions, exactly
-  // how a router sends it.
-  function flightReference(id: string) {
-    return createServerReference(id).withOptions({
-      headers: { [SINGLE_FLIGHT_HEADER]: "true" }
-    });
-  }
-
   it("delivers data to the registered consumer and value to the caller", async () => {
     registerServerFunction("sf-bridge-client-0", async () => "mutated");
     const restore = connectTransport({
@@ -134,9 +127,11 @@ describe("single-flight client bridge (built client bundle)", () => {
       await Promise.resolve();
       delivered.push({ data, context });
     };
+    // subscribing IS the opt-in: the transport sends the request-leg
+    // header itself while a consumer is registered
     const unsubscribe = subscribeFlightDataClient(consumer);
     try {
-      const result = await flightReference("sf-bridge-client-0")();
+      const result = await createServerReference("sf-bridge-client-0")();
       expect(result).toBe("mutated");
       expect(delivered).toHaveLength(1);
       expect(delivered[0].data).toEqual({ "/notes": ["fresh"] });
@@ -154,12 +149,21 @@ describe("single-flight client bridge (built client bundle)", () => {
     });
     const consumer = vi.fn();
     const unsubscribe = subscribeFlightDataClient(consumer);
+    // an integration can still tag calls by hand through the session-level
+    // prepareRequest hook — with no consumer registered the tagged response
+    // reaches the caller whole
+    configureServerFunctionsClient({
+      prepareRequest: init => ({
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), [SINGLE_FLIGHT_HEADER]: "true" }
+      })
+    });
     try {
-      await flightReference("sf-bridge-unsub-0")();
+      await createServerReference("sf-bridge-unsub-0")();
       expect(consumer).toHaveBeenCalledTimes(1);
 
       unsubscribe();
-      const response = await flightReference("sf-bridge-unsub-0")();
+      const response = await createServerReference("sf-bridge-unsub-0")();
       expect(consumer).toHaveBeenCalledTimes(1);
       // no consumer registered: the integration decodes the response itself
       expect(response).toBeInstanceOf(Response);
@@ -171,6 +175,7 @@ describe("single-flight client bridge (built client bundle)", () => {
         data: { data: true }
       });
     } finally {
+      configureServerFunctionsClient({ prepareRequest: null as any });
       unsubscribe();
       restore();
     }
