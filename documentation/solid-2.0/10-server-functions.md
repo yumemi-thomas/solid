@@ -2,11 +2,11 @@
 
 **Start here:** If you’re migrating an app, read the beta tester guide first: [MIGRATION.md](MIGRATION.md)
 
-> **Status note:** This RFC covers two layers. The base mechanics — the `"use server"` directive, the `@solidjs/web/server-functions` runtime, response helpers, single-flight, and no-JS handling — are **shipped** in the beta. The extension surface (`GET`, the metadata accessors, `prepareRequest`) is **settled design, not yet implemented**; it is recorded here as the canonical specification.
+> **Status note:** This RFC covers two layers. The base mechanics — the `"use server"` directive, the `@solidjs/web/server-functions` runtime, response helpers, single-flight, and no-JS handling — are **shipped** in the beta. The extension surface (`GET`, `withMeta`, the metadata accessors, `prepareRequest`, method enforcement, `id` on proxies) is now **shipped** as well; this document remains the canonical specification. Two follow-ups are deferred: dev-only compiler-emitted `name` metadata (in progress) and a dev observation hook for the server-function inspector (deliberately deferred until it can be designed together with its consumer).
 
 ## Summary
 
-Solid 2.0 moves server functions into core: a `"use server"` directive compiled by the build plugin, backed by a framework-agnostic runtime at `@solidjs/web/server-functions`. The runtime ships *mechanisms* — transport, an HTTP handler with hooks, response helpers, a single-flight protocol — while routers and frameworks layer *policy* on top. The settled extension design adds exactly three mechanisms: `GET(fn)`, the `getServerFunctionMetadata`/`isServerFunction` accessors, and a `prepareRequest` client hook.
+Solid 2.0 moves server functions into core: a `"use server"` directive compiled by the build plugin, backed by a framework-agnostic runtime at `@solidjs/web/server-functions`. The runtime ships *mechanisms* — transport, an HTTP handler with hooks, response helpers, a single-flight protocol — while routers and frameworks layer *policy* on top. The extension surface adds exactly four mechanisms: `GET(fn)`, `withMeta(fn, meta)`, the `getServerFunctionMetadata`/`isServerFunction` accessors, and a `prepareRequest` client hook.
 
 The governing philosophy: **the server side of a server function is your function body.** Per-function server concerns (validation, auth guards, logging, rate limiting) are lines of code inside the body; global concerns are the handler and transport hooks; there is no third place. Nothing is compiler-recognized; the compiler’s only contract is the directive.
 
@@ -96,7 +96,7 @@ The protocol folds integration data (typically revalidated route data) into a mu
 - **Server:** the `collectFlightData(event, outcome)` hook (config or per-handler) receives the request event and a `ServerFunctionOutcome` — `{ id, value, response, request, thrown }` — and optionally returns a payload. The handler envelopes it as `{ value, data }` under the `X-Single-Flight` response header. It runs after `transformResult`, only for scripted calls that sent the header on the request; redirect-with-data works because the outcome’s `response` carries `Location`, so the hook can produce data for the destination route.
 - **Client:** `subscribeFlightData(consumer)` registers the consumer the transport delivers data to. On a single-flight response the transport decodes `{ value, data }`, delivers `data` (with the response as envelope context), awaits async consumers so caches are seeded first, and returns `value` to the caller as if the call were plain. One active consumer at a time; with none registered, the response passes through whole for the integration to `decodeResponse` itself.
 
-**Settled change (not yet implemented):** the request-leg `X-Single-Flight` header moves from per-call attachment (today the integration sends it, e.g. via `withOptions`) to being set by the client transport **if and only if a flight-data consumer is registered** — subscribing *is* the opt-in. This is more correct than the per-call header: a consumer-less app never asks the server to do collection work. Same header, new emitter; the server side is unchanged.
+**Shipped change:** the request-leg `X-Single-Flight` header moved from per-call attachment (previously the integration sent it, e.g. via `withOptions`) to being set by the client transport **if and only if a flight-data consumer is registered** — subscribing *is* the opt-in. This is more correct than the per-call header: a consumer-less app never asks the server to do collection work. Same header, new emitter; the server side is unchanged.
 
 ### No-JS and progressive enhancement
 
@@ -108,21 +108,21 @@ The full unscripted flow (flash cookie → redirect → SSR-seeded submission st
 - **Router:** the flash-cookie convention **and** the SSR submission seeding. The router is the only consumer of both sides — submissions are its vocabulary — so its server integration supplies the `handleNoJS` implementation and the seed format.
 - **Start:** configures rather than implements, same as single-flight.
 
-### The extension surface (settled design)
+### The extension surface (shipped)
 
 Three lifetime slots organize everything the historical proxy surfaces conflated:
 
 | Lifetime | Concern | Surface |
 |---|---|---|
-| **Declaration-static** | properties of the function itself | `GET(fn)` — method is currently the only tenant |
+| **Declaration-static** | properties of the function itself | `GET(fn)` for method; `withMeta(fn, meta)` for user-declared transport metadata |
 | **Session-dynamic** | cross-cutting transport policy that changes at runtime | `prepareRequest` client hook; server handler hooks (existing) |
 | **Call-scoped** | one specific invocation | *empty* — both candidate consumers found better homes |
 
 Per-function *server* concerns have no slot here because they are not transport: they are body code. Mechanisms live in core; unprivileged patterns ship as standalone packages; conventions live at the layer that consumes them; everything else is code in the function.
 
-#### `GET(fn)` and the metadata channel
+#### `GET(fn)`, `withMeta(fn, meta)`, and the metadata channel
 
-`GET` becomes core’s only public per-function declaration API (today it is a two-line Start export over the client proxy’s `.GET` getter):
+`GET` is core’s per-function method declaration (formerly a two-line Start export over the client proxy’s `.GET` getter):
 
 ```ts
 import { GET } from "@solidjs/web/server-functions";
@@ -135,19 +135,25 @@ export const getUser = GET(async (id: string) => {
 
 Calls go over HTTP GET with arguments codec-encoded in the query string — cacheable by HTTP infrastructure (the varying instance header doesn’t break caching; caches key on URL unless `Vary` says otherwise). Cache headers flow through the handler’s existing header forwarding: `respond(data, { headers: { "cache-control": "max-age=60" } })`. Server-side, the wrapper is identity-flavored — SSR calls stay in-process. Because function-level directives round-trip wrapper calls (above), this needs **no compiler involvement**.
 
-Under the sugar sits an internal, symbol-branded metadata channel (`Symbol.for`, surviving duplicated module instances — the same trick as the `ResponseEnvelope` brand), populated on both proxies and read through typed accessors:
+Under the sugar sits a symbol-branded metadata channel (`Symbol.for`, surviving duplicated module instances — the same trick as the `ResponseEnvelope` brand), populated on both proxies and read through typed accessors. `withMeta(fn, meta)` is its public write path — it exists because `prepareRequest`’s `meta` parameter was otherwise unreachable for user declarations — and `GET` is sugar over the same write:
 
 ```ts
 export interface ServerFunctionMetadata {
-  method?: "GET" | "POST";
+  /** The declared HTTP method. Undeclared references call over POST. */
+  readonly method?: "GET" | "POST";
+  /** User-declared transport metadata attached with `withMeta`. */
+  readonly [key: string]: unknown;
 }
 export function getServerFunctionMetadata(fn: unknown): ServerFunctionMetadata | undefined;
-export function isServerFunction(fn: unknown): fn is ServerFunction<any[], any>;
+export function isServerFunction(fn: unknown): fn is ServerFunction;
+export function withMeta<F extends (...args: any[]) => any>(fn: F, meta: ServerFunctionMetadata): F;
 ```
+
+`withMeta` attaches arbitrary user-declared transport metadata to a reference and returns it, shallow-merging later writes over earlier ones; it composes with `GET` in either order. The pattern is declare-on-function, react-in-hook: metadata declared here reaches `prepareRequest` as `context.meta`, so session-dynamic transport policy keys on declarations (e.g. `requiresAuth`) instead of comparing function ids.
 
 - **Routers detect from metadata, not properties:** `query()`’s current `if ((fn as any).GET) fn = fn.GET` sniffing goes away — a `GET(fn)` reference *already calls over GET*; the router reads metadata only where it needs to *know* (preload URLs, cacheability decisions).
 - **Method enforcement:** registration records a has-method entry keyed by function id (internal bookkeeping, not public API) so the handler answers 405 when the request method contradicts the declaration.
-- **Why method is the only entry:** sorting by lifetime left it the sole tenant. Per-function static `headers` — the other candidate — lost its last real use case to `prepareRequest`: every concrete example (auth tokens, tracing ids) turned out to be session-dynamic and uniform, not per-function and static. A general `extend`/`transport(meta, fn)` options bag is deferred, not designed-in; `GET` is sugar over the channel, and the channel is the stable detection contract if a second capability ever earns its place.
+- **Why method is the only built-in entry:** sorting by lifetime left it the sole tenant. Per-function static `headers` — the other candidate — lost its last real use case to `prepareRequest`: every concrete example (auth tokens, tracing ids) turned out to be session-dynamic and uniform, not per-function and static. The general options bag returned in a narrowed, function-first form as `withMeta` — user-declared transport metadata only, never behavior — because without a public writer, `prepareRequest`’s `meta` parameter was unreachable for user declarations.
 
 The reference contract shrinks accordingly (beta — no compatibility shims):
 
@@ -189,7 +195,7 @@ The intended shape, in brief: a non-throwing `validate(schema, value)` helper ov
 
 | Layer | Owns |
 |---|---|
-| **Core** | The directive contract, transport, handler + hooks, `respond`/`redirect`/`reload`, codec configuration, streaming; the settled additions: `GET` + the metadata channel, `getServerFunctionMetadata`/`isServerFunction`, `prepareRequest`, `id` on proxies, method 405 enforcement, automatic single-flight header via `subscribeFlightData`. Mechanisms only |
+| **Core** | The directive contract, transport, handler + hooks, `respond`/`redirect`/`reload`, codec configuration, streaming; the shipped extension surface: `GET` + `withMeta` over the metadata channel, `getServerFunctionMetadata`/`isServerFunction`, `prepareRequest`, `id` on proxies, method 405 enforcement, automatic single-flight header via `subscribeFlightData`. Mechanisms only |
 | **Router** | Metadata detection in `query()`, single-flight via `subscribeFlightData` registration, errors landing in submission state (already true), the flash-cookie convention and SSR submission seeding via `handleNoJS` |
 | **Form layer (router/Start, future)** | Field-error UX conventions: typed field accessors, `aria-invalid` wiring, no-JS flash-cookie repopulation, FormData coercion |
 | **Userland** | Per-function server concerns as body code (validation, auth guards, logging, rate limiting); `prepareRequest` composition |
@@ -224,7 +230,7 @@ Recorded so they don’t reopen:
 
 - **`decorateServerFunction` (registry-swap decoration)** — rejected outright, not even as a documented escape hatch. Action-at-a-distance magic (module evaluation mutating dispatch for an id), it contradicts the body-is-the-extension-point model, and it had no concrete consumer once validation moved into the body.
 - **`callServerFunction(fn, init, ...args)` (per-call escape hatch)** — cut; the settled inventory has no per-call mechanism. Its two candidate consumers found better homes: single-flight opt-in becomes automatic via `subscribeFlightData`, and abort signals have no known consumer today.
-- **General `extend`/`transport(meta, fn)` options bag** — deferred, not designed-in. Method is the only declaration-static capability; a one-key options bag is worse API than one named function. The metadata channel is the stable contract a general form would sit on if a second capability materializes.
+- **General `extend`/`transport(meta, fn)` options bag** — originally deferred, not designed-in: method was the only declaration-static capability, and a one-key options bag is worse API than one named function. A narrowed form returned as **`withMeta(fn, meta)`** — transport/declaration metadata only, function-first, never behavior — because the declare-on-function, react-in-hook pattern needed a public writer to the channel (`prepareRequest`’s `meta` was otherwise unreachable for user declarations). The metadata channel remains the stable contract.
 - **Per-function static `headers` metadata** — cut; every concrete use case (bearer tokens, tracing) is session-dynamic and uniform → `prepareRequest`.
 - **Compiler recognition of framework functions** (schema-stripping, `extend` as a compiler convention) — rejected; repeats the `server$` mistake of growing compiler knowledge per capability. Dead, not deferred: body-scoped DCE removes the motivation, since schemas never reach the client in the first place.
 - **Validation in core (or the router)** — rejected: a validation helper touches zero privileged surface, so it lives outside both (see the decision record above). Core ships mechanisms; the router ships what it consumes; sugar that needs neither lives outside both.
