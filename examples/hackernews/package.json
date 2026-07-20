@@ -1,0 +1,20 @@
+{
+  "name": "hackernews-example",
+  "description": "Solid Server Components over frame streams — a HN-shaped app with no Vite: the native @dom-expressions/compiler runs the use-server directive pass and both JSX targets through a small esbuild plugin",
+  "version": "0.0.0",
+  "private": true,
+  "author": "Ryan Carniato",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs",
+    "dev": "node build.mjs && node server.mjs"
+  },
+  "devDependencies": {
+    "@dom-expressions/compiler": "0.50.0-next.24",
+    "@solidjs/web": "workspace:*",
+    "esbuild": "^0.25.0",
+    "solid-js": "workspace:*"
+  }
+}

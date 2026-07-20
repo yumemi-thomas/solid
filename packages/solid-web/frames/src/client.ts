@@ -1,9 +1,10 @@
 // @solidjs/web/frames — client half. Consume frame streams into live DOM
 // boundaries (resident store, policy-A morphs, client-owned projections).
 //
-// There is deliberately no server-component API in this module: importing it
-// installs the transport policy that makes `dynamic` + server functions the
-// whole client surface. A server-function call whose response is a frame
+// There is deliberately no server-component API in this module: calling
+// installServerComponents() once in the client entry installs the transport
+// policy that makes `dynamic` + server functions the whole client surface.
+// A server-function call whose response is a frame
 // stream resolves with a stable component — the same reference for every
 // refetch from the same call site — so `dynamic(() => getStory(id()))`
 // never remounts; the response streams into the boundary underneath and
@@ -37,15 +38,28 @@ export {
 } from "@dom-expressions/runtime/src/frame-transport.js";
 export { createJSONDataTable } from "@dom-expressions/runtime/src/serializer.js";
 
-// One host per app is the norm: a shared response-scoped data table and one
-// chunk router. Apps needing isolation pass their own host.
+// One host per app is the norm: one chunk router, with codec data tables
+// rotated PER RESPONSE — the deserializer's cross-reference space is
+// stream-scoped by contract, so each stream into a boundary gets a fresh
+// table (routed by root frame id; nested region ids prefix-match to their
+// root's table). Apps needing isolation pass their own host.
 let sharedHost: any;
+const tables = new Map<string, any>();
+function tableFor(id: string) {
+  const table = tables.get(id);
+  if (table) return table;
+  for (const [root, t] of tables) if (id.startsWith(root + ".")) return t;
+  return undefined;
+}
+/** Rotate in a fresh response-scoped data table for a boundary's stream. */
+function beginStream(frameId: string) {
+  tables.set(frameId, createJSONDataTable());
+}
 export function getFrameHost() {
   if (!sharedHost) {
-    const table = createJSONDataTable();
     sharedHost = createFrameHost({
-      applyData: (c: any) => table.apply(c),
-      resolve: (ref: any) => table.resolve(ref)
+      applyData: (c: any) => tableFor(c.id)?.apply(c),
+      resolve: (ref: any, id: string) => tableFor(id)?.resolve(ref)
     });
   }
   return sharedHost;
@@ -102,17 +116,17 @@ function boundaryComponent(host: any, id: string) {
  * source resolve to the identical component, and ownerless calls fall back
  * to one boundary per function id.
  *
- * Importing `@solidjs/web/frames` runs this once against the shared host;
- * call it again to rebind to a custom host.
+ * Call once in the client entry (an explicit call — the package is
+ * `sideEffects: false`, so a bare import would be tree-shaken away);
+ * call again to rebind to a custom host.
  */
 export function installServerComponents(host: any = getFrameHost()) {
   configureServerFunctionsClient({
     responseHandler: createServerComponentHandler({
       host,
       capture: () => getOwner() ?? undefined,
-      component: (frameId: string) => boundaryComponent(host, frameId)
+      component: (frameId: string) => boundaryComponent(host, frameId),
+      onStream: (frameId: string) => beginStream(frameId)
     })
   });
 }
-
-installServerComponents();
