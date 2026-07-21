@@ -9,6 +9,9 @@ overrides:
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
   '@solidjs/web': workspace:*
+  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime
+  '@dom-expressions/babel-plugin-jsx': link:../dom-expressions/packages/babel-plugin-jsx
+  '@dom-expressions/tagged-jsx': link:../dom-expressions/packages/tagged-jsx
 
 importers:
 
@@ -33,17 +36,17 @@ importers:
         specifier: ^5.4.0
         version: 5.4.0(tinybench@2.9.0)(vite@7.3.3(@types/node@25.6.0)(terser@5.49.0))(vitest@4.1.6)
       '@dom-expressions/babel-plugin-jsx':
-        specifier: 0.50.0-next.24
-        version: 0.50.0-next.24(@babel/core@7.29.0)
+        specifier: link:../dom-expressions/packages/babel-plugin-jsx
+        version: link:../dom-expressions/packages/babel-plugin-jsx
       '@dom-expressions/hyperscript':
         specifier: 0.50.0-next.24
         version: 0.50.0-next.24
       '@dom-expressions/runtime':
-        specifier: 0.50.0-next.24
-        version: 0.50.0-next.24(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)
+        specifier: link:../dom-expressions/packages/runtime
+        version: link:../dom-expressions/packages/runtime
       '@dom-expressions/tagged-jsx':
-        specifier: 0.50.0-next.24
-        version: 0.50.0-next.24
+        specifier: link:../dom-expressions/packages/tagged-jsx
+        version: link:../dom-expressions/packages/tagged-jsx
       '@rollup/plugin-babel':
         specifier: ^6.0.3
         version: 6.0.3(@babel/core@7.29.0)(@types/babel__core@7.20.5)(rollup@4.59.0)
@@ -219,8 +222,8 @@ importers:
         specifier: ^7.0.0
         version: 7.29.0
       '@dom-expressions/babel-plugin-jsx':
-        specifier: 0.50.0-next.24
-        version: 0.50.0-next.24(@babel/core@7.29.0)
+        specifier: link:../../../dom-expressions/packages/babel-plugin-jsx
+        version: link:../../../dom-expressions/packages/babel-plugin-jsx
       solid-js:
         specifier: workspace:*
         version: link:../solid
@@ -426,10 +429,6 @@ packages:
 
   '@babel/helper-member-expression-to-functions@7.28.5':
     resolution: {integrity: sha512-cwM7SBRZcPCLgl8a7cY0soT1SptSzAlMH39vwiRpOQkJlh53r5hdHwLSCZpQdVLT39sZt+CRpNwYG4Y2v77atg==}
-    engines: {node: '>=6.9.0'}
-
-  '@babel/helper-module-imports@7.18.6':
-    resolution: {integrity: sha512-0NFvs3VkuSYbFi1x2Vd6tKrywq+z/cLeYC/RJNFrIX/30Bf5aiGYbtvGXolEktzJH8o5E5KJ3tT+nkxuuZFVlA==}
     engines: {node: '>=6.9.0'}
 
   '@babel/helper-module-imports@7.28.6':
@@ -999,11 +998,6 @@ packages:
     resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
     engines: {node: '>=18'}
 
-  '@dom-expressions/babel-plugin-jsx@0.50.0-next.24':
-    resolution: {integrity: sha512-IqPQQdgINMg6ev95xd/qfCH4stdooGRvNHiFzYitvKkv3fnqfc8+d72CuMX7eLJ9X2pVsyPzmrbEzwfrK1JoTA==}
-    peerDependencies:
-      '@babel/core': ^7.20.12
-
   '@dom-expressions/compiler-darwin-arm64@0.50.0-next.23':
     resolution: {integrity: sha512-TxirIA64PlYv7QdLy74hYd06bEbNtctOE0QrXj5C3HZzOmFNMvO9Zi9fWIweylfVOJLRtqXLoYnaNbWxQzwtpg==}
     cpu: [arm64]
@@ -1040,17 +1034,6 @@ packages:
 
   '@dom-expressions/hyperscript@0.50.0-next.24':
     resolution: {integrity: sha512-YqRvmRj/FV4snUSrt43gNThW6xx6ED5i7mDxTcUqD8yDaAfB6bD30ce9XD0/o4WN/VIjqglouGhjY1tx9RZenw==}
-
-  '@dom-expressions/runtime@0.50.0-next.24':
-    resolution: {integrity: sha512-O4Q3ANDIRSFS4nW2THFDTokkHVtTGe+Lc/HG1KWALYFscSZGi4gY0PbjnNLSbI1F8sWxRcFaUNaUtvwb8RQ/Vg==}
-    hasBin: true
-    peerDependencies:
-      csstype: ^3.0
-      seroval: ~1.5.4
-      seroval-plugins: ~1.5.4
-
-  '@dom-expressions/tagged-jsx@0.50.0-next.24':
-    resolution: {integrity: sha512-0vdeyiPXV4Zu4BqTbXP6m1h/19k0TTdgzevZqN/g1bNea+XttwGZmqEYBkUYQ0w3wjUXXGzapk/9wTqDv8N/NQ==}
 
   '@emnapi/core@1.11.2':
     resolution: {integrity: sha512-TC8MkTuZUtcTSiFeuC0ksCh9QIJ5+F21MvZ4Wn4ORfYaFJ/0dsiudv5tVkejgwZlwQ39jL9WWDe2lz8x0WglOA==}
@@ -2148,9 +2131,6 @@ packages:
     resolution: {integrity: sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ==}
     engines: {node: '>=18'}
 
-  html-entities@2.3.3:
-    resolution: {integrity: sha512-DV5Ln36z34NNTDgnz0EWGBLZENelNAtkiFA4kyNOG2tDI6Mz1uSWiq1wAKdyjnJwyDiDO7Fa2SO1CTxPXL8VxA==}
-
   html-escaper@2.0.2:
     resolution: {integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg==}
 
@@ -3057,9 +3037,6 @@ packages:
     deprecated: Please upgrade  to version 7 or higher.  Older versions may use Math.random() in certain circumstances, which is known to be problematic.  See https://v8.dev/blog/math-random for details.
     hasBin: true
 
-  validate-html-nesting@1.2.4:
-    resolution: {integrity: sha512-doQi7e8EJ2OWneSG1aZpJluS6A49aZM0+EICXWKm1i6WvqTLmq0tpUcImc4KTWG50mORO0C4YDBtOCSYvElftw==}
-
   verror@1.10.0:
     resolution: {integrity: sha512-ZZKSmDAEFOijERBLkmYfJ+vmk3w+7hOLYDNkRCuRuMJGEmqYNCNLyBBFwWKVMhfwaEF3WOd0Zlw86U/WC/+nYw==}
     engines: {'0': node >=0.6.0}
@@ -3358,10 +3335,6 @@ snapshots:
       '@babel/types': 7.29.0
     transitivePeerDependencies:
       - supports-color
-
-  '@babel/helper-module-imports@7.18.6':
-    dependencies:
-      '@babel/types': 7.29.0
 
   '@babel/helper-module-imports@7.28.6':
     dependencies:
@@ -4145,16 +4118,6 @@ snapshots:
 
   '@csstools/css-tokenizer@3.0.4': {}
 
-  '@dom-expressions/babel-plugin-jsx@0.50.0-next.24(@babel/core@7.29.0)':
-    dependencies:
-      '@babel/core': 7.29.0
-      '@babel/helper-module-imports': 7.18.6
-      '@babel/plugin-syntax-jsx': 7.28.6(@babel/core@7.29.0)
-      '@babel/types': 7.29.0
-      html-entities: 2.3.3
-      parse5: 7.3.0
-      validate-html-nesting: 1.2.4
-
   '@dom-expressions/compiler-darwin-arm64@0.50.0-next.23':
     optional: true
 
@@ -4187,15 +4150,6 @@ snapshots:
       '@dom-expressions/compiler-win32-x64-msvc': 0.50.0-next.23
 
   '@dom-expressions/hyperscript@0.50.0-next.24': {}
-
-  '@dom-expressions/runtime@0.50.0-next.24(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)':
-    dependencies:
-      babel-plugin-transform-rename-import: 2.3.0
-      csstype: 3.2.3
-      seroval: 1.5.5
-      seroval-plugins: 1.5.5(seroval@1.5.5)
-
-  '@dom-expressions/tagged-jsx@0.50.0-next.24': {}
 
   '@emnapi/core@1.11.2':
     dependencies:
@@ -5214,8 +5168,6 @@ snapshots:
     dependencies:
       whatwg-encoding: 3.1.1
 
-  html-entities@2.3.3: {}
-
   html-escaper@2.0.2: {}
 
   http-proxy-agent@7.0.2:
@@ -6063,8 +6015,6 @@ snapshots:
       punycode: 2.3.1
 
   uuid@3.4.0: {}
-
-  validate-html-nesting@1.2.4: {}
 
   verror@1.10.0:
     dependencies:

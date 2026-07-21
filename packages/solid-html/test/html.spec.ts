@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach } from "vitest";
 import { createRoot, createSignal, flush, For } from "solid-js";
-import { render } from "@solidjs/web";
+import { render, registerElementClaim } from "@solidjs/web";
 import html from "@solidjs/html";
 
 let root: HTMLElement;
@@ -91,5 +91,16 @@ describe("@solidjs/html", () => {
       expect((firstNode(result) as HTMLElement).className).toBe("solo");
       dispose();
     });
+  });
+
+  test("static-href anchors reach element-claim consumers", () => {
+    const claimed: Element[] = [];
+    const unregister = registerElementClaim(el => claimed.push(el));
+    try {
+      render(() => html`<nav><a href="/about">About</a></nav>`, root);
+      expect(claimed).toEqual([root.querySelector("a")]);
+    } finally {
+      unregister();
+    }
   });
 });

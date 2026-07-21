@@ -18,3 +18,6 @@ overrides:
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
   '@solidjs/web': workspace:*
+  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime
+  '@dom-expressions/babel-plugin-jsx': link:../dom-expressions/packages/babel-plugin-jsx
+  '@dom-expressions/tagged-jsx': link:../dom-expressions/packages/tagged-jsx
