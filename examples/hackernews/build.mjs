@@ -16,6 +16,20 @@ const web = p => path.resolve(root, "../../packages/solid-web", p);
 const solid = mode => ({
   name: "solid-native",
   setup(b) {
+    // Pre-facade dev-guard stripping: the packaged dist builds replace the
+    // '"_DX_DEV_"' literal via rollup; bundling source trees directly would
+    // otherwise inline the dev-only bodies (a truthy string).
+    b.onLoad(
+      { filter: /(dom-expressions[\\/]packages[\\/]runtime[\\/]src|packages[\\/]solid-web[\\/])[^\0]*\.(js|ts)$/ },
+      async args => {
+        const code = await readFile(args.path, "utf8");
+        if (!code.includes('"_DX_DEV_"')) return undefined;
+        return {
+          contents: code.replaceAll('"_DX_DEV_"', "false"),
+          loader: args.path.endsWith(".ts") ? "ts" : "js"
+        };
+      }
+    );
     b.onLoad({ filter: /src[\\/][^\\/]+\.jsx$/ }, async args => {
       let code = await readFile(args.path, "utf8");
       const filename = path.relative(root, args.path);
