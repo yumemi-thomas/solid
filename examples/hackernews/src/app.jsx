@@ -40,14 +40,11 @@ export function App() {
   const [collapseAll, setCollapseAll] = createSignal(false);
   const stories = createMemo(async () => getStories());
 
-  // The call is tracked: changing storyId re-calls the server function.
-  // Every response for this call site resolves to the SAME component
-  // reference, so nothing remounts — the stream morphs the boundary. The
-  // createMemo wrapper dedupes the in-flight call (one fetch per
-  // navigation, however many times the suspended tree re-reads it) — the
-  // same role `query` plays in a router app.
-  const story = createMemo(() => getStory(storyId()));
-  const Story = dynamic(() => story());
+  // The source is tracked: changing storyId re-calls the server function
+  // (once — the in-flight call rides out suspended re-reads). Every
+  // response for this call site resolves to the SAME component reference,
+  // so nothing remounts — the stream morphs the boundary underneath.
+  const Story = dynamic(() => getStory(storyId()));
 
   return (
     <div class="layout">

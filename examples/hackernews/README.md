@@ -47,8 +47,7 @@ future story the server knows nothing about.
   server-component API: `dynamic(() => getStory(storyId()))` is the whole
   surface. Every response for the call site resolves to the same stable
   component, so nothing remounts — the stream morphs the boundary
-  underneath. (The `createMemo` wrapper dedupes the in-flight call, the
-  role `query` plays in a router app.)
+  underneath.
 - [src/entry-client.jsx](./src/entry-client.jsx) — one line of wiring:
   `installServerComponents()`.
 - [src/entry-server.jsx](./src/entry-server.jsx) — one handler

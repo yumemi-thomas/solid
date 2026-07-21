@@ -1,4 +1,5 @@
 import {
+  CONFIG_AUTO_DISPOSE,
   CONFIG_SYNC,
   EFFECT_TRACKED,
   EFFECT_USER,
@@ -14,7 +15,7 @@ import { context, setSignal, untrack } from "./core.js";
 import { devTrackHeldPending } from "./invariants.js";
 import { emitDiagnostic } from "./dev.js";
 import { NotReadyError, StatusError } from "./error.js";
-import { trimStaleDeps } from "./graph.js";
+import { trimStaleDeps, unobserved } from "./graph.js";
 import { enqueueSub } from "./heap.js";
 import { hasActiveOverride, resolveLane, resolveTransition, type OptimisticLane } from "./lanes.js";
 import { cleanup } from "./owner.js";
@@ -256,6 +257,17 @@ export function handleAsync<T>(
     then?.();
   };
 
+  // A pending node's in-flight promise is an observer: `unlinkSubs` skips
+  // autodispose while STATUS_PENDING so subscriber churn can't orphan the
+  // work (a lazy async memo would otherwise tear down and re-execute — one
+  // fetch per suspended re-read). Settling is that observer's release, so
+  // it runs the same last-one-out check the other release sites run.
+  const settleAutodispose = () => {
+    if (el._config & CONFIG_AUTO_DISPOSE && !el._subs && !(el._statusFlags & STATUS_PENDING)) {
+      unobserved(el as Computed<unknown>);
+    }
+  };
+
   if (thenable) {
     let resolved = false,
       rejected = false,
@@ -266,13 +278,19 @@ export function handleAsync<T>(
         if (isSync) {
           syncValue = v;
           resolved = true;
-        } else asyncWrite(v);
+        } else {
+          asyncWrite(v);
+          settleAutodispose();
+        }
       },
       e => {
         if (isSync) {
           syncError = e;
           rejected = true;
-        } else handleError(e);
+        } else {
+          handleError(e);
+          settleAutodispose();
+        }
       }
     );
     isSync = false;
