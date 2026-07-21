@@ -57,7 +57,29 @@ future story the server knows nothing about.
 - [server.mjs](./server.mjs) — a plain node http server; the frame chunks
   stream through it as the server renders.
 
-This example intentionally boots as a client-rendered shell (the document
-SSR + hydration-adoption path is exercised in the solid-web test suite);
-the wire and state guarantees above are the architecture's headline and
-they're all observable here.
+## Measured against the SSR-SPA baseline
+
+[../hackernews-spa](../hackernews-spa) is the same app built the classic
+way (server functions return JSON, client renders everything, hydration
+data blob). Same seed, same pipeline, same server — measured 2026-07-20:
+
+| axis | SSR-SPA | Server Components |
+| --- | --- | --- |
+| each comment's text at initial load | **2×** (HTML + hydration JSON) | **1×** (HTML only) |
+| content in hydration data | full story JSON | none |
+| content components in the bundle | all of them | interactive wrappers only |
+| requests at boot | 0 | 0 |
+| initial document | 7.1 KB | 7.5 KB |
+| inline data scripts | 3.1 KB | 2.6 KB |
+| client bundle (min/gz) | 89.4 K / 30.9 K | 109.7 K / 37.8 K |
+| per-navigation wire | 0.7 KB JSON | 2.3 KB HTML chunks |
+
+Read it honestly: at this toy content scale the constant costs show — the
+SC document is slightly *larger* (slot/region markers are per-position
+overhead) and its bundle carries the ~7 KB gz frames runtime that the SPA
+doesn't need, while per-navigation JSON beats HTML on bytes. What scales
+differently is the structure: the SPA's double-copy and its shipped
+content components grow with every component and every byte of content,
+while the SC costs are constant. The grep row is the invariant the
+architecture exists for — and the SPA can't fix its row by optimizing,
+because the hydration data *is* its rendering input.
