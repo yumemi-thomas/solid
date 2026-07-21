@@ -13,7 +13,7 @@
 //
 // Source-level entry while frames are pre-release; dist/exports wiring lands
 // with the release packaging.
-import { getOwner, onCleanup } from "solid-js";
+import { getOwner, onCleanup, sharedConfig } from "solid-js";
 import type { JSX } from "solid-js";
 import {
   adoptFrameRange,
@@ -97,11 +97,27 @@ function slotsFor(props: Record<string, any>) {
         if (typeof prop !== "string" || !(prop in props)) return undefined;
         return (slotProps: any, ctx: any) => {
           const v = props[prop];
-          const out = typeof v === "function" ? v(slotProps) : v;
-          // Hydration attach: a callback whose render CLAIMED the existing
-          // DOM (solid's own hydration inside the range) returns nodes that
-          // are already in place — normalize handles both claim and replace.
-          return normalizeSlotContent(out);
+          const render = () => normalizeSlotContent(typeof v === "function" ? v(slotProps) : v);
+          const context = (sharedConfig as any).context;
+          if (ctx && ctx.frame && (sharedConfig as any).hydrating && context) {
+            // The claim: re-render this occurrence under the SAME hydration
+            // key prefix the document producer scoped it with — solid's
+            // registry hands the render its server-rendered nodes by key,
+            // so the SSR'd wrapper (interior included) becomes the live
+            // component's DOM. Templates never ship as data; the claim IS
+            // the transfer.
+            const prevId = context.id;
+            const prevCount = context.count;
+            context.id = `sc-${ctx.frame}-${ctx.key}-`;
+            context.count = 0;
+            try {
+              return render();
+            } finally {
+              context.id = prevId;
+              context.count = prevCount;
+            }
+          }
+          return render();
         };
       }
     }
