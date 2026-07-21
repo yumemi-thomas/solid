@@ -70,8 +70,9 @@ describe("server-function extension surface (built bundles)", () => {
       restore();
     }
 
-    // POST contradicting the GET declaration answers 405
-    const contradiction = await handleServerFunctionRequest(
+    // POST stays allowed on a GET declaration — declaring GET grants the
+    // method, it does not revoke the default POST transport
+    const granted = await handleServerFunctionRequest(
       new Request("http://localhost/_server", {
         method: "POST",
         headers: {
@@ -80,8 +81,7 @@ describe("server-function extension surface (built bundles)", () => {
         }
       })
     );
-    expect(contradiction.status).toBe(405);
-    expect(contradiction.headers.get("Allow")).toBe("GET");
+    expect(granted.status).toBe(200);
 
     // and GET without a declaration answers 405 too
     registerServerFunction("ext-post-0", async () => "x");
