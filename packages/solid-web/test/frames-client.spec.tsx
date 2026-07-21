@@ -70,7 +70,7 @@ describe("server components through dynamic", () => {
     // codec-encoded args) — signals read inside a foreign async continuation
     // see 2.0's consistent snapshot, not the freshly written value.
     vi.stubGlobal("fetch", async (_base: any, init: any) => {
-      const v = Number(/"s":(\d+)/.exec(String(init.body))![1]);
+      const v = JSON.parse(String(init.body))[0];
       fetched.push(v);
       return storyResponse(v, `Story ${v}`);
     });
@@ -175,7 +175,7 @@ describe("server components through dynamic", () => {
   test("one server component mounted twice fans the stream out to both instances", async () => {
     const [v, setV] = createSignal(1);
     vi.stubGlobal("fetch", async (_base: any, init: any) => {
-      const n = Number(/"s":(\d+)/.exec(String(init.body))![1]);
+      const n = JSON.parse(String(init.body))[0];
       return storyResponse(n, `Story ${n}`);
     });
 

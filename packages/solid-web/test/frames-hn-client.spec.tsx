@@ -77,7 +77,7 @@ describe("HN slice — collapse UX", () => {
     // in the codec-encoded args, and nothing else.
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (_base: any, init: any) => {
-      const id = Number(/"s":(\d+)/.exec(String(init.body))![1]);
+      const id = JSON.parse(String(init.body))[0];
       requests.push(`story=${id}`);
       return id === 1
         ? storyResponse(1, "One", ["alpha-text", "beta-text"])
