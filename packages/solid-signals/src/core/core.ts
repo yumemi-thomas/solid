@@ -715,7 +715,11 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     return (!c || el._pendingValue === NOT_PENDING ? el._value : el._pendingValue) as T;
   }
 
-  if (__DEV__ && strictRead && owner._statusFlags & STATUS_PENDING)
+  // The dev component-body safeguard (#2897) must not fire inside an
+  // isPending() probe: its plain Error would be swallowed by the probe's
+  // catch (which only rethrows NotReadyError), making dev return false where
+  // prod propagates NotReady (#2928). Probe reads follow the prod path.
+  if (__DEV__ && strictRead && !pendingCheckActive && owner._statusFlags & STATUS_PENDING)
     throwPendingUntrackedRead(strictRead, {
       ownerId: c?.id,
       ownerName: (c as any)?._name,

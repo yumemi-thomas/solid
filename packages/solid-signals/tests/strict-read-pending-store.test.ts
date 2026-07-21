@@ -5,6 +5,7 @@ import {
   createRoot,
   createStore,
   flush,
+  isPending,
   refresh,
   untrack
 } from "../src/index.js";
@@ -160,6 +161,75 @@ describe("uninitialized derived stores never leak the seed (#2897)", () => {
     await wait(20);
     flush();
     expect(untrack(() => s.a)).toBe(2);
+  });
+
+  /**
+   * #2928: the dev safeguard above must NOT fire inside an isPending() probe.
+   * Its plain Error is swallowed by the probe's catch (which only rethrows
+   * NotReadyError), so dev returned `false` where prod propagated NotReady —
+   * a dev/prod divergence. Probe reads follow the prod path in both builds:
+   * uninitialized + surrounding context ⇒ NotReadyError propagates (A16/B5a).
+   */
+  it("isPending on an uninitialized derived store in a component body throws NotReady in dev too (#2928)", async () => {
+    createRoot(() => {
+      const [s] = createOptimisticStore<{ a?: number }>(
+        async () => {
+          await wait(10);
+          return {};
+        },
+        { a: 1 }
+      );
+      flush();
+      untrack(() => {
+        let caught: any = null;
+        try {
+          isPending(() => s.a);
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toBeInstanceOf(NotReadyError);
+      }, "App");
+    });
+    await wait(20);
+    flush();
+  });
+
+  it("isPending on an uninitialized async memo in a component body throws NotReady in dev too (#2928)", async () => {
+    createRoot(() => {
+      const a = createMemo(async () => {
+        await wait(10);
+        return 2;
+      });
+      flush();
+      untrack(() => {
+        let caught: any = null;
+        try {
+          isPending(() => a());
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toBeInstanceOf(NotReadyError);
+      }, "App");
+    });
+    await wait(20);
+    flush();
+  });
+
+  it("isPending stays a plain boolean fully untracked, even under a strictRead label (#2928)", async () => {
+    const [s] = createOptimisticStore<{ a?: number }>(
+      async () => {
+        await wait(10);
+        return {};
+      },
+      { a: 1 }
+    );
+    flush();
+    // No surrounding context: A16 — isPending never throws untracked.
+    untrack(() => {
+      expect(isPending(() => s.a)).toBe(false);
+    }, "App");
+    await wait(20);
+    flush();
   });
 
   it("plain (non-derived) store reads are unaffected", () => {
