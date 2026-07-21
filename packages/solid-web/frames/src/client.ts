@@ -13,7 +13,7 @@
 //
 // Source-level entry while frames are pre-release; dist/exports wiring lands
 // with the release packaging.
-import { getOwner, onCleanup, sharedConfig } from "solid-js";
+import { createOwner, getOwner, onCleanup, runWithOwner, sharedConfig } from "solid-js";
 import type { JSX } from "solid-js";
 import {
   adoptFrameRange,
@@ -89,6 +89,38 @@ function normalizeSlotContent(value: any): Node | Node[] {
  * (JSX children included) fills its direct-insert position — and each
  * instance disposes with its owning scope.
  */
+/**
+ * Scoped hydration re-entry for one slot range (the late-boundary-resume
+ * pattern): gather the range's `_hk` nodes into a registry, flip the
+ * hydration window on for the synchronous render, and run under an owner
+ * whose id chain reproduces the document producer's keys. No nodes in the
+ * range → plain client render (CSR boot, post-load streams).
+ */
+function claimRender(prefix: string, existing: Node[], render: () => any) {
+  const sc: any = sharedConfig;
+  if (!sc.getNextContextId) return render();
+  const registry = new Map<string, Element>();
+  for (const n of existing) {
+    const el = n as Element;
+    if (el.nodeType !== 1) continue;
+    if (el.hasAttribute("_hk")) registry.set(el.getAttribute("_hk")!, el);
+    el.querySelectorAll("*[_hk]").forEach(child =>
+      registry.set(child.getAttribute("_hk")!, child)
+    );
+  }
+  if (!registry.size) return render();
+  const prevRegistry = sc.registry;
+  const prevHydrating = sc.hydrating;
+  sc.registry = registry;
+  sc.hydrating = true;
+  try {
+    return runWithOwner(createOwner({ id: prefix }), render);
+  } finally {
+    sc.registry = prevRegistry;
+    sc.hydrating = prevHydrating;
+  }
+}
+
 function slotsFor(props: Record<string, any>) {
   return new Proxy(
     {},
@@ -98,24 +130,17 @@ function slotsFor(props: Record<string, any>) {
         return (slotProps: any, ctx: any) => {
           const v = props[prop];
           const render = () => normalizeSlotContent(typeof v === "function" ? v(slotProps) : v);
-          const context = (sharedConfig as any).context;
-          if (ctx && ctx.frame && (sharedConfig as any).hydrating && context) {
-            // The claim: re-render this occurrence under the SAME hydration
-            // key prefix the document producer scoped it with — solid's
-            // registry hands the render its server-rendered nodes by key,
-            // so the SSR'd wrapper (interior included) becomes the live
-            // component's DOM. Templates never ship as data; the claim IS
-            // the transfer.
-            const prevId = context.id;
-            const prevCount = context.count;
-            context.id = `sc-${ctx.frame}-${ctx.key}-`;
-            context.count = 0;
-            try {
-              return render();
-            } finally {
-              context.id = prevId;
-              context.count = prevCount;
-            }
+          if (ctx && ctx.frame && ctx.existing && ctx.existing.length) {
+            // The claim: re-render this occurrence under the SAME
+            // hydration-key owner scope the document producer used —
+            // solid's registry hands the render its server-rendered nodes
+            // by key, so the SSR'd wrapper (interior included) becomes the
+            // live component's DOM. Templates never ship as data; the
+            // claim IS the transfer. Adoption mounts a microtask after the
+            // hydrate window closes, so this is a scoped RE-ENTRY (the
+            // late-boundary-resume pattern): a registry gathered from the
+            // range, swapped in for the synchronous render.
+            return claimRender(`sc-${ctx.frame}-${ctx.key}-`, ctx.existing, render);
           }
           return render();
         };
