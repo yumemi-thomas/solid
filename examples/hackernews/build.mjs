@@ -25,12 +25,21 @@ const solid = mode => ({
         mode,
         env: "production",
         register: { source: "@solidjs/web/server-functions/server", name: "registerServerReference" },
-        create: { source: "@solidjs/web/server-functions/client", name: "createServerReference" }
+        // References resolve per build: the server build calls in-process
+        // (the server module's createServerReference), the client fetches.
+        create: {
+          source:
+            mode === "server"
+              ? "@solidjs/web/server-functions/server"
+              : "@solidjs/web/server-functions/client",
+          name: "createServerReference"
+        }
       });
       if (directives.valid) code = directives.code;
       code = transform(code, {
         filename,
         generate: mode === "server" ? "ssr" : "dom",
+        hydratable: true,
         moduleName: "@solidjs/web"
       }).code;
       return { contents: code, loader: "js" };
@@ -47,6 +56,7 @@ const alias = {
   "@solidjs/web/frames": web("frames/src/client.ts"),
   "@solidjs/web/server-functions/server": web("server-functions/src/server.ts"),
   "@solidjs/web/server-functions/client": web("server-functions/src/client.ts"),
+  "@solidjs/web/storage": web("storage/src/index.ts"),
   // dom-expressions' reactive-core seam, bound to Solid's core (same as
   // solid-web's own builds).
   rxcore: web("src/core.ts")

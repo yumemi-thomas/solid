@@ -16,6 +16,7 @@
 import { getOwner, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import {
+  adoptFrameRange,
   createFrameHost,
   createFrameInsertable
 } from "@dom-expressions/runtime/src/frame-client.js";
@@ -88,24 +89,77 @@ function normalizeSlotContent(value: any): Node | Node[] {
  * (JSX children included) fills its direct-insert position — and each
  * instance disposes with its owning scope.
  */
+function slotsFor(props: Record<string, any>) {
+  return new Proxy(
+    {},
+    {
+      get(_, prop) {
+        if (typeof prop !== "string" || !(prop in props)) return undefined;
+        return (slotProps: any, ctx: any) => {
+          const v = props[prop];
+          const out = typeof v === "function" ? v(slotProps) : v;
+          // Hydration attach: a callback whose render CLAIMED the existing
+          // DOM (solid's own hydration inside the range) returns nodes that
+          // are already in place — normalize handles both claim and replace.
+          return normalizeSlotContent(out);
+        };
+      }
+    }
+  );
+}
+
 function boundaryComponent(host: any, id: string) {
   return (props: Record<string, any>) => {
-    const slots = new Proxy(
-      {},
-      {
-        get(_, prop) {
-          if (typeof prop !== "string" || !(prop in props)) return undefined;
-          return (slotProps: any) => {
-            const v = props[prop];
-            return normalizeSlotContent(typeof v === "function" ? v(slotProps) : v);
-          };
-        }
-      }
-    );
-    const insertable = createFrameInsertable({ host, id, slots });
+    const insertable = createFrameInsertable({ host, id, slots: slotsFor(props) });
     onCleanup(() => insertable.dispose());
     return insertable as unknown as JSX.Element;
   };
+}
+
+/**
+ * The document-adoption implementation behind `self._$SC.r(id)`
+ * placeholders (see SERVER_COMPONENT_BOOTSTRAP): find the SSR'd
+ * `frame:<id>` comment range in the document, bind an adopting frame over
+ * it (slots claim/replace within their server-rendered ranges), and hand
+ * hydration back the existing nodes so nothing re-renders. Registered per
+ * function id so post-load streams (remapped onto the same id) morph the
+ * adopted content.
+ */
+// Boundaries the page carried that a component has already bound to —
+// intercepted calls consume them exactly once, so post-load navigations go
+// to the network like any other call.
+const claimedBoundaries = new Set<string>();
+
+function findBoundaryRange(id: string): [Comment, Comment] | undefined {
+  if (typeof document === "undefined" || !document.body) return undefined;
+  const startText = `frame:${id}:start`;
+  const endText = `frame:${id}:end`;
+  const walker = document.createTreeWalker(document.body, 128 /* COMMENT */);
+  let start: Comment | null = null;
+  while (walker.nextNode()) {
+    const text = (walker.currentNode as Comment).data;
+    if (text === startText) start = walker.currentNode as Comment;
+    else if (text === endText && start) return [start, walker.currentNode as Comment];
+  }
+  return undefined;
+}
+
+function documentBoundary(host: any, id: string, props: Record<string, any>) {
+  const range = !claimedBoundaries.has(id) && findBoundaryRange(id);
+  // No SSR'd boundary on the page (client-only boot, or already claimed):
+  // mount fresh — the pending/late stream fills it exactly like the
+  // non-document path.
+  if (!range) return boundaryComponent(host, id)(props);
+  claimedBoundaries.add(id);
+  const [start, end] = range;
+  const frame = adoptFrameRange(start, end, { host, id, slots: slotsFor(props) });
+  onCleanup(() => frame.dispose());
+  const nodes: Node[] = [];
+  for (let n: Node | null = start; n; n = n.nextSibling) {
+    nodes.push(n);
+    if (n === end) break;
+  }
+  return nodes as unknown as JSX.Element;
 }
 
 /**
@@ -121,12 +175,36 @@ function boundaryComponent(host: any, id: string) {
  * call again to rebind to a custom host.
  */
 export function installServerComponents(host: any = getFrameHost()) {
+  // Upgrade the document shell's placeholder bootstrap (if present): the
+  // hydration data scripts resolved server-component references to stable
+  // per-id placeholders; installing `impl` makes them mount-adopting.
+  const g = globalThis as any;
+  if (!g._$SC) {
+    g._$SC = {
+      c: {},
+      r(i: string) {
+        return g._$SC.c[i] || (g._$SC.c[i] = (p: any) => g._$SC.impl(i, p));
+      }
+    };
+  }
+  g._$SC.impl = (id: string, props: any) => documentBoundary(host, id, props);
   configureServerFunctionsClient({
     responseHandler: createServerComponentHandler({
       host,
       capture: () => getOwner() ?? undefined,
       component: (frameId: string) => boundaryComponent(host, frameId),
-      onStream: (frameId: string) => beginStream(frameId)
+      onStream: (frameId: string) => beginStream(frameId),
+      documentComponent: (functionId: string) => g._$SC.c[functionId],
+      // The page IS the t=0 record: a call whose function has an unclaimed
+      // SSR'd boundary in the document resolves locally with the stable
+      // placeholder — the source re-runs during hydration per dynamic's
+      // contract, but no request leaves the browser. The boundary is
+      // consumed on adoption, so navigations fetch normally and (via
+      // documentComponent above) resolve to the SAME placeholder.
+      intercept: ({ id }: { id: string }) => {
+        if (claimedBoundaries.has(id) || !findBoundaryRange(id)) return undefined;
+        return g._$SC.r(id);
+      }
     })
   });
 }

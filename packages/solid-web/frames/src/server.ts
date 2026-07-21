@@ -11,7 +11,12 @@ export {
   serverComponentResponse,
   frameTransformResult,
   createFrameSink,
-  createProjectionProps
+  createProjectionProps,
+  // Document SSR (t=0): inline rendering + the hydration reference
+  createDocumentProjectionProps,
+  inlineServerComponentResult,
+  ServerComponentPlugin,
+  SERVER_COMPONENT_BOOTSTRAP
 } from "@dom-expressions/runtime/src/frame-sink.js";
 export {
   FRAME_STREAM_HEADER,
