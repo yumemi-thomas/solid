@@ -61,6 +61,10 @@ await build({
   conditions: ["browser"],
   alias: { ...alias, "@solidjs/web": web("src/index.ts") },
   plugins: [solid("client")],
+  // Minified: this example demos wire/bundle claims, so the served artifact
+  // is the honest one (string literals survive — the README grep test still
+  // works; use the sourcemap to read it).
+  minify: true,
   sourcemap: true,
   logLevel: "info"
 });
