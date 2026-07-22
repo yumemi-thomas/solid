@@ -147,7 +147,7 @@ function slotsFor(props: Record<string, any>) {
             const v = props[prop];
             return settle(normalizeSlotContent(typeof v === "function" ? v(slotProps) : v));
           };
-          if (ctx && ctx.frame && ctx.existing && ctx.existing.length) {
+          if (ctx && ctx.frame && ctx.adopted && ctx.existing && ctx.existing.length) {
             // The claim: re-render this occurrence under the SAME
             // hydration-key owner scope the document producer used —
             // solid's registry hands the render its server-rendered nodes
@@ -157,6 +157,12 @@ function slotsFor(props: Record<string, any>) {
             // hydrate window closes, so this is a scoped RE-ENTRY (the
             // late-boundary-resume pattern): a registry gathered from the
             // range, swapped in for the synchronous render.
+            //
+            // ONLY for ctx.adopted (the hydration-attach sync): a
+            // stream-driven re-call with existing nodes must render for
+            // real — claiming would no-op its inserts and silently drop
+            // whatever the re-call displaced, e.g. moved-out {$frame}
+            // region ranges (#547).
             return claimRender(`sc-${ctx.frame}-${ctx.key}-`, ctx.existing, render);
           }
           return render();
