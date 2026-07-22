@@ -3,9 +3,9 @@
 // stable component, refetches morph the boundary in place, and everything
 // the client owns inside it (collapse toggles, the draft note) survives
 // navigation.
-import { createMemo, createSignal, Loading } from "solid-js";
+import { createRenderEffect, createSignal, Loading } from "solid-js";
 import { dynamic } from "@solidjs/web";
-import { getStories, getStory } from "./data.jsx";
+import { getStoryList, getStory } from "./data.jsx";
 
 /**
  * A client component wrapping server-owned comment bodies. Its state is the
@@ -38,34 +38,48 @@ function DraftNote() {
 export function App() {
   const [storyId, setStoryId] = createSignal(1);
   const [collapseAll, setCollapseAll] = createSignal(false);
-  const stories = createMemo(async () => getStories());
 
   // The source is tracked: changing storyId re-calls the server function
   // (once — the in-flight call rides out suspended re-reads). Every
   // response for this call site resolves to the SAME component reference,
   // so nothing remounts — the stream morphs the boundary underneath.
   const Story = dynamic(() => getStory(storyId()));
+  // The nav is a server component too — its anchors are plain server
+  // content. Navigation is DELEGATED (the router contract): one document
+  // listener, no per-anchor handlers, nothing about the list serialized.
+  const StoryList = dynamic(() => getStoryList());
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", e => {
+      const a = e.target instanceof Element && e.target.closest("a[data-story]");
+      if (a) setStoryId(Number(a.getAttribute("data-story")));
+    });
+    // Active-state affordance: client state reflected onto server-owned
+    // anchors (the router's aria-current pattern, hand-rolled here).
+    createRenderEffect(
+      () => storyId(),
+      id => {
+        document.querySelectorAll("nav li").forEach(li => {
+          const a = li.querySelector("a[data-story]");
+          li.classList.toggle("active", !!a && Number(a.getAttribute("data-story")) === id);
+        });
+      }
+    );
+  }
 
   return (
     <div class="layout">
       <nav>
-        <h2>Frame News</h2>
         <Loading fallback={<p class="loading">loading…</p>}>
-          <ul>
-            {stories().map(s => (
-              <li class={s.id === storyId() ? "active" : ""}>
-                <a onClick={() => setStoryId(s.id)}>{s.title}</a>
-                <span class="meta">
-                  {s.points} points · {s.count} comments
-                </span>
-              </li>
-            ))}
-          </ul>
+          <StoryList
+            controls={
+              <label class="collapse-all">
+                <input type="checkbox" onChange={e => setCollapseAll(e.currentTarget.checked)} />
+                collapse new comments
+              </label>
+            }
+          />
         </Loading>
-        <label class="collapse-all">
-          <input type="checkbox" onChange={e => setCollapseAll(e.currentTarget.checked)} />
-          collapse new comments
-        </label>
       </nav>
       <main>
         <Loading fallback={<p class="loading">loading story…</p>}>

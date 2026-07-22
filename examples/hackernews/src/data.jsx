@@ -80,16 +80,32 @@ const STORIES = [
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const countAll = cs => cs.reduce((n, c) => n + 1 + countAll(c.replies), 0);
 
-/** Plain data out of a server function behaves exactly as before. */
-export async function getStories() {
+/**
+ * The nav is a server component too: anchors are plain server content the
+ * client delegates (a router's <a> contract — nothing serialized), and the
+ * client-only controls ride a projection position. Without this, the list
+ * would be an SSR-SPA embedded in the example — rendered as HTML AND
+ * shipped again as hydration data.
+ */
+export async function getStoryList() {
   "use server";
-  return STORIES.map(({ id, title, by, points, comments }) => ({
-    id,
-    title,
-    by,
-    points,
-    count: countAll(comments)
-  }));
+  await wait(50);
+  return props => (
+    <>
+      <h2>Frame News</h2>
+      <ul>
+        {STORIES.map(s => (
+          <li>
+            <a data-story={s.id}>{s.title}</a>
+            <span class="meta">
+              {s.points} points · {countAll(s.comments)} comments
+            </span>
+          </li>
+        ))}
+      </ul>
+      {props.controls}
+    </>
+  );
 }
 
 /**
