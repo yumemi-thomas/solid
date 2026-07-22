@@ -129,8 +129,27 @@ function slotsFor(props: Record<string, any>) {
         if (typeof prop !== "string" || !(prop in props)) return undefined;
         return (slotProps: any, ctx: any) => {
           const v = props[prop];
-          const render = () => normalizeSlotContent(typeof v === "function" ? v(slotProps) : v);
-          if (ctx && ctx.frame && ctx.existing && ctx.existing.length) {
+          // A render whose output is already inside the range (hydration
+          // claims: the nodes ARE the server-rendered DOM) is a CLAIM —
+          // return undefined per the frame contract so nothing moves.
+          const settle = (out: Node | Node[]) => {
+            const existing: Node[] = (ctx && ctx.existing) || [];
+            if (existing.length) {
+              const list = Array.isArray(out) ? out : [out];
+              const inPlace = list.every(n =>
+                existing.some(e => e === n || (e.nodeType === 1 && (e as Element).contains(n)))
+              );
+              if (inPlace) return undefined;
+            }
+            return out;
+          };
+          const render = () =>
+            settle(normalizeSlotContent(typeof v === "function" ? v(slotProps) : v));
+          // Only render-prop slots re-enter the producer's key scope: the
+          // callback creates its output inside the slot on both sides.
+          // Direct-insert values were created (and hydration-claimed) in the
+          // app tree already — just place them.
+          if (typeof v === "function" && ctx && ctx.frame && ctx.existing && ctx.existing.length) {
             // The claim: re-render this occurrence under the SAME
             // hydration-key owner scope the document producer used —
             // solid's registry hands the render its server-rendered nodes

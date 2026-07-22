@@ -25,7 +25,7 @@ const solid = mode => ({
         const code = await readFile(args.path, "utf8");
         if (!code.includes('"_DX_DEV_"')) return undefined;
         return {
-          contents: code.replaceAll('"_DX_DEV_"', "false"),
+          contents: code.replaceAll('"_DX_DEV_"', process.env.DEV ? "true" : "false"),
           loader: args.path.endsWith(".ts") ? "ts" : "js"
         };
       }

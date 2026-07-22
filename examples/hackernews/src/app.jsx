@@ -3,7 +3,7 @@
 // stable component, refetches morph the boundary in place, and everything
 // the client owns inside it (collapse toggles, the draft note) survives
 // navigation.
-import { createRenderEffect, createSignal, Loading } from "solid-js";
+import { createSignal, Loading } from "solid-js";
 import { dynamic } from "@solidjs/web";
 import { getStoryList, getStory } from "./data.jsx";
 
@@ -35,8 +35,11 @@ function DraftNote() {
   );
 }
 
+// Module scope: navigation state is wired OUTSIDE the component tree (see
+// entry-client.jsx) so hydration id parity is untouched by client-only code.
+export const [storyId, setStoryId] = createSignal(1);
+
 export function App() {
-  const [storyId, setStoryId] = createSignal(1);
   const [collapseAll, setCollapseAll] = createSignal(false);
 
   // The source is tracked: changing storyId re-calls the server function
@@ -49,35 +52,17 @@ export function App() {
   // listener, no per-anchor handlers, nothing about the list serialized.
   const StoryList = dynamic(() => getStoryList());
 
-  if (typeof document !== "undefined") {
-    document.addEventListener("click", e => {
-      const a = e.target instanceof Element && e.target.closest("a[data-story]");
-      if (a) setStoryId(Number(a.getAttribute("data-story")));
-    });
-    // Active-state affordance: client state reflected onto server-owned
-    // anchors (the router's aria-current pattern, hand-rolled here).
-    createRenderEffect(
-      () => storyId(),
-      id => {
-        document.querySelectorAll("nav li").forEach(li => {
-          const a = li.querySelector("a[data-story]");
-          li.classList.toggle("active", !!a && Number(a.getAttribute("data-story")) === id);
-        });
-      }
-    );
-  }
-
   return (
     <div class="layout">
       <nav>
         <Loading fallback={<p class="loading">loading…</p>}>
           <StoryList
-            controls={
+            children={() => (
               <label class="collapse-all">
                 <input type="checkbox" onChange={e => setCollapseAll(e.currentTarget.checked)} />
                 collapse new comments
               </label>
-            }
+            )}
           />
         </Loading>
       </nav>
@@ -87,9 +72,8 @@ export function App() {
             comment={p => (
               <CollapsibleComment collapsed={collapseAll()}>{p.children}</CollapsibleComment>
             )}
-          >
-            <DraftNote />
-          </Story>
+            children={() => <DraftNote />}
+          />
         </Loading>
       </main>
     </div>

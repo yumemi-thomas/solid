@@ -22,19 +22,38 @@ function collect(code: () => any): Promise<string> {
   });
 }
 
-function fragmentPatches(html: string) {
-  const recs = [...html.matchAll(/_\$HY\.r\["([\w]+_fr)"\]=\$R\[(\d+)\]=\(\$R\[(\d+)\]/g)];
-  const patches = new Set([...html.matchAll(/\$R\[\d+\]\(\$R\[(\d+)\],/g)].map(m => m[1]));
-  return Object.fromEntries(recs.map(([, key, , factory]) => [key, patches.has(factory)]));
+/**
+ * Ground truth, not regexes: execute the page's hydration scripts in a
+ * sandbox and report which `_fr` records actually settle.
+ */
+async function fragmentPatches(html: string) {
+  const sandbox: any = { _$HY: { r: {}, fe() {} } };
+  sandbox.self = sandbox;
+  for (const [, code] of html.matchAll(/<script(?:\s[^>]*)?>([^]*?)<\/script>/g)) {
+    if (!code.trim() || code.includes("window._$HY||")) continue;
+    // eslint-disable-next-line no-new-func
+    new Function("self", "_$HY", `with(self){${code}}`)(sandbox, sandbox._$HY);
+  }
+  const out: Record<string, boolean> = {};
+  await Promise.all(
+    Object.entries(sandbox._$HY.r)
+      .filter(([k]) => k.endsWith("_fr"))
+      .map(async ([k, v]) => {
+        out[k] = await Promise.race([
+          Promise.resolve(v).then(() => true, () => true),
+          new Promise<boolean>(r => setTimeout(() => r(false), 50))
+        ]);
+      })
+  );
+  return out;
 }
 
 describe("concurrent promise-backed dynamics under Loading", () => {
-  // KNOWN FAILING (2026-07-21): the first-resolving boundary's `_fr` never
-  // patches — its record is written, the content splices into the shell,
-  // but the resolution patch is lost (suspected: fragment-resolve vs
-  // serializer flush ordering on the pre-first-flush path). Remove
-  // `.fails` when fixing; the assertion below is the acceptance.
-  test.fails("both fragment records patch, whichever resolves first", async () => {
+  // Regression guard (2026-07-21): with two boundaries pending concurrently,
+  // the FIRST patch is emitted in resolver-defining long form
+  // (`($R[n]=(e,r)=>{…})($R[m],…)`) — pattern-matching detectors miss it
+  // (which is how this test was born); executing the scripts is the truth.
+  test("both fragment records patch, whichever resolves first", async () => {
     const A = () => <b>alpha</b>;
     const B = () => <i>beta</i>;
     const Fast = dynamic(() => wait(10).then(() => A));
@@ -57,7 +76,7 @@ describe("concurrent promise-backed dynamics under Loading", () => {
 
     expect(html).toContain(">alpha</b>");
     expect(html).toContain(">beta</i>");
-    const status = fragmentPatches(html);
+    const status = await fragmentPatches(html);
     expect(Object.keys(status).length).toBeGreaterThanOrEqual(2);
     expect(status).toEqual(
       Object.fromEntries(Object.keys(status).map(k => [k, true]))

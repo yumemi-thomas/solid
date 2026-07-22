@@ -83,13 +83,15 @@ const countAll = cs => cs.reduce((n, c) => n + 1 + countAll(c.replies), 0);
 /**
  * The nav is a server component too: anchors are plain server content the
  * client delegates (a router's <a> contract — nothing serialized), and the
- * client-only controls ride a projection position. Without this, the list
+ * client-only controls ride the children position (children have
+ * creation-time hydration-key parity on both sides — the supported t=0
+ * client-position idiom; arbitrary JSX props resolve at different tree
+ * positions server vs client). Without this, the list
  * would be an SSR-SPA embedded in the example — rendered as HTML AND
  * shipped again as hydration data.
  */
 export async function getStoryList() {
   "use server";
-  await wait(50);
   return props => (
     <>
       <h2>Frame News</h2>
@@ -103,7 +105,7 @@ export async function getStoryList() {
           </li>
         ))}
       </ul>
-      {props.controls}
+      {props.children}
     </>
   );
 }
