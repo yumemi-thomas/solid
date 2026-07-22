@@ -1,5 +1,19 @@
 # solid-js
 
+## 2.0.0-beta.23
+
+### Patch Changes
+
+- 6c95f60: Lazy memos with an in-flight async computation no longer autodispose when
+  their last subscriber momentarily drops (e.g. a consumer disposing
+  mid-request): the pending work counts as an observer, so a later subscriber
+  attaches to the same computation instead of re-executing the source — one
+  server fetch per suspended re-read, not one per churn. Settling while
+  unobserved still releases the node (normal lazy teardown resumes once
+  idle).
+- Updated dependencies [a5fe9fb]
+  - @solidjs/signals@2.0.0-beta.23
+
 ## 2.0.0-beta.22
 
 ### Patch Changes

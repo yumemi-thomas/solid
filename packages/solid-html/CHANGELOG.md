@@ -1,5 +1,12 @@
 # @solidjs/html
 
+## 2.0.0-beta.23
+
+### Patch Changes
+
+- Updated dependencies [6c95f60]
+  - @solidjs/web@2.0.0-beta.23
+
 ## 2.0.0-beta.22
 
 ### Patch Changes
