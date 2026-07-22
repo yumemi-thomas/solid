@@ -40,6 +40,18 @@ function snapshotImpl<T>(
       if (pendingCheckActive) witnessAffectsMark(target);
     }
     override = mergedOverlay(target);
+    // A derived store's STORE_VALUE is the inner store's live proxy
+    // (store-in-store: createOptimisticStore/createProjection over a store).
+    // Without an overlay of its own, the fast path below would map to — and
+    // could return — that proxy verbatim. Recurse instead so the
+    // inner store's own target branch unwraps it (chains of any depth).
+    // With an overlay, a fresh `result` is always built, so the walk over the
+    // inner proxy already copies plain values.
+    if (!override && (target[STORE_VALUE] as StoreNode)[$TARGET]) {
+      unwrapped = snapshotImpl(target[STORE_VALUE], track, map, lookup);
+      map.set(item, unwrapped);
+      return unwrapped as T;
+    }
     isArray = Array.isArray(target[STORE_VALUE]);
     map.set(
       item,
