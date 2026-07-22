@@ -3,7 +3,7 @@
 // stable component, refetches morph the boundary in place, and everything
 // the client owns inside it (collapse toggles, the draft note) survives
 // navigation.
-import { createSignal, Loading } from "solid-js";
+import { createRenderEffect, createSignal, Loading } from "solid-js";
 import { dynamic } from "@solidjs/web";
 import { getStoryList, getStory } from "./data.jsx";
 
@@ -54,6 +54,29 @@ export function App() {
   // content. Navigation is DELEGATED (the router contract): one document
   // listener, no per-anchor handlers, nothing about the list serialized.
   const StoryList = dynamic(() => getStoryList());
+
+  // Declared in-component on BOTH builds with ssrSource: "client" — the
+  // server allocates the hydration-id slot for parity and never runs it;
+  // the client runs it after hydration completes. One document-level
+  // delegated listener (the router <a> contract) + the active-state
+  // affordance reflected onto server-owned anchors.
+  createRenderEffect(
+    () => storyId(),
+    id => {
+      if (!window.__navWired) {
+        window.__navWired = true;
+        document.addEventListener("click", e => {
+          const a = e.target instanceof Element && e.target.closest("a[data-story]");
+          if (a) setStoryId(Number(a.getAttribute("data-story")));
+        });
+      }
+      document.querySelectorAll("nav li").forEach(li => {
+        const a = li.querySelector("a[data-story]");
+        li.classList.toggle("active", !!a && Number(a.getAttribute("data-story")) === id);
+      });
+    },
+    { ssrSource: "client" }
+  );
 
   return (
     <div class="layout">
