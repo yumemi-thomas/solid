@@ -24,7 +24,7 @@ import {
 } from "./core/index.js";
 import { emitDiagnostic, registerGraph } from "./core/dev.js";
 import { installOptimisticEngine } from "./core/optimistic.js";
-import { globalQueue } from "./core/scheduler.js";
+import { globalQueue, Queue } from "./core/scheduler.js";
 
 /**
  * Low-level reactive-cleanup primitive. Registers a callback that runs when
@@ -608,6 +608,13 @@ export function createReaction(
   };
 }
 
+/** Delivers effect applies on a microtask instead of queueing them (#2930). */
+class MicrotaskQueue extends Queue {
+  enqueue(type: number, fn: (type: number) => void): void {
+    queueMicrotask(() => fn(type));
+  }
+}
+
 /**
  * Awaits a reactive expression and returns its first fully-settled value as a
  * `Promise`. Pending async reads (`createMemo` returning a promise, etc.) are
@@ -637,6 +644,17 @@ export function resolve<T>(fn: () => T): Promise<T> {
   }
   return new Promise((res, rej) => {
     createRoot(dispose => {
+      // Deliver effect applies on a microtask instead of the owner queue: an
+      // incomplete transition stashes its effect queues until it settles, but
+      // an action yielding this promise is itself what keeps the transition
+      // open — the stashed res() deadlocked the action (#2930). The compute
+      // still runs in place (under the transaction's view when created inside
+      // an action step), and status/boundary notifications keep their normal
+      // route through the inherited queue.
+      const owner = getOwner()!;
+      const queue = new MicrotaskQueue();
+      queue._parent = owner._queue; // notify() forwards up the normal chain
+      owner._queue = queue;
       // A user effect rather than a bare computed: computeds are pull-based and
       // are only re-enqueued when a pending source *resolves* — a rejection just
       // marks them errored, so nothing would re-run and the promise would never
