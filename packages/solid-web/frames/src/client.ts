@@ -212,6 +212,26 @@ function documentBoundary(host: any, id: string, props: Record<string, any>) {
   if (!range) return boundaryComponent(host, id)(props);
   claimedBoundaries.add(id);
   const [start, end] = range;
+  // Occlusion records (case 3, document face): content a client wrapper
+  // never rendered during SSR shipped ONCE as hydration data instead of
+  // markup. Apply the records BEFORE binding the frame — the host buffers
+  // them per id and drains at registration, so the first slot sync claims
+  // WITH real args and the wrapper can render the occluded region later
+  // from the frame store.
+  const hy = (globalThis as any)._$HY;
+  if (hy && hy.r) {
+    const slotPrefix = `sc:slot:${id}:`;
+    for (const key of Object.keys(hy.r)) {
+      if (key.startsWith(slotPrefix)) {
+        host.apply({ type: "slot", id, version: 0, key: key.slice(slotPrefix.length), args: hy.r[key] });
+      } else if (key.startsWith("sc:region:")) {
+        const childId = key.slice("sc:region:".length);
+        if (childId.startsWith(id + ".")) {
+          host.apply({ type: "html", id: childId, version: 0, html: hy.r[key] });
+        }
+      }
+    }
+  }
   const frame = adoptFrameRange(start, end, { host, id, slots: slotsFor(props) });
   onCleanup(() => frame.dispose());
   const nodes: Node[] = [];
