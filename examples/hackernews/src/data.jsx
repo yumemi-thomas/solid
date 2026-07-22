@@ -98,7 +98,7 @@ export async function getStoryList() {
       <ul>
         {STORIES.map(s => (
           <li>
-            <a data-story={s.id}>{s.title}</a>
+            <a href={`/story/${s.id}`} data-story={s.id}>{s.title}</a>
             <span class="meta">
               {s.points} points · {countAll(s.comments)} comments
             </span>

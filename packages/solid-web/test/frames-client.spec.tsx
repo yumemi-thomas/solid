@@ -11,8 +11,8 @@
 // stubbed fetch, so the REAL server-function stub → transport → component
 // pipeline is what's under test.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createRoot, createSignal, flush, Loading } from "solid-js";
-import { dynamic } from "../src/index.js";
+import { createRoot, createSignal, flush, getOwner, Loading, onCleanup } from "solid-js";
+import { dynamic, registerElementClaim } from "../src/index.js";
 import { installServerComponents, createFrameHost, createJSONDataTable } from "../frames/src/client.js";
 import { createServerReference } from "@dom-expressions/runtime/src/server-functions/client.js";
 import { createChunk } from "@dom-expressions/runtime/src/server-functions/shared.js";
@@ -258,6 +258,71 @@ describe("server components through dynamic", () => {
     expect(div.querySelector("aside")).toBe(null);
     expect(div.querySelector("footer button")!.textContent).toBe("b");
     dispose();
+    container.remove();
+  });
+});
+
+describe("element claims (router link-state contract)", () => {
+  beforeEach(() => installServerComponents(makeHost()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  // The consumer half is a router's link-state layer: it claims each
+  // navigation-relevant element and scopes per-element state with onCleanup
+  // of the claim-time owner. Frame content materializes from stream
+  // continuations that have NO owner of their own — ownerScope (threaded by
+  // boundaryComponent) is what hands these claims the boundary's owner, so
+  // entries dispose with the boundary.
+  test("streamed SC anchors claim under the boundary owner; disposal runs consumer cleanup", async () => {
+    const claimed: string[] = [];
+    const cleaned: string[] = [];
+    const ownered: boolean[] = [];
+    const unregister = registerElementClaim(el => {
+      const href = el.getAttribute("href");
+      if (!href) return;
+      claimed.push(href);
+      ownered.push(getOwner() !== null);
+      onCleanup(() => cleaned.push(href));
+    });
+    vi.stubGlobal("fetch", async () =>
+      frameResponse("nav", [
+        { type: "start", id: "nav", version: 1 },
+        {
+          type: "html",
+          id: "nav",
+          version: 1,
+          html: '<nav><a href="/top">top</a><a href="/new">new</a></nav>'
+        },
+        { type: "complete", id: "nav", version: 1 }
+      ])
+    );
+    const getNav = createServerReference("nav/claims");
+    const Nav = dynamic(() => getNav() as any);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const dispose = createRoot(d => {
+      const div = (
+        <div>
+          <Loading fallback={<span>...</span>}>
+            <Nav />
+          </Loading>
+        </div>
+      ) as unknown as HTMLDivElement;
+      container.appendChild(div);
+      return d;
+    });
+    flush();
+    await settle();
+    flush();
+    await settle();
+    expect(container.querySelectorAll("a")).toHaveLength(2);
+    expect(claimed).toEqual(["/top", "/new"]);
+    // Claim-time owner present even though the stream applied ownerless.
+    expect(ownered).toEqual([true, true]);
+    expect(cleaned).toEqual([]);
+    dispose();
+    flush();
+    expect(cleaned.sort()).toEqual(["/new", "/top"]);
+    unregister();
     container.remove();
   });
 });

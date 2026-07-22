@@ -171,7 +171,17 @@ function slotsFor(props: Record<string, any>) {
 
 function boundaryComponent(host: any, id: string) {
   return (props: Record<string, any>) => {
-    const insertable = createFrameInsertable({ host, id, slots: slotsFor(props) });
+    // Element-claim sweeps (router link-state contract) run under this
+    // boundary's owner: consumers' per-element onCleanup disposes with the
+    // boundary, and streamed chunks — applied from microtasks with no owner
+    // of their own — still claim with the right lifetime.
+    const owner = getOwner();
+    const insertable = createFrameInsertable({
+      host,
+      id,
+      slots: slotsFor(props),
+      ownerScope: (fn: () => any) => runWithOwner(owner, fn)
+    });
     onCleanup(() => insertable.dispose());
     return insertable as unknown as JSX.Element;
   };
@@ -255,7 +265,16 @@ function documentBoundary(host: any, id: string, props: Record<string, any>) {
       }
     }
   }
-  const frame = adoptFrameRange(start, end, { host, id, slots: slotsFor(props) });
+  // ownerScope: element-claim sweeps — both the adoption sweep over the
+  // SSR'd range (whose anchors never ran compiled creation) and later
+  // streamed morphs — bind consumer cleanup to this boundary's owner.
+  const owner = getOwner();
+  const frame = adoptFrameRange(start, end, {
+    host,
+    id,
+    slots: slotsFor(props),
+    ownerScope: (fn: () => any) => runWithOwner(owner, fn)
+  });
   onCleanup(() => frame.dispose());
   const nodes: Node[] = [];
   for (let n: Node | null = start; n; n = n.nextSibling) {

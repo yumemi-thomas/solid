@@ -67,7 +67,9 @@ export function App() {
         window.__navWired = true;
         document.addEventListener("click", e => {
           const a = e.target instanceof Element && e.target.closest("a[data-story]");
-          if (a) setStoryId(Number(a.getAttribute("data-story")));
+          if (!a) return;
+          e.preventDefault();
+          setStoryId(Number(a.getAttribute("data-story")));
         });
       }
       document.querySelectorAll("nav li").forEach(li => {
