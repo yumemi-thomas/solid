@@ -18,6 +18,3 @@ overrides:
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
   '@solidjs/web': workspace:*
-  # frame-streams development: consume the sibling dom-expressions branch as
-  # live source (solid-web re-exports its src/). Remove before release.
-  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime

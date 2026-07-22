@@ -9,7 +9,6 @@ overrides:
   '@solidjs/signals': workspace:*
   solid-js: workspace:*
   '@solidjs/web': workspace:*
-  '@dom-expressions/runtime': link:../dom-expressions/packages/runtime
 
 importers:
 
@@ -40,8 +39,8 @@ importers:
         specifier: 0.50.0-next.25
         version: 0.50.0-next.25
       '@dom-expressions/runtime':
-        specifier: link:../dom-expressions/packages/runtime
-        version: link:../dom-expressions/packages/runtime
+        specifier: 0.50.0-next.26
+        version: 0.50.0-next.26(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)
       '@dom-expressions/tagged-jsx':
         specifier: 0.50.0-next.25
         version: 0.50.0-next.25
@@ -130,8 +129,8 @@ importers:
   examples/hackernews:
     devDependencies:
       '@dom-expressions/compiler':
-        specifier: 0.50.0-next.24
-        version: 0.50.0-next.24
+        specifier: 0.50.0-next.26
+        version: 0.50.0-next.26
       '@solidjs/web':
         specifier: workspace:*
         version: link:../../packages/solid-web
@@ -1045,6 +1044,11 @@ packages:
     cpu: [arm64]
     os: [darwin]
 
+  '@dom-expressions/compiler-darwin-arm64@0.50.0-next.26':
+    resolution: {integrity: sha512-xqWt1fjjmXnQCAFWWBGWIFgFnJwb4eUwx9YwgDaJMyF3Fkp/JrSKC9oFiG08wHRsUUzx0oEnTFsqWmReFHMl8g==}
+    cpu: [arm64]
+    os: [darwin]
+
   '@dom-expressions/compiler-darwin-x64@0.50.0-next.23':
     resolution: {integrity: sha512-CQqqJcHl4h8yTUGeVVQ5ZWAyXYmtWU0hszJJ0W7NdQwRbzAVewcF+S1jVAmJJ4bMwBQgcfiohjkVmveR7px4pg==}
     cpu: [x64]
@@ -1052,6 +1056,11 @@ packages:
 
   '@dom-expressions/compiler-darwin-x64@0.50.0-next.24':
     resolution: {integrity: sha512-Y2SaEwGRZxTPjSVsrmYcvsb9jblxfY1IfXwAGGMPYFgZmYUrL9QyTEF9nnqwsHEdg7pdQk5YRINQmQ302hCF8g==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@dom-expressions/compiler-darwin-x64@0.50.0-next.26':
+    resolution: {integrity: sha512-AfUmR7/8mCD2xmWK+DfVtd9VVhNqj67BgYfVdSWUfEl5WGRMmP15G0sM2R8z0F4NrD6Wj1vw7u4aDZVrEc+taA==}
     cpu: [x64]
     os: [darwin]
 
@@ -1063,6 +1072,12 @@ packages:
 
   '@dom-expressions/compiler-linux-arm64-gnu@0.50.0-next.24':
     resolution: {integrity: sha512-rx44q0WNxcB3TYrCJt07J0ZBdGFrieWAmg2ZDpjXcxCT1V2VgCoOARyLGv4FAM1dDlmJ2nymZ5XG3/H3CD8Tvg==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@dom-expressions/compiler-linux-arm64-gnu@0.50.0-next.26':
+    resolution: {integrity: sha512-2J1GxYaBvG8yEX/iylBpmYymijcmr0APiTjxAFN8JT9qAELniKCwpahs3imzyrq0UNzeXIFe0lhZBOuykbieZw==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
@@ -1079,12 +1094,22 @@ packages:
     os: [linux]
     libc: [glibc]
 
+  '@dom-expressions/compiler-linux-x64-gnu@0.50.0-next.26':
+    resolution: {integrity: sha512-htbHFRrq6xxd6IE2Ai8C5VpFjmopuec7WLJChvuMsB7AZuw5tiS+1Jx3iyaybWbvpICpbwDxYWdKfwuxp2yuvg==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
   '@dom-expressions/compiler-wasm32-wasi@0.50.0-next.23':
     resolution: {integrity: sha512-FH0epQkJFmPZMuKu4EgkycBbjzNlkN6ldagYirw9riy978qzTn0Zp9dbFViL/s4dacmAZm164sef/3wXqhcI2w==}
     engines: {node: '>=14.0.0'}
 
   '@dom-expressions/compiler-wasm32-wasi@0.50.0-next.24':
     resolution: {integrity: sha512-IAdMBNx+T2Eb7ea5L3ak1WPQBo4FI1uwZm/xorenmJ4heYbGsptMwRC1Fi/aW+HoQGH9LqFA+wnoYeZx7dcEWQ==}
+    engines: {node: '>=14.0.0'}
+
+  '@dom-expressions/compiler-wasm32-wasi@0.50.0-next.26':
+    resolution: {integrity: sha512-aaD9pU+zcv/yq4ilPJ/DCV/q3eDiXUWQtuw6xNHnwkE/B/JaWtEws83hwA1M02SvXybu8AhZQtpaCcx39xf2QQ==}
     engines: {node: '>=14.0.0'}
 
   '@dom-expressions/compiler-win32-x64-msvc@0.50.0-next.23':
@@ -1097,14 +1122,30 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@dom-expressions/compiler-win32-x64-msvc@0.50.0-next.26':
+    resolution: {integrity: sha512-FgI2u6+i0tyjlVDs7W5hFQ+0j4Xkc6skYTGlaNV8r2Go6MeFWTS5nbNPanyg6e68TJdNlcMw5nQVd6h8a1O3kw==}
+    cpu: [x64]
+    os: [win32]
+
   '@dom-expressions/compiler@0.50.0-next.23':
     resolution: {integrity: sha512-X4pDJJCOp9ZCP+c2ahcsSTJUEwvpjwTiJLb5JC5wl5TI/MzHVFoNdh/qS3nq4HiV7Uz7ZGHZSqD67xCG+QUiYw==}
 
   '@dom-expressions/compiler@0.50.0-next.24':
     resolution: {integrity: sha512-L5+bnXh+6ODiGTVTNGilBgqxtgsZyKypJI77Fi4XjiIMwVD6P3WdV0HY4gOcJGpk0doPSpOp6bTWMA+Z311loA==}
 
+  '@dom-expressions/compiler@0.50.0-next.26':
+    resolution: {integrity: sha512-4Gz8dZRbadKxBq8hZOF6vZl3dQHyqXHYUsWRRwmHkda1ZXR4nvVRFNPUkJBC7RVBMlQlINZoekBYJtoqduGTCw==}
+
   '@dom-expressions/hyperscript@0.50.0-next.25':
     resolution: {integrity: sha512-KTOzZqNtdruZGERWAGSVf5OyNrRwKri8JVt2L68WyI/k0YauIEfsxhUrUlaEYLxjsz2oCR1SakZ1xL1gDTdufQ==}
+
+  '@dom-expressions/runtime@0.50.0-next.26':
+    resolution: {integrity: sha512-Z6ra46ZNH9usb1A67I17q/DrbJCw2aY8wG5EyJrIFjS+lQUbXsjJiNhe5iP0JuxOnUU2St0A81eedF6V0/ztkw==}
+    hasBin: true
+    peerDependencies:
+      csstype: ^3.0
+      seroval: ~1.5.4
+      seroval-plugins: ~1.5.4
 
   '@dom-expressions/tagged-jsx@0.50.0-next.25':
     resolution: {integrity: sha512-g0BpwmbSKvOoHi6VWGPBNS//ZvZnFBfFeW8rP555EPhy2F8XMl+E5d4YsTm6trCqvOeFIbvvF6P95NrJxG7JYQ==}
@@ -4379,10 +4420,16 @@ snapshots:
   '@dom-expressions/compiler-darwin-arm64@0.50.0-next.24':
     optional: true
 
+  '@dom-expressions/compiler-darwin-arm64@0.50.0-next.26':
+    optional: true
+
   '@dom-expressions/compiler-darwin-x64@0.50.0-next.23':
     optional: true
 
   '@dom-expressions/compiler-darwin-x64@0.50.0-next.24':
+    optional: true
+
+  '@dom-expressions/compiler-darwin-x64@0.50.0-next.26':
     optional: true
 
   '@dom-expressions/compiler-linux-arm64-gnu@0.50.0-next.23':
@@ -4391,10 +4438,16 @@ snapshots:
   '@dom-expressions/compiler-linux-arm64-gnu@0.50.0-next.24':
     optional: true
 
+  '@dom-expressions/compiler-linux-arm64-gnu@0.50.0-next.26':
+    optional: true
+
   '@dom-expressions/compiler-linux-x64-gnu@0.50.0-next.23':
     optional: true
 
   '@dom-expressions/compiler-linux-x64-gnu@0.50.0-next.24':
+    optional: true
+
+  '@dom-expressions/compiler-linux-x64-gnu@0.50.0-next.26':
     optional: true
 
   '@dom-expressions/compiler-wasm32-wasi@0.50.0-next.23':
@@ -4411,10 +4464,20 @@ snapshots:
       '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)
     optional: true
 
+  '@dom-expressions/compiler-wasm32-wasi@0.50.0-next.26':
+    dependencies:
+      '@emnapi/core': 1.11.2
+      '@emnapi/runtime': 1.11.2
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)
+    optional: true
+
   '@dom-expressions/compiler-win32-x64-msvc@0.50.0-next.23':
     optional: true
 
   '@dom-expressions/compiler-win32-x64-msvc@0.50.0-next.24':
+    optional: true
+
+  '@dom-expressions/compiler-win32-x64-msvc@0.50.0-next.26':
     optional: true
 
   '@dom-expressions/compiler@0.50.0-next.23':
@@ -4435,7 +4498,23 @@ snapshots:
       '@dom-expressions/compiler-wasm32-wasi': 0.50.0-next.24
       '@dom-expressions/compiler-win32-x64-msvc': 0.50.0-next.24
 
+  '@dom-expressions/compiler@0.50.0-next.26':
+    optionalDependencies:
+      '@dom-expressions/compiler-darwin-arm64': 0.50.0-next.26
+      '@dom-expressions/compiler-darwin-x64': 0.50.0-next.26
+      '@dom-expressions/compiler-linux-arm64-gnu': 0.50.0-next.26
+      '@dom-expressions/compiler-linux-x64-gnu': 0.50.0-next.26
+      '@dom-expressions/compiler-wasm32-wasi': 0.50.0-next.26
+      '@dom-expressions/compiler-win32-x64-msvc': 0.50.0-next.26
+
   '@dom-expressions/hyperscript@0.50.0-next.25': {}
+
+  '@dom-expressions/runtime@0.50.0-next.26(csstype@3.2.3)(seroval-plugins@1.5.5(seroval@1.5.5))(seroval@1.5.5)':
+    dependencies:
+      babel-plugin-transform-rename-import: 2.3.0
+      csstype: 3.2.3
+      seroval: 1.5.5
+      seroval-plugins: 1.5.5(seroval@1.5.5)
 
   '@dom-expressions/tagged-jsx@0.50.0-next.25': {}
 
