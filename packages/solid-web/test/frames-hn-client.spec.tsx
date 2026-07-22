@@ -49,7 +49,7 @@ function storyResponse(version: number, title: string, texts: string[]) {
         key: `comment#${i}`,
         args: { cid: i, children: { $frame: `srv.${i}` } }
       });
-      return `<!--proj:comment#${i}:start--><!--proj:comment#${i}:end-->`;
+      return `<!--slot:comment#${i}:start--><!--slot:comment#${i}:end-->`;
     })
     .join("");
   chunks.push({
@@ -141,12 +141,12 @@ describe("HN slice — collapse UX", () => {
 
   test("initial document load: adopt + claim, zero data, page source has each text once", async () => {
     // What the document renderer would have produced: server html with the
-    // client wrappers' output already rendered inside the projection ranges.
+    // client wrappers' output already rendered inside the slot ranges.
     const page =
       "<article><h1>One</h1><section>" +
-      '<!--proj:comment#0:start--><div class="comment"><button></button>' +
+      '<!--slot:comment#0:start--><div class="comment"><button></button>' +
       "<!--frame:srv.0:start--><p>alpha-text</p><!--frame:srv.0:end-->" +
-      "</div><!--proj:comment#0:end-->" +
+      "</div><!--slot:comment#0:end-->" +
       "</section></article>";
     // The case-2 invariant on the page itself: one occurrence, and there is
     // no hydration payload at all for this content.

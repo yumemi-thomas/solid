@@ -12,7 +12,7 @@ import {
 } from "@solidjs/web/server-functions/server";
 import {
   frameTransformResult,
-  inlineServerComponentResult,
+  frameTransformDirectResult,
   ServerComponentPlugin,
   SERVER_COMPONENT_BOOTSTRAP
 } from "@solidjs/web/frames/server";
@@ -24,7 +24,7 @@ import "./data.jsx";
 import { App } from "./app.jsx";
 
 configureServerFunctionsServer({
-  transformDirectResult: inlineServerComponentResult
+  transformDirectResult: frameTransformDirectResult
 });
 
 // Everything the shell must inline before any streamed content: the

@@ -147,5 +147,43 @@ export default [
     ],
     external: ["solid-js", "seroval", "seroval-plugins/web"],
     plugins
+  },
+  // @solidjs/web/frames — the server-component transport. The client half
+  // bundles the frame runtime (store/morph/host/transport; frame-client is
+  // importless by design — cross-bundle seams like the element-claim
+  // registry and the FRAME brand ride registered symbols, so this copy and
+  // dist/web.js agree by construction). The server half bundles the frame
+  // sink and its SSR pipeline (rxcore → src/core, like every entry here).
+  {
+    input: "frames/src/client.ts",
+    output: [
+      {
+        file: "frames/dist/client.cjs",
+        format: "cjs",
+        exports: "auto"
+      },
+      {
+        file: "frames/dist/client.js",
+        format: "es"
+      }
+    ],
+    external: ["solid-js", "seroval", "seroval-plugins/web"],
+    plugins
+  },
+  {
+    input: "frames/src/server.ts",
+    output: [
+      {
+        file: "frames/dist/server.cjs",
+        format: "cjs",
+        exports: "auto"
+      },
+      {
+        file: "frames/dist/server.js",
+        format: "es"
+      }
+    ],
+    external: ["solid-js", "stream", "seroval", "seroval-plugins/web"],
+    plugins
   }
 ];

@@ -38,9 +38,9 @@ describe("occlusion records at adoption", () => {
     // never rendered (occluded), plus the records the producer flipped.
     document.body.innerHTML =
       '<div id="app"><!--frame:occ/thread:start-->' +
-      "<article><!--proj:comment#c1:start-->" +
+      "<article><!--slot:comment#c1:start-->" +
       '<div class="comment collapsed"><button>[+]</button></div>' +
-      "<!--proj:comment#c1:end--></article>" +
+      "<!--slot:comment#c1:end--></article>" +
       "<!--frame:occ/thread:end--></div>";
     (window as any)._$HY = {
       r: {

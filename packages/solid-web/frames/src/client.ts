@@ -1,5 +1,5 @@
 // @solidjs/web/frames — client half. Consume frame streams into live DOM
-// boundaries (resident store, policy-A morphs, client-owned projections).
+// boundaries (resident store, policy-A morphs, client-owned slot ranges).
 //
 // There is deliberately no server-component API in this module: calling
 // installServerComponents() once in the client entry installs the transport
@@ -8,11 +8,9 @@
 // stream resolves with a stable component — the same reference for every
 // refetch from the same call site — so `dynamic(() => getStory(id()))`
 // never remounts; the response streams into the boundary underneath and
-// server content morphs in place while client-owned projections and their
+// server content morphs in place while client-owned slot ranges and their
 // state survive (policy A).
-//
-// Source-level entry while frames are pre-release; dist/exports wiring lands
-// with the release packaging.
+
 import { createOwner, getOwner, onCleanup, runWithOwner, sharedConfig } from "solid-js";
 import type { JSX } from "solid-js";
 import {
@@ -28,7 +26,6 @@ export {
   createFrame,
   createFrameHost,
   createFrameInsertable,
-  chunkToRecords,
   FRAME_APPLIED_EVENT
 } from "@dom-expressions/runtime/src/frame-client.js";
 export {
@@ -84,7 +81,7 @@ function normalizeSlotContent(value: any): Node | Node[] {
 /**
  * The stable component minted once per boundary. Every mount creates its own
  * frame instance under the boundary id (mounting the same server component
- * twice fans the stream out to both), props are the projections — a function
+ * twice fans the stream out to both), props are the slot ranges — a function
  * prop answers the server's render-prop slots with its args; any other prop
  * (JSX children included) fills its direct-insert position — and each
  * instance disposes with its owning scope.

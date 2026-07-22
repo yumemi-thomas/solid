@@ -8,7 +8,7 @@
 //
 // The headline assertion is made at its strongest: the RAW WIRE BYTES of a
 // story response contain each comment's text exactly once — no double
-// serialization between html and projection args (transport dispatch case
+// serialization between html and slot args (transport dispatch case
 // 1) — and the request carries only the story id (client collapse state is
 // server-invisible).
 import { describe, expect, it } from "vitest";

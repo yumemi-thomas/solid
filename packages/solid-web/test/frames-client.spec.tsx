@@ -37,8 +37,8 @@ function storyResponse(version: number, title: string, comment = "first!") {
       version,
       html:
         `<article><h1>${title}</h1>` +
-        "<ul><!--proj:comment#0:start--><!--proj:comment#0:end--></ul>" +
-        "<footer><!--proj:children:start--><!--proj:children:end--></footer>" +
+        "<ul><!--slot:comment#0:start--><!--slot:comment#0:end--></ul>" +
+        "<footer><!--slot:children:start--><!--slot:children:end--></footer>" +
         "</article>"
     },
     { type: "complete", id: "srv", version }
@@ -63,7 +63,7 @@ describe("server components through dynamic", () => {
   beforeEach(() => installServerComponents(makeHost()));
   afterEach(() => vi.unstubAllGlobals());
 
-  test("mounts, fills projections from props, morphs on re-fetch without remounting", async () => {
+  test("mounts, fills slot ranges from props, morphs on re-fetch without remounting", async () => {
     const [story, setStory] = createSignal(1);
     const fetched: number[] = [];
     // Like a real server, derive the response from the REQUEST body (the
@@ -102,7 +102,7 @@ describe("server components through dynamic", () => {
     flush();
     await settle();
 
-    // Server content + both projections in place.
+    // Server content + both slot ranges in place.
     expect(div.querySelector("h1")!.textContent).toBe("Story 1");
     expect(div.querySelector("ul li")!.textContent).toBe("first!");
     const button = div.querySelector("footer button")!;
