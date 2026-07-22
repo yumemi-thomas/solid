@@ -275,6 +275,7 @@
     "rename-purewrite-to-ownedwrite",
     "renderer-owned-jsx-types",
     "repeat-disjoint-window",
+    "republish-fresh-signals-build",
     "require-seroval-1-5-4",
     "reveal-order-prop",
     "reveal-ssr-streaming-support",

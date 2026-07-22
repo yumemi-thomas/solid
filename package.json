@@ -19,6 +19,7 @@
     "types": "turbo run types",
     "publish": "pnpm run build && pnpm run types && pnpm run release:only",
     "bump": "changeset add",
+    "release": "pnpm build && changeset publish",
     "release:only": "changeset publish",
     "format": "prettier --write --cache \"**/*.[tj]s?(x)\""
   },
