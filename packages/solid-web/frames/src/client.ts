@@ -245,7 +245,12 @@ function documentBoundary(host: any, id: string, props: Record<string, any>) {
       } else if (key.startsWith("sc:region:")) {
         const childId = key.slice("sc:region:".length);
         if (childId.startsWith(id + ".")) {
-          host.apply({ type: "html", id: childId, version: 0, html: hy.r[key] });
+          // Async-occluded regions arrive as promises (the producer held
+          // the stream on them); the host buffers per id either way, so a
+          // late apply still lands before the region binds on expand.
+          const val = hy.r[key];
+          const apply = (html: any) => host.apply({ type: "html", id: childId, version: 0, html });
+          val && typeof val.then === "function" ? val.then(apply) : apply(val);
         }
       }
     }
