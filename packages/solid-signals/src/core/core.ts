@@ -203,6 +203,14 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     strictRead = false;
   }
   tracking = true;
+  // A computed's fn establishes its OWN dependencies, so it must never run
+  // inside a latest() read window: read() short-circuits through the
+  // companion path before dependency linking, so a memo created (eagerly
+  // computed) inside latest(fn) came out permanently dependency-less (#2926).
+  // latestRead() already suspends the flag for its pull-recomputes; this
+  // covers creation-time computes and flushes that run inside the window.
+  const prevLatestRead = latestReadActive;
+  latestReadActive = false;
   // Lane posture lives with the engine: OPTIMISTIC_DIRTY is only ever set by
   // engine-driven paths, and _optimisticNodes is only pushed by
   // _optimisticWrite, so the hook is installed whenever either gate holds.
@@ -261,6 +269,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     if (reaskChanged) GlobalQueue._repollVerdicts!(el);
   } finally {
     tracking = prevTracking;
+    latestReadActive = prevLatestRead;
     if (__DEV__) strictRead = prevStrictRead;
     if (isStaleEffect) stale = prevStale;
     el._flags = REACTIVE_NONE | (create ? el._flags & REACTIVE_SNAPSHOT_STALE : 0);
