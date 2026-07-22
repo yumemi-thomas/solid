@@ -1,4 +1,9 @@
-import { CONFIG_AUTO_DISPOSE, REACTIVE_RECOMPUTING_DEPS, REACTIVE_ZOMBIE } from "./constants.js";
+import {
+  CONFIG_AUTO_DISPOSE,
+  REACTIVE_RECOMPUTING_DEPS,
+  REACTIVE_ZOMBIE,
+  STATUS_PENDING
+} from "./constants.js";
 import { deleteFromHeap, queueFor } from "./heap.js";
 import { disposeChildren } from "./owner.js";
 import { dirtyQueue, zombieQueue } from "./scheduler.js";
@@ -19,10 +24,16 @@ export function unlinkSubs(link: Link): Link | null {
     if (nextSub === null) {
       dep._unobserved?.();
       // No more subscribers; only tear down if CONFIG_AUTO_DISPOSE is set.
+      // A pending node is exempt: its in-flight async work (or the
+      // transition holding it) is an observer — tearing down would orphan
+      // the work and re-execute it on the next read. The settle path runs
+      // this same last-one-out check when that observer releases (the
+      // untracked-read dispose in core.ts guards on pending identically).
       const c = dep as Computed<any>;
       (c as any)._fn &&
         c._config & CONFIG_AUTO_DISPOSE &&
         !(c._flags & REACTIVE_ZOMBIE) &&
+        !(c._statusFlags & STATUS_PENDING) &&
         unobserved(c);
     }
   }

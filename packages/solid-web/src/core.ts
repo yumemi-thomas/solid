@@ -1,5 +1,5 @@
 //@ts-nocheck
-import { createMemo, createRenderEffect } from "solid-js";
+import { createMemo, createOwner, createRenderEffect, runWithOwner } from "solid-js";
 export {
   getOwner,
   runWithOwner,
@@ -10,7 +10,12 @@ export {
   merge as mergeProps,
   flatten,
   ssrHandleError,
-  ssrScope
+  ssrScope,
+  // Hydration-zone components: the frame sink renders server-owned content
+  // under NoHydration (no `_hk` keys, no async-value hydration records — the
+  // HTML is the data) and re-enters via Hydration for client positions.
+  NoHydration,
+  Hydration
 } from "solid-js";
 
 const transparentOptions = { transparent: true, sync: true };
@@ -26,3 +31,10 @@ export const effect = (fn, effectFn, options) =>
   );
 
 export const memo = fn => createMemo(() => fn(), syncOptions);
+
+// Runs `fn` under an owner whose hydration-id chain is rooted at `id`.
+// Both builds compose child keys from the owner chain (getNextChildId), so
+// the same call on the server (document render) and the client (adopting
+// slot render) yields identical `_hk` keys — which is what lets frame slot
+// claims match by key regardless of tree position.
+export const runWithHydrationScope = (id, fn) => runWithOwner(createOwner({ id }), fn);

@@ -34,7 +34,9 @@
     "serialization/types-cjs",
     "serialization/package.json",
     "server-functions/dist",
-    "server-functions/package.json"
+    "server-functions/package.json",
+    "frames/dist",
+    "frames/package.json"
   ],
   "exports": {
     ".": {
@@ -217,6 +219,76 @@
         "default": "./server-functions/dist/client.cjs"
       }
     },
+    "./frames": {
+      "worker": {
+        "import": {
+          "types": "./types/frames/server.d.ts",
+          "default": "./frames/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/frames/server.d.cts",
+          "default": "./frames/dist/server.cjs"
+        }
+      },
+      "browser": {
+        "import": {
+          "types": "./types/frames/client.d.ts",
+          "default": "./frames/dist/client.js"
+        },
+        "require": {
+          "types": "./types-cjs/frames/client.d.cts",
+          "default": "./frames/dist/client.cjs"
+        }
+      },
+      "deno": {
+        "import": {
+          "types": "./types/frames/server.d.ts",
+          "default": "./frames/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/frames/server.d.cts",
+          "default": "./frames/dist/server.cjs"
+        }
+      },
+      "node": {
+        "import": {
+          "types": "./types/frames/server.d.ts",
+          "default": "./frames/dist/server.js"
+        },
+        "require": {
+          "types": "./types-cjs/frames/server.d.cts",
+          "default": "./frames/dist/server.cjs"
+        }
+      },
+      "import": {
+        "types": "./types/frames/client.d.ts",
+        "default": "./frames/dist/client.js"
+      },
+      "require": {
+        "types": "./types-cjs/frames/client.d.cts",
+        "default": "./frames/dist/client.cjs"
+      }
+    },
+    "./frames/server": {
+      "import": {
+        "types": "./types/frames/server.d.ts",
+        "default": "./frames/dist/server.js"
+      },
+      "require": {
+        "types": "./types-cjs/frames/server.d.cts",
+        "default": "./frames/dist/server.cjs"
+      }
+    },
+    "./frames/client": {
+      "import": {
+        "types": "./types/frames/client.d.ts",
+        "default": "./frames/dist/client.js"
+      },
+      "require": {
+        "types": "./types-cjs/frames/client.d.cts",
+        "default": "./frames/dist/client.cjs"
+      }
+    },
     "./types/*": "./types/*"
   },
   "scripts": {
@@ -224,7 +296,7 @@
     "build:clean": "rimraf dist/",
     "build:js": "rollup -c",
     "link": "symlink-dir . node_modules/@solidjs/web",
-    "types": "npm-run-all -nl types:clean types:copy-jsx types:web types:copy-web types:web-storage types:copy-serialization types:copy-server-functions types:cjs",
+    "types": "npm-run-all -nl types:clean types:copy-jsx types:web types:copy-web types:web-storage types:copy-serialization types:copy-server-functions types:copy-frames types:cjs",
     "types:clean": "rimraf types/ types-cjs/ storage/types/ storage/types-cjs/ serialization/types/ serialization/types-cjs/",
     "types:copy-jsx": "ncp ../../node_modules/@dom-expressions/runtime/src/jsx.d.ts ./src/jsx.d.ts && ncp ../../node_modules/@dom-expressions/runtime/src/jsx-properties.d.ts ./src/jsx-properties.d.ts && dom-expressions-jsx-types --input ./src/jsx.d.ts --element \"SolidElement | Node | ArrayElement\" --import 'import type { Element as SolidElement } from \"solid-js\";'",
     "types:web": "tsc --project ./tsconfig.build.json",
@@ -232,6 +304,7 @@
     "types:web-storage": "tsc --project ./storage/tsconfig.build.json",
     "types:copy-serialization": "node -e \"fs.mkdirSync('./serialization/types', { recursive: true }); fs.copyFileSync('../../node_modules/@dom-expressions/runtime/src/serializer.d.ts', './serialization/types/index.d.ts');\"",
     "types:copy-server-functions": "node -e \"fs.mkdirSync('./types/server-functions', { recursive: true }); for (const f of ['shared', 'client', 'server']) fs.copyFileSync('../../node_modules/@dom-expressions/runtime/src/server-functions/' + f + '.d.ts', './types/server-functions/' + f + '.d.ts');\"",
+    "types:copy-frames": "node -e \"fs.mkdirSync('./types/frames', { recursive: true }); for (const f of ['frame-client', 'frame-transport', 'frame-sink', 'serializer']) fs.copyFileSync('../../node_modules/@dom-expressions/runtime/src/' + f + '.d.ts', './types/frames/' + f + '.d.ts'); for (const f of ['client', 'server']) fs.copyFileSync('./frames/types/' + f + '.d.ts', './types/frames/' + f + '.d.ts');\"",
     "types:cjs": "node ../../scripts/sync-dual-types.mjs ./types ./types-cjs ./storage/types ./storage/types-cjs ./serialization/types ./serialization/types-cjs",
     "test": "vitest run && vitest run --config vite.config.server.mjs && vitest run --config vite.config.hydrate.mjs",
     "test:server": "vitest run --config vite.config.server.mjs",
