@@ -190,18 +190,35 @@ function boundaryComponent(host: any, id: string) {
 // to the network like any other call.
 const claimedBoundaries = new Set<string>();
 
+// One document walk indexes every SSR'd frame-marker pair; the intercept
+// and adoption paths become map lookups (previously each ran its own full
+// TreeWalker — 2N walks for N boundaries). Boundaries are static document
+// output: entries are only consumed once (claimedBoundaries), so the index
+// never needs invalidation.
+let boundaryIndex: Map<string, [Comment, Comment]> | null = null;
 function findBoundaryRange(id: string): [Comment, Comment] | undefined {
-  if (typeof document === "undefined" || !document.body) return undefined;
-  const startText = `frame:${id}:start`;
-  const endText = `frame:${id}:end`;
-  const walker = document.createTreeWalker(document.body, 128 /* COMMENT */);
-  let start: Comment | null = null;
-  while (walker.nextNode()) {
-    const text = (walker.currentNode as Comment).data;
-    if (text === startText) start = walker.currentNode as Comment;
-    else if (text === endText && start) return [start, walker.currentNode as Comment];
+  if (!boundaryIndex) {
+    boundaryIndex = new Map();
+    if (typeof document !== "undefined" && document.body) {
+      const walker = document.createTreeWalker(document.body, 128 /* COMMENT */);
+      const opens: Record<string, Comment> = {};
+      let c: Node | null;
+      while ((c = walker.nextNode())) {
+        const d = (c as Comment).data;
+        if (!d.startsWith("frame:")) continue;
+        if (d.endsWith(":start")) {
+          const key = d.slice(6, -6);
+          if (key && !(key in opens)) opens[key] = c as Comment;
+        } else if (d.endsWith(":end")) {
+          const key = d.slice(6, -4);
+          if (key && opens[key] && !boundaryIndex.has(key)) {
+            boundaryIndex.set(key, [opens[key], c as Comment]);
+          }
+        }
+      }
+    }
   }
-  return undefined;
+  return boundaryIndex.get(id);
 }
 
 function documentBoundary(host: any, id: string, props: Record<string, any>) {
