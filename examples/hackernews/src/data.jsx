@@ -141,7 +141,7 @@ function CommentSection(props) {
   });
   return (
     <section class="comments">
-      {ready() && props.story.comments.map(c => renderComment(c, props.comment))}
+      {ready() && props.story.comments.map(c => renderComment(c, props.comment, 0))}
     </section>
   );
 }
@@ -153,16 +153,21 @@ function CommentSection(props) {
  * `$key` names the occurrence by entity so wrapper state follows the
  * comment across refetches.
  */
-function renderComment(c, comment) {
+function renderComment(c, comment, depth) {
   return comment({
     $key: c.id,
     cid: c.id,
+    // Deep replies start collapsed — and since the wrapper then never
+    // renders their bodies during document SSR, that content ships as an
+    // occlusion record (case 3), not markup: expand and it mounts from the
+    // frame store. Still exactly once on the wire.
+    collapsed: depth >= 2 || undefined,
     children: (
       <div class="body">
         <p>
           <b>{c.by}</b> {c.text}
         </p>
-        <div class="replies">{c.replies.map(r => renderComment(r, comment))}</div>
+        <div class="replies">{c.replies.map(r => renderComment(r, comment, depth + 1))}</div>
       </div>
     )
   });

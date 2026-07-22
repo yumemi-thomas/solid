@@ -16,12 +16,15 @@ import { getStoryList, getStory } from "./data.jsx";
 function CollapsibleComment(props) {
   const [local, setLocal] = createSignal(null);
   const collapsed = () => local() ?? props.collapsed;
+  // Conditional children: a collapsed comment's body is NOT rendered — at
+  // document SSR that occludes the server content, which then ships as a
+  // record (case 3) and mounts from the frame store on first expand.
   return (
     <div class={"comment" + (collapsed() ? " collapsed" : "")}>
       <button class="toggle" onClick={() => setLocal(!collapsed())}>
         {collapsed() ? "[+]" : "[–]"}
       </button>
-      {props.children}
+      {!collapsed() && props.children}
     </div>
   );
 }
@@ -70,7 +73,9 @@ export function App() {
         <Loading fallback={<p class="loading">loading story…</p>}>
           <Story
             comment={p => (
-              <CollapsibleComment collapsed={collapseAll()}>{p.children}</CollapsibleComment>
+              <CollapsibleComment collapsed={collapseAll() || p.collapsed}>
+                {p.children}
+              </CollapsibleComment>
             )}
             children={() => <DraftNote />}
           />
