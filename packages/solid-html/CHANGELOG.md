@@ -1,5 +1,12 @@
 # @solidjs/html
 
+## 2.0.0-beta.22
+
+### Patch Changes
+
+- 59fe5a7: Wire `claimElement` into the tagged-jsx runtime so anchors and forms with static `href`/`action` in `html` templates reach element-claim consumers (e.g. a router's link-state layer), matching compiled JSX. Dynamic and spread attributes were already claimed through the attribute-write recheck.
+  - @solidjs/web@2.0.0-beta.22
+
 ## 2.0.0-beta.21
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @solidjs/web
 
+## 2.0.0-beta.22
+
+### Patch Changes
+
+- solid-js@2.0.0-beta.22
+
 ## 2.0.0-beta.21
 
 ### Patch Changes
