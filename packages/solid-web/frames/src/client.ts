@@ -128,7 +128,6 @@ function slotsFor(props: Record<string, any>) {
       get(_, prop) {
         if (typeof prop !== "string" || !(prop in props)) return undefined;
         return (slotProps: any, ctx: any) => {
-          const v = props[prop];
           // A render whose output is already inside the range (hydration
           // claims: the nodes ARE the server-rendered DOM) is a CLAIM —
           // return undefined per the frame contract so nothing moves.
@@ -143,13 +142,15 @@ function slotsFor(props: Record<string, any>) {
             }
             return out;
           };
-          const render = () =>
-            settle(normalizeSlotContent(typeof v === "function" ? v(slotProps) : v));
-          // Only render-prop slots re-enter the producer's key scope: the
-          // callback creates its output inside the slot on both sides.
-          // Direct-insert values were created (and hydration-claimed) in the
-          // app tree already — just place them.
-          if (typeof v === "function" && ctx && ctx.frame && ctx.existing && ctx.existing.length) {
+          // The prop is read INSIDE the render: compiled component props are
+          // getters, so JSX evaluates lazily at access — deferring the access
+          // into the scoped owner is what makes plain JSX (no thunks) get the
+          // producer's hydration keys.
+          const render = () => {
+            const v = props[prop];
+            return settle(normalizeSlotContent(typeof v === "function" ? v(slotProps) : v));
+          };
+          if (ctx && ctx.frame && ctx.existing && ctx.existing.length) {
             // The claim: re-render this occurrence under the SAME
             // hydration-key owner scope the document producer used —
             // solid's registry hands the render its server-rendered nodes

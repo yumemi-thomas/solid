@@ -59,14 +59,12 @@ export function App() {
     <div class="layout">
       <nav>
         <Loading fallback={<p class="loading">loading…</p>}>
-          <StoryList
-            children={() => (
-              <label class="collapse-all">
-                <input type="checkbox" onChange={e => setCollapseAll(e.currentTarget.checked)} />
-                collapse new comments
-              </label>
-            )}
-          />
+          <StoryList>
+            <label class="collapse-all">
+              <input type="checkbox" onChange={e => setCollapseAll(e.currentTarget.checked)} />
+              collapse new comments
+            </label>
+          </StoryList>
         </Loading>
       </nav>
       <main>
@@ -77,8 +75,9 @@ export function App() {
                 {p.children}
               </CollapsibleComment>
             )}
-            children={() => <DraftNote />}
-          />
+          >
+            <DraftNote />
+          </Story>
         </Loading>
       </main>
     </div>
