@@ -12,15 +12,28 @@ pnpm start   # http://localhost:3003        (node server.mjs)
 
 ## What to look at
 
-**The wire.** Open devtools → network, click a story, inspect the `/_server`
-response. The server function returned a *function*, so the response is a
-frame stream: the story renders as HTML chunks, streamed (the shell flushes
-immediately; the comments fragment arrives ~400ms later and reveals in
-place). Now run the acceptance test this architecture is built around —
-**search the response for any comment's text: it appears exactly once.**
-There are no serialized component trees and no hydration data for server
-content; the only data records are per-occurrence primitives (`cid`) and
-fragment bookkeeping.
+**Expand a deep reply (the best trick in the app).** Deep replies start
+collapsed — and because the wrapper never *rendered* them, their bodies are
+not in the page at all. View-source and search for the deepest comment's
+text: it appears exactly once, inside a small data record, not as markup.
+Click `[+]`: the body mounts **with zero network** — from a record that
+shipped once. That's transport dispatch case 3 (the occlusion flip): the
+server tracks which content the client actually rendered and ships the
+rest as data instead of markup — never both.
+
+**The initial page.** View-source: the story and nav are server-rendered
+inline, every visible comment's text exactly once, no hydration blob for
+server content. On boot the client makes **zero requests** — the page
+itself is the payload; wrappers *claim* their server-rendered DOM by
+hydration key (inspect a comment: the live node still carries its
+`sc-…` key), and behavior binds onto claimed nodes.
+
+**The wire.** Open devtools → network, click a story. The server function
+returned a *function*, so the response is a frame stream: HTML chunks,
+streamed (the shell flushes immediately; the comments fragment arrives
+~400ms later and reveals in place). Search the response for any comment's
+text: exactly once. The only data records are per-occurrence primitives
+(`cid`) — and only those not already recoverable from the rendered page.
 
 **The client bundle.** Grep `dist/client.js` for any story title or comment
 text — nothing. The client build replaced the server functions with
