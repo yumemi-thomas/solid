@@ -90,15 +90,27 @@ const countAll = cs => cs.reduce((n, c) => n + 1 + countAll(c.replies), 0);
  * would be an SSR-SPA embedded in the example — rendered as HTML AND
  * shipped again as hydration data.
  */
-export async function getStoryList() {
+export async function getStoryList(active) {
   "use server";
+  // `active` is a SERVER INPUT — the current story at request time — so the
+  // t=0 document ships with the right link already marked before any JS
+  // runs. Post-boot the active affordance is client-owned (the delegated
+  // reflection in app.jsx; a router would own it via element claims) and
+  // this argument is never re-sent: the nav frame never refetches on
+  // navigation.
   return props => (
     <>
       <h2>Frame News</h2>
       <ul>
         {STORIES.map(s => (
-          <li>
-            <a href={`/story/${s.id}`} data-story={s.id}>{s.title}</a>
+          <li class={s.id === active ? "active" : undefined}>
+            <a
+              href={`/story/${s.id}`}
+              data-story={s.id}
+              aria-current={s.id === active ? "page" : undefined}
+            >
+              {s.title}
+            </a>
             <span class="meta">
               {s.points} points · {countAll(s.comments)} comments
             </span>

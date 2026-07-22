@@ -10,7 +10,12 @@ export {
   merge as mergeProps,
   flatten,
   ssrHandleError,
-  ssrScope
+  ssrScope,
+  // Hydration-zone components: the frame sink renders server-owned content
+  // under NoHydration (no `_hk` keys, no async-value hydration records — the
+  // HTML is the data) and re-enters via Hydration for client positions.
+  NoHydration,
+  Hydration
 } from "solid-js";
 
 const transparentOptions = { transparent: true, sync: true };

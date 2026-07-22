@@ -23,7 +23,10 @@ rest as data instead of markup — never both.
 
 **The initial page.** View-source: the story and nav are server-rendered
 inline, every visible comment's text exactly once, no hydration blob for
-server content. On boot the client makes **zero requests** — the page
+server content — and no hydration keys on it either: the only `_hk`
+attributes on the page are the client wrappers' claim keys. The current
+story's link ships already active (`aria-current` in the markup, before
+any JS). On boot the client makes **zero requests** — the page
 itself is the payload; wrappers *claim* their server-rendered DOM by
 hydration key (inspect a comment: the live node still carries its
 `sc-…` key), and behavior binds onto claimed nodes.
@@ -82,7 +85,7 @@ data blob). Same seed, same pipeline, same server — measured 2026-07-20:
 | content in hydration data | full story JSON | none |
 | content components in the bundle | all of them | interactive wrappers only |
 | requests at boot | 0 | 0 |
-| initial document | 7.1 KB | 7.6 KB |
+| initial document | 7.1 KB | 7.5 KB |
 | inline data scripts | 3.1 KB | 2.6 KB |
 | client bundle (min/gz) | 89.4 K / 30.9 K | 109.7 K / 37.8 K |
 | per-navigation wire | 0.7 KB JSON | 2.3 KB HTML chunks |

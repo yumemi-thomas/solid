@@ -3,7 +3,7 @@
 // stable component, refetches morph the boundary in place, and everything
 // the client owns inside it (collapse toggles, the draft note) survives
 // navigation.
-import { createRenderEffect, createSignal, Loading } from "solid-js";
+import { createRenderEffect, createSignal, Loading, untrack } from "solid-js";
 import { dynamic } from "@solidjs/web";
 import { getStoryList, getStory } from "./data.jsx";
 
@@ -53,7 +53,10 @@ export function App() {
   // The nav is a server component too — its anchors are plain server
   // content. Navigation is DELEGATED (the router contract): one document
   // listener, no per-anchor handlers, nothing about the list serialized.
-  const StoryList = dynamic(() => getStoryList());
+  // untrack: the current story is a t=0 SERVER INPUT (it SSRs the active
+  // link into the document); active state is client-owned after boot, so
+  // navigation must NOT refetch the nav.
+  const StoryList = dynamic(() => getStoryList(untrack(storyId)));
 
   // Declared in-component on BOTH builds with ssrSource: "client" — the
   // server allocates the hydration-id slot for parity and never runs it;
@@ -74,7 +77,14 @@ export function App() {
       }
       document.querySelectorAll("nav li").forEach(li => {
         const a = li.querySelector("a[data-story]");
-        li.classList.toggle("active", !!a && Number(a.getAttribute("data-story")) === id);
+        const isActive = !!a && Number(a.getAttribute("data-story")) === id;
+        li.classList.toggle("active", isActive);
+        // Own the whole affordance the server rendered at t=0 — a router
+        // consuming element claims would do exactly this per claimed anchor.
+        if (a) {
+          if (isActive) a.setAttribute("aria-current", "page");
+          else a.removeAttribute("aria-current");
+        }
       });
     },
     { ssrSource: "client" }
