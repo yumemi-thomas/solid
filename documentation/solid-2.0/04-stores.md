@@ -148,7 +148,9 @@ This pairs naturally with `createProjection`, where returning a value from the d
 
 ### Shallow stores (`shallow: true`)
 
-By default stores track at property level all the way down. `createStore(value, { shallow: true })` creates a **single-layer** store instead: the root's own keys are fully reactive (per-key tracking, membership, enumeration, `length`), while the values under them are **plain records replaced by reference** — no proxies, no tracking, and no deep diffing below the boundary.
+By default stores track at property level all the way down — that is the model, and it is the right choice for almost all state. `shallow: true` is a **specialized performance opt-in** for one identifiable workload shape, not a general recommendation: reach for it when profiling shows ingestion cost on data whose records change wholesale.
+
+`createStore(value, { shallow: true })` creates a **single-layer** store: the root's own keys are fully reactive (per-key tracking, membership, enumeration, `length`), while the values under them are **plain records replaced by reference** — no proxies, no tracking, and no deep diffing below the boundary.
 
 ```js
 const [rows, setRows] = createStore(initialRows, { shallow: true });
@@ -163,7 +165,7 @@ The contract, stated once: **records are replaced, never edited.**
 
 - Reads below the boundary — including inside a setter — hand back the plain record, so read-then-replace, `filter`/`pop` removal idioms, and projection derives all work naturally. Mutating a record in place notifies nothing.
 - Records that pass through a shallow boundary stay plain permanently and present identically through every store (one identity — never wrapped elsewhere). Ingesting a value that is already deep-tracked throws in dev.
-- `reconcile` at the boundary is positional (`reconcile(fresh, null)`). Keyed row identity belongs to the consumer:
+- `reconcile` at the boundary is positional (`reconcile(fresh, null)`). Keyed row identity belongs to the consumer. In a deep store, reference-keyed `<For>` works because reconcile preserves each row's *proxy* across payloads; shallow rows have no proxy, so a rebuilt payload means new references in every slot — give `<For>` the identity function the proxy used to embody. (Reference keying remains fine when your data flow reuses objects for unchanged records.)
 
 ```js
 <For each={rows} keyed={(row) => row.id}>
