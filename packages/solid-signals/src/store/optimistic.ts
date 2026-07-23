@@ -30,7 +30,9 @@ import {
   STORE_OPTIMISTIC_OVERRIDE,
   STORE_OPTIMISTIC_OWNERS,
   STORE_VALUE,
+  STORE_SHALLOW,
   STORE_WRAP,
+  markRawIngest,
   notifySelf,
   storeSetter,
   storeTraps,
@@ -85,7 +87,8 @@ import {
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
 export function createOptimisticStore<T extends object = {}>(
-  store: NoFn<T> | Store<NoFn<T>>
+  store: NoFn<T> | Store<NoFn<T>>,
+  options?: ProjectionOptions
 ): [get: Store<T>, set: StoreSetter<T>];
 export function createOptimisticStore<T extends object = {}>(
   fn: (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
@@ -103,6 +106,8 @@ export function createOptimisticStore<T extends object = {}>(
   installOptimisticEngine();
   GlobalQueue._clearOptimisticStores ||= clearOptimisticStores;
   const derived = typeof first === "function";
+  // Plain form: the second slot carries options.
+  if (!derived && options === undefined) options = second as ProjectionOptions | undefined;
   const initialValue = (derived ? second : first) as T;
   const fn = derived
     ? (first as (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>)
@@ -217,9 +222,14 @@ function createOptimisticProjectionInternal<T extends object = {}>(
   let node: Computed<void> | undefined;
   const wrappedMap = new WeakMap();
 
+  const shallow = !!(options as any)?.shallow;
   const wrapper = (s: any) => {
     s[STORE_WRAP] = wrapProjection;
     s[STORE_LOOKUP] = wrappedMap;
+    if (shallow) {
+      s[STORE_SHALLOW] = true;
+      markRawIngest(s[STORE_VALUE]);
+    }
     s[STORE_OPTIMISTIC] = true; // Mark as optimistic store
     Object.defineProperty(s, STORE_FIREWALL, {
       get() {

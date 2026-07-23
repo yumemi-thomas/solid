@@ -1,6 +1,8 @@
 import { STATUS_PENDING, STATUS_UNINITIALIZED, unwrapOverride } from "../core/constants.js";
 import {
   pendingCheckActive,
+  READ_SLOW,
+  readNodeFast,
   snapshotCaptureActive,
   snapshotSources,
   strictRead
@@ -70,6 +72,8 @@ export interface StoreOptions {
 export interface ProjectionOptions extends StoreOptions {
   /** Key property name or function for reconciliation identity */
   key?: string | ((item: NonNullable<any>) => any);
+  /** Single-layer store: root keys reactive, values raw records replaced by reference */
+  shallow?: boolean;
 }
 export type NoFn<T> = T extends Function ? never : T;
 
@@ -102,7 +106,8 @@ export const STORE_VALUE = "v",
   STORE_OPTIMISTIC = "p",
   STORE_OPTIMISTIC_OWNERS = "t",
   STORE_PARENT = "u",
-  STORE_DESC = "d";
+  STORE_DESC = "d",
+  STORE_SHALLOW = "s";
 const STORE_SELF_PENDING = Symbol(__DEV__ ? "STORE_SELF_PENDING" : 0);
 
 export type StoreNode = {
@@ -127,6 +132,10 @@ export type StoreNode = {
   // Serves node-presence bubbling (#2902); roots and store-in-store roots
   // have none. First wrapper wins — diamond reachability is untracked.
   [STORE_PARENT]?: StoreNode;
+  // Shallow boundary: this target's own keys are reactive, its values are
+  // raw records replaced by reference. Values ingested below the boundary are
+  // sticky-marked raw (rawValues) so they present raw through every store.
+  [STORE_SHALLOW]?: boolean;
   // Sticky "this subtree (self included) carries signal nodes" flag, set by
   // getNode and bubbled up STORE_PARENT. Reconcile's object diff descends
   // into node-less children only when this is set, so never-subscribed
@@ -170,6 +179,7 @@ function initStoreFields(newTarget: any) {
   newTarget[STORE_SNAPSHOT_PROPS] = undefined;
   newTarget[STORE_PARENT] = undefined;
   newTarget[STORE_DESC] = undefined;
+  newTarget[STORE_SHALLOW] = undefined;
   newTarget[$PROXY] = null;
 }
 
@@ -196,22 +206,114 @@ export function createStoreProxy<T extends object>(
   return (newTarget[$PROXY] = new Proxy(newTarget, traps));
 }
 
+// The global lookup maps raw value -> StoreNode TARGET (not proxy): reconcile
+// and the unwrap/snapshot walks resolve targets through it constantly, and a
+// target hit is a plain field read away from its proxy while a proxy hit
+// costs a trap to get back to the target. Per-family STORE_LOOKUP maps
+// (projections/optimistic) still map raw -> proxy — their wrap functions own
+// that contract — so mixed-lookup consumers resolve through lookupTarget().
 export const storeLookup = new WeakMap();
 // Node records that hold at least one user (non-`$TRACK`) symbol-keyed node.
 // Lets reconcile enumerate symbols only for records that need it (#2851).
 export const symbolKeyedRecords = new WeakSet<object>();
+export function lookupTarget(value: any, lookup?: WeakMap<any, any>): StoreNode | undefined {
+  if (lookup !== undefined && lookup !== storeLookup) {
+    const p = lookup.get(value);
+    if (p !== undefined) return p[$TARGET];
+  }
+  return storeLookup.get(value);
+}
+// Values marked raw never acquire a proxy identity: wrap() serves them as-is
+// everywhere — deep stores hold them as leaf values replaced by reference.
+// Once raw, always raw (identity stays single, just unwrapped). Consulted
+// only on wrap-creation and ingest paths; reads never touch it.
+const rawValues = new WeakSet<object>();
+
+/**
+ * Marks a value as raw: no store will ever wrap it — every store presents it
+ * as-is, tracked by reference at whatever slot holds it and updated by
+ * replacement. Useful for class instances and external objects (editors,
+ * scene graphs, Maps) and for record-shaped data updated wholesale. Sticky
+ * for the value's lifetime.
+ */
+// Flipped on the first mark and exported as a LIVE binding: reconcile
+// consults it on every recursable pair, and importing the boolean directly
+// lets those sites skip even the function call when no shallow store or raw
+// mark exists anywhere in the app.
+export let rawValuesUsed = false;
+
+export function isRawValue(value: any): boolean {
+  return rawValuesUsed && rawValues.has(value);
+}
+
+export function markRaw<T>(value: T): T {
+  if (isWrappable(value)) {
+    if (__DEV__ && storeLookup.has(value as object))
+      throw new Error("markRaw: value is already tracked by a store");
+    rawValuesUsed = true;
+    rawValues.add(value as object);
+  }
+  return value;
+}
+
+function markRawOne(v: any) {
+  if (isWrappable(v)) {
+    if (__DEV__ && storeLookup.has(v))
+      throw new Error(
+        "shallow store: an ingested record is already tracked as a deep store — one value cannot present both wrapped and raw"
+      );
+    rawValuesUsed = true;
+    rawValues.add(v);
+  }
+}
+
+export function markRawIngest(container: any) {
+  if (Array.isArray(container)) {
+    for (let i = 0, len = container.length; i < len; i++) markRawOne(container[i]);
+  } else {
+    for (const k in container) markRawOne(container[k]);
+  }
+}
+
 export function wrap<T extends Record<PropertyKey, any>>(value: T, target?: StoreNode): T {
+  // Raw is raw in every family: the mark must preempt family wrapping too,
+  // or a shallow projection/optimistic store would proxy its raw records.
+  if (rawValuesUsed && rawValues.has(value)) return value;
   if (target?.[STORE_WRAP]) {
     const p = target[STORE_WRAP](value, target);
     const t: StoreNode | undefined = p[$TARGET];
     if (t && !t[STORE_PARENT] && t !== target) t[STORE_PARENT] = target;
     return p;
   }
-  let p = value[$PROXY] || storeLookup.get(value);
+  const t = storeLookup.get(value);
+  if (t !== undefined) return t[$PROXY];
+  let p = value[$PROXY];
   if (!p) {
-    storeLookup.set(value, (p = createStoreProxy(value)));
-    if (target) p[$TARGET][STORE_PARENT] = target;
+    p = createStoreProxy(value);
+    const newTarget = p[$TARGET];
+    storeLookup.set(value, newTarget);
+    if (target) newTarget[STORE_PARENT] = target;
   }
+  return p;
+}
+
+// Shallow store root: the target itself is fully reactive (per-key nodes,
+// membership, $TRACK); its values are served raw. Seed values are marked at
+// creation; reconcile and the set trap mark on ingest.
+export function wrapShallow<T extends Record<PropertyKey, any>>(value: T): T {
+  const existing = storeLookup.get(value);
+  if (existing !== undefined) {
+    if (existing[STORE_SHALLOW]) return existing[$PROXY];
+    if (__DEV__)
+      throw new Error("createStore({ shallow }): value is already tracked as a deep store");
+  }
+  if (__DEV__ && (value as any)[$TARGET])
+    throw new Error("createStore({ shallow }): value is already a store proxy");
+  const p = createStoreProxy(value);
+  const newTarget = p[$TARGET];
+  newTarget[STORE_SHALLOW] = true;
+  storeLookup.set(value, newTarget);
+  markRawIngest(value);
   return p;
 }
 
@@ -232,7 +334,7 @@ function writeOnly(proxy: any) {
 }
 
 function unwrapStoreValue(value: any, map?: Map<any, any>, lookup?: WeakMap<any, any>) {
-  const target = value?.[$TARGET] || lookup?.get(value)?.[$TARGET];
+  const target = value?.[$TARGET] || lookupTarget(value, lookup);
   if (!target) return value;
   const override = target[STORE_OVERRIDE];
   if (!override) return target[STORE_VALUE];
@@ -462,8 +564,7 @@ function walkAffectsScope(
   visited: Set<object>
 ): void {
   if (!isWrappable(value)) return;
-  const target: StoreNode | undefined =
-    value[$TARGET] || (lookup ?? storeLookup).get(value)?.[$TARGET];
+  const target: StoreNode | undefined = value[$TARGET] || lookupTarget(value, lookup);
   const raw = target ? target[STORE_VALUE] : value;
   if (visited.has(raw)) return;
   visited.add(raw);
@@ -886,8 +987,25 @@ export const storeTraps: ProxyHandler<StoreNode> = {
       const nodes = target[STORE_NODE];
       const node = nodes && nodes[property];
       if (node !== undefined && target[STORE_VALUE][$TARGET] === undefined) {
-        let value = read(node);
+        // readNodeFast is read()'s plain-signal fast path hoisted over the
+        // call; READ_SLOW means a global read window (latest/pending-check/
+        // transition/lane/snapshot capture) or a node layer is active, and
+        // only then does the full read() resolution have anything to do.
+        let value = readNodeFast(node);
+        if (value === READ_SLOW) value = read(node);
         if (value === $DELETED) value = undefined;
+        // Every node-writing site wraps wrappables before setSignal (see the
+        // dev assertion below), so re-wrapping on read is redundant — except
+        // during snapshot capture, where read() can surface a raw captured
+        // value seeded from snapshot props.
+        if (!snapshotCaptureActive) {
+          if (__DEV__ && isWrappable(value) && wrap(value, target) !== value) {
+            throw new Error(
+              "store node invariant violated: node held an unwrapped wrappable value"
+            );
+          }
+          return value;
+        }
         return isWrappable(value) ? wrap(value, target) : value;
       }
     }
@@ -931,6 +1049,11 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         tracked && (overridden || !proxySource) ? visibleNodeValue(tracked) : storeValue[property];
       value === $DELETED && (value = undefined);
       if (!isWrappable(value)) return value;
+      // Shallow boundary: records are replaced, never edited in place. Reads
+      // inside a setter serve the raw so read-then-replace, filter/pop and
+      // projection derives all work; in-place mutation of a raw is inert by
+      // construction — the same contract as a markRaw child in a deep store.
+      if (target[STORE_SHALLOW]) return value;
       const wrapped = wrap(value, target);
       Writing?.add(wrapped);
       return wrapped;
@@ -1019,6 +1142,7 @@ export const storeTraps: ProxyHandler<StoreNode> = {
           ? prevLayer[property] !== $DELETED
           : property in target[STORE_VALUE];
         const value = unwrapStoreValue(rawValue);
+        if (target[STORE_SHALLOW] && isWrappable(value)) rawValues.add(value);
         // Symbol-keyed writes on arrays are metadata, not index writes — never run
         // them through the numeric index/length machinery (`parseInt` on a symbol
         // throws). #2769
@@ -1296,7 +1420,10 @@ export function storeSetter<T extends object>(store: Store<T>, fn: (draft: T) =>
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
-export function createStore<T extends object = {}>(store: NoFn<T> | Store<NoFn<T>>): StoreReturn<T>;
+export function createStore<T extends object = {}>(
+  store: NoFn<T> | Store<NoFn<T>>,
+  options?: StoreOptions & { shallow?: boolean }
+): StoreReturn<T>;
 export function createStore<T extends object = {}>(
   fn: (store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
   store: Partial<T> | Store<NoFn<T>>,
@@ -1310,7 +1437,9 @@ export function createStore<T extends object = {}>(
   const derived = typeof first === "function",
     wrappedStore = derived
       ? createProjectionInternal(first, second as NoFn<T> | Store<NoFn<T>>, options).store
-      : wrap(first);
+      : (second as (StoreOptions & { shallow?: boolean }) | undefined)?.shallow
+        ? wrapShallow(first as any)
+        : wrap(first);
 
   if (__DEV__) registerGraph(wrappedStore, getOwner());
 

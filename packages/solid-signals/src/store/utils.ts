@@ -16,6 +16,9 @@ import {
   STORE_LOOKUP,
   STORE_VALUE,
   storeLookup,
+  lookupTarget,
+  isRawValue,
+  rawValuesUsed,
   trackSelf,
   witnessAffectsMark,
   wrap,
@@ -32,7 +35,7 @@ function snapshotImpl<T>(
   if (!isWrappable(item)) return item;
   if (map && map.has(item)) return map.get(item) as T;
   if (!map) map = new Map();
-  if ((target = item[$TARGET] || lookup?.get(item)?.[$TARGET])) {
+  if ((target = item[$TARGET] || lookupTarget(item, lookup))) {
     if (track) {
       trackSelf(target, $TRACK);
       // A tracked walk reads THROUGH the record without touching the proxy
@@ -70,7 +73,7 @@ function snapshotImpl<T>(
     for (let i = 0; i < len; i++) {
       v = override && i in override ? override[i] : item[i];
       if (v === $DELETED) continue;
-      if (track && isWrappable(v)) wrap(v, target);
+      if (track && isWrappable(v) && !(rawValuesUsed && isRawValue(v))) wrap(v, target);
       if ((unwrapped = snapshotImpl(v, track, map, lookup)) !== v || result) {
         if (!result) map.set(item, (result = [...item]));
         result[i] = unwrapped;
@@ -84,7 +87,7 @@ function snapshotImpl<T>(
       const desc = getPropertyDescriptor(item, override, prop);
       if (!desc || desc.get) continue;
       v = override && prop in override ? override[prop] : item[prop];
-      if (track && isWrappable(v)) wrap(v, target);
+      if (track && isWrappable(v) && !(rawValuesUsed && isRawValue(v))) wrap(v, target);
       unwrapped = snapshotImpl(v, track, map, lookup);
       if (unwrapped !== v || result) {
         if (!result) map.set(item, (result = Object.assign([...item], item)));
@@ -106,7 +109,7 @@ function snapshotImpl<T>(
       const desc = Object.getOwnPropertyDescriptor(item, prop)!;
       if (desc.get) continue;
       v = desc.value;
-      if (track && isWrappable(v)) wrap(v, target);
+      if (track && isWrappable(v) && !(rawValuesUsed && isRawValue(v))) wrap(v, target);
       if ((unwrapped = snapshotImpl(v, track, map, lookup)) !== v || result) {
         if (!result) {
           result = Object.create(Object.getPrototypeOf(item)) as Record<PropertyKey, any>;
@@ -124,7 +127,7 @@ function snapshotImpl<T>(
       const desc = getPropertyDescriptor(item, override, prop)!;
       if (desc.get) continue;
       v = prop in override ? override[prop] : item[prop];
-      if (track && isWrappable(v)) wrap(v, target);
+      if (track && isWrappable(v) && !(rawValuesUsed && isRawValue(v))) wrap(v, target);
       if ((unwrapped = snapshotImpl(v, track, map, lookup)) !== item[prop] || result) {
         if (!result) {
           result = Object.create(Object.getPrototypeOf(item)) as Record<PropertyKey, any>;

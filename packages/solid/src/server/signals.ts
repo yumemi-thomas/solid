@@ -1179,7 +1179,8 @@ function setProperty(state: any, property: PropertyKey, value: any) {
 }
 
 export function createStore<T extends object>(
-  store: T | Store<T>
+  store: T | Store<T>,
+  options?: { name?: string; shallow?: boolean }
 ): [get: Store<T>, set: StoreSetter<T>];
 export function createStore<T extends object>(
   fn: (store: T) => void | T | Promise<void | T>,
