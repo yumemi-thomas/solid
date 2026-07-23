@@ -1,5 +1,5 @@
 /**
- * @jsxImportSource solid-js
+ * @jsxImportSource @solidjs/web
  * @vitest-environment jsdom
  *
  * Pins the `dynamic` async-source semantics the server-component transport
@@ -12,7 +12,7 @@
  *     mounted (no fallback re-flash for an already-resolved boundary).
  */
 import { describe, expect, test } from "vitest";
-import { createRoot, createSignal, flush, type Component, type JSX } from "solid-js";
+import { createRoot, createSignal, flush, type Component, type Element as SolidElement } from "solid-js";
 import { dynamic } from "../src/index.js";
 import { Loading } from "solid-js";
 
@@ -21,7 +21,7 @@ describe("dynamic async-source contract for server components", () => {
     let sourceRuns = 0;
     let mounts = 0;
     let bump!: () => void;
-    const Stable: Component<{ children?: JSX.Element }> = () => {
+    const Stable: Component<{ children?: SolidElement }> = () => {
       mounts++;
       const [n, setN] = createSignal(0);
       bump = () => setN(n() + 1);

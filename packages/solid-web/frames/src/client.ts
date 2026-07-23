@@ -12,7 +12,7 @@
 // state survive (policy A).
 
 import { createOwner, getOwner, onCleanup, runWithOwner, sharedConfig } from "solid-js";
-import type { JSX } from "solid-js";
+import type { Element as SolidElement } from "solid-js";
 import {
   adoptFrameRange,
   createFrameHost,
@@ -186,7 +186,7 @@ function boundaryComponent(host: any, id: string) {
       ownerScope: (fn: () => any) => runWithOwner(owner, fn)
     });
     onCleanup(() => insertable.dispose());
-    return insertable as unknown as JSX.Element;
+    return insertable as unknown as SolidElement;
   };
 }
 
@@ -284,7 +284,7 @@ function documentBoundary(host: any, id: string, props: Record<string, any>) {
     nodes.push(n);
     if (n === end) break;
   }
-  return nodes as unknown as JSX.Element;
+  return nodes as unknown as SolidElement;
 }
 
 /**

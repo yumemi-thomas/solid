@@ -1,3 +1,6 @@
+/**
+ * @jsxImportSource @solidjs/web
+ */
 import { describe, expect, it } from "vitest";
 import { children, createMemo, merge } from "solid-js";
 import { Loading } from "@solidjs/web";

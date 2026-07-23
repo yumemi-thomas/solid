@@ -1,4 +1,5 @@
 /**
+ * @jsxImportSource @solidjs/web
  * @jest-environment node
  */
 // The HN-shaped acceptance slice, server half: a server function returns a
@@ -12,6 +13,7 @@
 // 1) — and the request carries only the story id (client collapse state is
 // server-invisible).
 import { describe, expect, it } from "vitest";
+// @ts-expect-error jsdom ships no types; used only to fabricate a document
 import { JSDOM } from "jsdom";
 globalThis.document = new JSDOM("<body></body>").window.document;
 
