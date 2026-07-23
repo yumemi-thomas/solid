@@ -12,9 +12,7 @@ The governing invariant is **single-copy**: server content travels as HTML, valu
 
 ## Enabling server components
 
-**An honesty note up front:** this is not yet a plugin flag. Server *functions* in a Vite app are turnkey — `vite-plugin-solid` with `serverFunctions: true` runs the directive pass, mounts the dev endpoint, and wires the handler; you never touch the runtime config. Server *components* currently require **hand-wiring the three touch points below** on top of that. The gap is deliberate sequencing, not design: the pieces were shaped so a plugin CAN close it — the server half became installable via global config (rather than per-request handler options) precisely because a plugin's generic dispatch can't thread options per request — and a `serverComponents: true`-style option that applies both transforms, injects the client install, and threads the document-SSR plugin/bootstrap is the intended endgame (see Open questions). Until then, wiring is manual and this section is the complete recipe.
-
-Three touch points, all additive to the server-functions setup from RFC 10. The compiler contract is unchanged — the same `"use server"` directive pass, nothing new to recognize.
+In a Vite app, expect this to be a plugin option in the same spirit as server functions' `serverFunctions: true`. The three touch points below are the wiring that option performs — documented because they ARE the integration surface, and because they're the complete recipe for custom setups (the `examples/hackernews` app uses them directly, with no Vite at all). All additive to the server-functions setup from RFC 10; the compiler contract is unchanged — the same `"use server"` directive pass, nothing new to recognize.
 
 **1. Server — install the two result transforms** (from `@solidjs/web/frames/server`):
 
@@ -138,8 +136,7 @@ Measured, min+gzip, CI-guarded in dom-expressions: the whole client machinery �
 
 ## Open questions
 
-1. **Turnkey plugin integration** — the `serverComponents: true` flag on `vite-plugin-solid` (and Start configuring it): apply `frameTransformResult`/`frameTransformDirectResult` via config, inject `installServerComponents()` into the client entry (it must run before hydrate, and a bare import is tree-shaken — likely an entry transform), and thread `ServerComponentPlugin` + `SERVER_COMPONENT_BOOTSTRAP` through whatever owns document SSR. The config-level `transformResult` (#546) removed the last mechanical blocker.
-2. **Template/block payload mode** — the wire supports send-markup-once/instantiate-many; the producer doesn’t emit it yet. Post-stabilization optimization.
-3. **Reverse-templating** — recovering more t = 0 slot args from rendered content (the current recoverability check is a conservative interim).
-4. **Router retention semantics** — replay-after-unregister, multi-frame envelopes, revalidation bookkeeping; being designed with the router update.
-5. **Stabilization criteria** — what graduates this from experimental: wire-format freeze, router integration shipping, and the `enableHydration` granularity work.
+1. **Template/block payload mode** — the wire supports send-markup-once/instantiate-many; the producer doesn’t emit it yet. Post-stabilization optimization.
+2. **Reverse-templating** — recovering more t = 0 slot args from rendered content (the current recoverability check is a conservative interim).
+3. **Router retention semantics** — replay-after-unregister, multi-frame envelopes, revalidation bookkeeping; being designed with the router update.
+4. **Stabilization criteria** — what graduates this from experimental: wire-format freeze, router integration shipping, and the `enableHydration` granularity work.
