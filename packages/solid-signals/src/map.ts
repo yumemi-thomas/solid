@@ -204,11 +204,7 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         newIndices: Map<Item, number>,
         newIndicesNext: number[],
         removed: Root[] | undefined,
-        created: Root[] | undefined,
-        temp: MappedItem[] = new Array(newLen),
-        tempNodes: Root[] = new Array(newLen);
-      rows = this._rows ? new Array(newLen) : undefined;
-      indexes = this._indexes ? new Array(newLen) : undefined;
+        created: Root[] | undefined;
 
       // skip common prefix
       for (
@@ -221,7 +217,8 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         if (this._rows) setSignal(this._rows[start], newItems[start]);
       }
 
-      // common suffix
+      // skip common suffix — counted only; retained entries land in one pass
+      // at commit instead of being staged and copied twice
       for (
         end = this._len - 1, newEnd = newLen - 1;
         end >= start &&
@@ -229,14 +226,24 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         (this._items[end] === newItems[newEnd] ||
           (this._rows && compare(this._key, this._items[end], newItems[newEnd])));
         end--, newEnd--
-      ) {
-        temp[newEnd] = this._mappings[end];
-        tempNodes[newEnd] = this._nodes[end];
-        rows && (rows[newEnd] = this._rows![end]);
-        indexes && (indexes[newEnd] = this._indexes![end]);
+      );
+
+      // no structural change (every position matched in place at equal
+      // length — the common post-reconcile shape): keep the same mapped
+      // array identity so downstream consumers don't re-run at all
+      if (start === newLen && this._len === newLen) {
+        this._items = newItems.slice(0);
+        return;
       }
 
-      // 0) prepare a map of all indices in newItems, scanning backwards so we encounter them in natural order
+      const dif = newLen - this._len;
+      const temp: MappedItem[] = new Array(newLen);
+      const tempNodes: Root[] = new Array(newLen);
+      rows = this._rows ? new Array(newLen) : undefined;
+      indexes = this._indexes ? new Array(newLen) : undefined;
+
+      // 0) prepare a map of all indices in the changed window of newItems,
+      // scanning backwards so we encounter them in natural order
       newIndices = new Map<Item, number>();
       newIndicesNext = new Array(newEnd + 1);
       for (j = newEnd; j >= start; j--) {
@@ -247,7 +254,9 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         newIndices.set(key, j);
       }
 
-      // 1) step through all old items and see if they can be found in the new set; if so, save them in a temp array and mark them moved; if not, queue them for disposal at commit
+      // 1) step through the old changed window and see if items can be found
+      // in the new set; if so, stage them at their new positions; if not,
+      // queue them for disposal at commit
       for (i = start; i <= end; i++) {
         item = this._items[i];
         key = this._key ? this._key(item) : item;
@@ -264,8 +273,8 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
 
       // 2) create new rows into the temp arrays; an abort disposes only these
       try {
-        for (j = start; j < newLen; j++) {
-          if (j in temp) continue;
+        for (j = start; j <= newEnd; j++) {
+          if (tempNodes[j] !== undefined) continue;
           (created ??= []).push((tempNodes[j] = createOwner()));
           temp[j] = runWithOwner<MappedItem>(tempNodes[j], mapper)!;
         }
@@ -274,26 +283,39 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         throw err;
       }
 
-      // 3) commit: land positions, then dispose exited rows
-      for (j = start; j < newLen; j++) {
-        this._mappings[j] = temp[j];
-        this._nodes[j] = tempNodes[j];
+      // 3) commit: land the retained prefix and suffix plus the staged window
+      // into the fresh arrays, swap them in (new identity for downstream
+      // change propagation), then dispose exited rows
+      for (i = 0; i < start; i++) {
+        temp[i] = this._mappings[i];
+        tempNodes[i] = this._nodes[i];
+        rows && (rows[i] = this._rows![i]);
+        indexes && (indexes[i] = this._indexes![i]);
+      }
+      for (j = start; j <= newEnd; j++) {
+        if (rows) setSignal(rows[j], newItems[j]);
+        if (indexes) setSignal(indexes[j], j);
+      }
+      for (j = newEnd + 1; j < newLen; j++) {
+        temp[j] = this._mappings[j - dif];
+        tempNodes[j] = this._nodes[j - dif];
         if (rows) {
-          this._rows![j] = rows[j];
-          setSignal(this._rows![j], newItems[j]);
+          rows[j] = this._rows![j - dif];
+          setSignal(rows[j], newItems[j]);
         }
         if (indexes) {
-          this._indexes![j] = indexes[j];
-          setSignal(this._indexes![j], j);
+          indexes[j] = this._indexes![j - dif];
+          if (dif !== 0) setSignal(indexes[j], j);
         }
       }
-      if (removed) for (i = 0; i < removed.length; i++) removed[i].dispose();
-
-      // 4) in case the new set is shorter than the old, set the length of the mapped array
-      this._mappings = this._mappings.slice(0, (this._len = newLen));
-
-      // 5) save a copy of the mapped items for the next update
+      this._mappings = temp;
+      this._nodes = tempNodes;
+      rows && (this._rows = rows);
+      indexes && (this._indexes = indexes);
+      this._len = newLen;
+      // save a copy of the mapped items for the next update
       this._items = newItems.slice(0);
+      if (removed) for (i = 0; i < removed.length; i++) removed[i].dispose();
     }
   });
 
