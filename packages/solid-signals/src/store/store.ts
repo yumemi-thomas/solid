@@ -150,6 +150,29 @@ export type NotWrappable =
   | undefined
   | SolidStore.Unwrappable[keyof SolidStore.Unwrappable];
 
+// Every StoreNode field is initialized up front, in one fixed order, so all
+// targets share a single hidden class. The traps and reconcile read these
+// fields on their hottest paths; fields added lazily in varying orders made
+// those loads megamorphic across a large store graph (dictionary-mode probes
+// on every trap hit). Assignments elsewhere must never `delete` a field —
+// write `undefined` instead, or the shape degrades again.
+function initStoreFields(newTarget: any) {
+  newTarget[STORE_OVERRIDE] = undefined;
+  newTarget[STORE_OPTIMISTIC_OVERRIDE] = undefined;
+  newTarget[STORE_OPTIMISTIC_OWNERS] = undefined;
+  newTarget[STORE_NODE] = undefined;
+  newTarget[STORE_HAS] = undefined;
+  newTarget[STORE_CUSTOM_PROTO] = undefined;
+  newTarget[STORE_WRAP] = undefined;
+  newTarget[STORE_LOOKUP] = undefined;
+  newTarget[STORE_FIREWALL] = undefined;
+  newTarget[STORE_OPTIMISTIC] = undefined;
+  newTarget[STORE_SNAPSHOT_PROPS] = undefined;
+  newTarget[STORE_PARENT] = undefined;
+  newTarget[STORE_DESC] = undefined;
+  newTarget[$PROXY] = null;
+}
+
 export function createStoreProxy<T extends object>(
   value: T,
   traps: ProxyHandler<StoreNode> = storeTraps,
@@ -157,10 +180,12 @@ export function createStoreProxy<T extends object>(
 ) {
   let newTarget;
   if (Array.isArray(value)) {
-    newTarget = [];
-    newTarget.v = value;
+    newTarget = [] as any;
+    newTarget[STORE_VALUE] = value;
+    initStoreFields(newTarget);
   } else {
-    newTarget = { v: value };
+    newTarget = { [STORE_VALUE]: value } as any;
+    initStoreFields(newTarget);
     const unwrapped = (value as any)?.[$TARGET]?.[STORE_VALUE] ?? value;
     const proto = Object.getPrototypeOf(unwrapped);
     if (proto !== null && proto !== Object.prototype) {
@@ -843,6 +868,28 @@ export const storeTraps: ProxyHandler<StoreNode> = {
     if (property === $TRACK) {
       trackSelf(target);
       return receiver;
+    }
+    // Hot path: an existing node on a plain target — no firewall (so neither
+    // selfRead nor the uninitialized guard can apply), no override layers,
+    // no write scope, and a raw (non-proxy) source. This is the shape of
+    // every effect re-read of a settled store; it pays one node read and the
+    // wrap check, nothing else. Any exotic bit falls through to the full
+    // resolution below, and dev strictRead keeps its warning path.
+    if (
+      (!__DEV__ || !strictRead) &&
+      target[STORE_FIREWALL] === undefined &&
+      target[STORE_OVERRIDE] === undefined &&
+      target[STORE_OPTIMISTIC_OVERRIDE] === undefined &&
+      !writeOverride &&
+      (Writing === null || !Writing.has(receiver))
+    ) {
+      const nodes = target[STORE_NODE];
+      const node = nodes && nodes[property];
+      if (node !== undefined && target[STORE_VALUE][$TARGET] === undefined) {
+        let value = read(node);
+        if (value === $DELETED) value = undefined;
+        return isWrappable(value) ? wrap(value, target) : value;
+      }
     }
     const selfRead = getObserver() === target[STORE_FIREWALL];
     const nodes = getNodes(target, STORE_NODE);

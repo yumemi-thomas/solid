@@ -194,8 +194,10 @@ function clearOptimisticOverride(target: StoreNode, completing?: Transition | nu
       }
     }
     if (!remaining) {
-      delete target[STORE_OPTIMISTIC_OVERRIDE];
-      delete target[STORE_OPTIMISTIC_OWNERS];
+      // Assignment, not delete: StoreNode targets share one pre-initialized
+      // hidden class (see createStoreProxy) and a delete would demote it.
+      target[STORE_OPTIMISTIC_OVERRIDE] = undefined;
+      target[STORE_OPTIMISTIC_OWNERS] = undefined;
     }
     // Notify $TRACK
     if (cleared && nodes?.[$TRACK]) {

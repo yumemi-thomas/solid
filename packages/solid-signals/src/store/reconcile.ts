@@ -325,23 +325,18 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
   let tracked;
   if (nodes) {
     tracked = nodes[$TRACK];
-    const keys = tracked ? getAllKeys(previous, undefined, next) : nodeKeys(nodes);
-    for (let i = 0, len = keys.length; i < len; i++) {
-      const key = keys[i];
-      const node = nodes[key];
-      const previousValue = unwrap(previous[key]);
-      let nextValue = unwrap(next[key]);
-      if (previousValue === nextValue) continue;
-      if (
-        !previousValue ||
-        !isWrappable(previousValue) ||
-        !isWrappable(nextValue) ||
-        Array.isArray(previousValue) !== Array.isArray(nextValue) ||
-        (keyFn(previousValue) != null && keyFn(previousValue) !== keyFn(nextValue))
-      ) {
-        tracked && setSignal(tracked, void 0);
-        node && setSignal(node, isWrappable(nextValue) ? wrap(nextValue, target) : nextValue);
-      } else applyState(nextValue, wrap(previousValue, target), keyFn);
+    if (tracked || symbolKeyedRecords.has(nodes)) {
+      const keys = tracked ? getAllKeys(previous, undefined, next) : nodeKeys(nodes);
+      for (let i = 0, len = keys.length; i < len; i++) {
+        diffNodeKey(keys[i], nodes, previous, next, target, tracked, keyFn);
+      }
+    } else {
+      // Untracked, string-only node records (the overwhelmingly common case)
+      // iterate in place — nodeKeys() allocated a fresh key array per object
+      // per pass, which dominates allocation on large-graph reconciles.
+      for (const key in nodes) {
+        diffNodeKey(key, nodes, previous, next, target, tracked, keyFn);
+      }
     }
   }
   if (!tracked && target[STORE_DESC]) applyDescendants(previous, next, target, nodes, keyFn);
@@ -354,6 +349,33 @@ function applyStateFast(next: any, target: any, keyFn: (item: NonNullable<any>) 
       setSignal(nodes[key], key in next);
     }
   }
+}
+
+// One node-key step of the fast object diff — shared by the array-iterating
+// (tracked / symbol-keyed) and for-in (plain) loops in applyStateFast.
+function diffNodeKey(
+  key: PropertyKey,
+  nodes: any,
+  previous: any,
+  next: any,
+  target: any,
+  tracked: any,
+  keyFn: (item: NonNullable<any>) => any
+) {
+  const node = nodes[key];
+  const previousValue = unwrap(previous[key]);
+  let nextValue = unwrap(next[key]);
+  if (previousValue === nextValue) return;
+  if (
+    !previousValue ||
+    !isWrappable(previousValue) ||
+    !isWrappable(nextValue) ||
+    Array.isArray(previousValue) !== Array.isArray(nextValue) ||
+    (keyFn(previousValue) != null && keyFn(previousValue) !== keyFn(nextValue))
+  ) {
+    tracked && setSignal(tracked, void 0);
+    node && setSignal(node, isWrappable(nextValue) ? wrap(nextValue, target) : nextValue);
+  } else applyState(nextValue, wrap(previousValue, target), keyFn);
 }
 
 function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) => any) {

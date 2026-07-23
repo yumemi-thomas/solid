@@ -153,7 +153,10 @@ export function clearSnapshots(): void {
   if (snapshotSources) {
     for (const source of snapshotSources) {
       delete source._snapshotValue;
-      delete source[STORE_SNAPSHOT_PROPS];
+      // StoreNode targets share one pre-initialized hidden class (see
+      // createStoreProxy) — assign undefined instead of deleting, and only
+      // when present so signal-node sources don't grow the field.
+      if (source[STORE_SNAPSHOT_PROPS] !== undefined) source[STORE_SNAPSHOT_PROPS] = undefined;
     }
     snapshotSources = null;
   }
