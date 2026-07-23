@@ -691,6 +691,84 @@ describe("reconcile with symbol-keyed properties", () => {
     expect(seen).toBe("new");
   });
 });
+
+describe("reconcile without a key (positional merge)", () => {
+  test("merges arrays positionally, preserving slot proxy identity", () => {
+    const [state, setState] = createStore({
+      rows: [
+        { id: 1, count: 10, queries: [{ elapsed: 1 }] },
+        { id: 2, count: 20, queries: [{ elapsed: 2 }] }
+      ]
+    });
+    const row0 = state.rows[0];
+    const row1 = state.rows[1];
+    // fresh object graph with different ids — positional merge keeps slot
+    // identity anyway (the classic fixed-shape dashboard pattern)
+    setState(s => {
+      reconcile(
+        [
+          { id: 7, count: 11, queries: [{ elapsed: 3 }] },
+          { id: 8, count: 21, queries: [{ elapsed: 4 }] }
+        ],
+        null
+      )(s.rows);
+    });
+    expect(state.rows[0]).toBe(row0);
+    expect(state.rows[1]).toBe(row1);
+    expect(state.rows[0].id).toBe(7);
+    expect(state.rows[0].count).toBe(11);
+    expect(state.rows[0].queries[0].elapsed).toBe(3);
+    expect(state.rows[1].count).toBe(21);
+  });
+
+  test("only changed leaves notify", () => {
+    const [state, setState] = createStore({ rows: [{ a: 1, b: 2 }] });
+    let aRuns = 0;
+    let bRuns = 0;
+    createRoot(() => {
+      createEffect(
+        () => state.rows[0].a,
+        () => {
+          aRuns++;
+        }
+      );
+      createEffect(
+        () => state.rows[0].b,
+        () => {
+          bRuns++;
+        }
+      );
+    });
+    flush();
+    aRuns = 0;
+    bRuns = 0;
+    setState(reconcile({ rows: [{ a: 5, b: 2 }] }, null));
+    flush();
+    expect(state.rows[0].a).toBe(5);
+    expect(aRuns).toBe(1);
+    expect(bRuns).toBe(0);
+  });
+
+  test("handles growth and shrink positionally", () => {
+    const [state, setState] = createStore<{ items: { v: number }[] }>({
+      items: [{ v: 1 }, { v: 2 }]
+    });
+    setState(reconcile({ items: [{ v: 1 }, { v: 2 }, { v: 3 }] }, null));
+    expect(state.items.length).toBe(3);
+    expect(state.items[2].v).toBe(3);
+    setState(reconcile({ items: [{ v: 9 }] }, null));
+    expect(state.items.length).toBe(1);
+    expect(state.items[0].v).toBe(9);
+  });
+
+  test("does not enforce root identity", () => {
+    const [state, setState] = createStore({ id: 1, v: 2 });
+    // keyed (including the "id" default) this throws "different identity"; key: null must merge
+    setState(reconcile({ id: 9, v: 3 }, null));
+    expect(state.id).toBe(9);
+    expect(state.v).toBe(3);
+  });
+});
 // type tests
 
 // reconcile

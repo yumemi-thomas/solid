@@ -511,17 +511,27 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
   }
 }
 
+// No-key reconcile: every item reports "no key", which routes array diffs to
+// the positional branch and object descent to plain per-property merging.
+const NOKEY = () => null;
+
 /**
  * Returns a draft-mutating function that smart-merges `value` into a store,
- * preserving the identity of items whose `key` field matches between old and
- * new states. Useful when applying server payloads or full-replacement data
- * onto an existing store without losing fine-grained reactivity.
+ * preserving fine-grained reactivity: only changed leaves trigger updates.
  *
- * Items with the same key are updated in place (only changed properties
- * trigger updates). Items added or removed update the corresponding signals.
+ * With a `key` (default `"id"`), array items whose key matches between old
+ * and new states keep their identity (updated in place, moves and removals
+ * update the corresponding signals) — the shape for keyed server payloads.
+ * Items without the key field fall back to positional matching.
+ *
+ * With `key: null`, matching is purely positional: index N of the new array
+ * merges into index N of the old, and object properties merge recursively —
+ * the classic pattern for fixed-shape data that churns in place (dashboards,
+ * monitors), where no keyed diff pass is needed or wanted.
  *
  * @param value the next state to merge in
- * @param key property name (string) or extractor function for stable identity
+ * @param key property name (string) or extractor function for stable
+ * identity (default `"id"`); pass `null` for positional merging
  *
  * @example
  * ```ts
@@ -529,16 +539,23 @@ function applyStateSlow(next: any, target: any, keyFn: (item: NonNullable<any>) 
  *
  * async function refresh() {
  *   const fresh = await api.getTodos();
- *   setTodos(reconcile(fresh, "id")); // diff-merge by `id`
+ *   setTodos(reconcile(fresh)); // diff-merge by `id`
  * }
+ *
+ * // fixed-shape polling data — positional merge
+ * setStats(reconcile(nextStats, null));
  * ```
  */
 export function reconcile<T extends U, U>(
   value: T,
-  key: string | ((item: NonNullable<any>) => any)
+  key: string | ((item: NonNullable<any>) => any) | null = "id"
 ) {
   return (state: U) => {
     if (state == null) throw new Error(__DEV__ ? "Cannot reconcile null or undefined state" : "");
+    if (key === null) {
+      applyState(value, state, NOKEY);
+      return;
+    }
     const keyFn = typeof key === "string" ? item => item[key] : key;
     const eq = keyFn(state);
     if (eq !== undefined && keyFn(value) !== eq)
