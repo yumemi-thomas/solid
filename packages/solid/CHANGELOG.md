@@ -1,5 +1,14 @@
 # solid-js
 
+## 2.0.0-beta.25
+
+### Patch Changes
+
+- Updated dependencies [82581e4]
+- Updated dependencies [82581e4]
+- Updated dependencies [82581e4]
+  - @solidjs/signals@2.0.0-beta.25
+
 ## 2.0.0-beta.24
 
 ### Patch Changes

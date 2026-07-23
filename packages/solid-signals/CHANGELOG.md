@@ -1,5 +1,27 @@
 # @solidjs/signals
 
+## 2.0.0-beta.25
+
+### Patch Changes
+
+- 82581e4: Per-run effect/write trims on the plain synchronous path, each individually measured: `recompute` skips the `clearStatus` chain on status-free nodes (guaranteed no-op — every branch of its body is gated on one of the guarded fields) and skips `insertSubs` for subscriber-less nodes; the `syncCompanions` hook call in `setSignal`/optimistic writes is gated on companion existence (its entire body is the two companion pokes); and the store `get` trap's fast path reads through `readNodeFast` — `read()`'s plain-signal fast path hoisted over the call, falling back to the full `read()` whenever a global read window (latest/pending-check/transition/lane/snapshot capture) or node layer is active. The last is worth a consistent ~2–3% on store-read-heavy flushes; the gates are neutral-to-positive and remove dead per-run work from every effect.
+- 82581e4: New: shallow stores.
+
+  `createStore(value, { shallow: true })` creates a single-layer store: the root's own keys are fully reactive (per-key nodes, membership, `$TRACK`, length) while its values are raw records replaced by reference — no proxies, no tracking, and no deep diffing below the boundary. `reconcile` at a shallow boundary is a positional per-slot reference compare; keyed row identity belongs to the consumer (`<For keyed={r => r.id}>`). Records are replaced, never edited in place: setter reads below the boundary serve the raw (so read-then-replace and `filter`/`pop` idioms work) and in-place mutation is reactively inert by construction — which is what makes optimistic staging sound: replacements stage in the existing override layers and ambient writes auto-revert to the untouched raw base. The option is available on `createProjection`/`createOptimisticStore` via their options.
+
+  Records ingested below a shallow boundary are sticky-marked raw in an internal registry: no store ever wraps them — they present as-is everywhere, tracked by reference at whatever slot holds them, so a record served raw once keeps a single identity in every store (no proxy/raw split-brain). The registry is consulted only on wrap-creation and ingest paths behind a used-at-all gate; reads and shallow-free apps are untouched. (A public `markRaw` for external instances/proxy props is deliberately deferred.)
+
+  Hardened against an adversarial audit: raw-marked values are leaves in every reconcile recursion path (previously a raw pair silently no-op'd instead of replacing the slot — affecting deep stores holding `markRaw` values, setter-write-then-reconcile on shallow stores, and shallow stores nested in deep ones); setter-staged overrides fold into the shallow diff; write-scope reads serve the raw so read-then-replace, `filter`/`pop` removal idioms, and projection derives work; ingesting an already-deep-tracked value into a shallow boundary throws in dev; `deep()` no longer wraps below raw values. Exposed end to end: plain-form `createStore`/`createOptimisticStore` accept options, `ProjectionOptions.shallow` typed.
+
+  Measured on the dbmon-shaped workload (1000 rows × 13 bindings, fresh keyed payload per tick): reconcile 14× faster (3.2 → 0.22ms), full reactive tick 2.4× faster; on the octane dbmon browser harness with all keyed lifecycle gates passing, the store fixture goes from 2.6× to 1.7× octane (1.36× with `textContent` bindings), ahead of React on every op. +1.4KB gzip.
+
+- 82581e4: Structural store/reconcile hot-path pass (dbmon-shaped workload — keyed reconcile of a fresh 7k-object graph driving 13k effect re-reads — runs ~30% faster end to end; every change validated on a signals-only micro-bench):
+  - The trap fast path returns node values directly: every node-writing site wraps wrappables before `setSignal`, so re-wrapping on read was redundant (a dev-mode assertion now enforces the invariant; snapshot capture keeps the wrapping path).
+  - The global `storeLookup` maps raw values to StoreNode **targets** instead of proxies, and reconcile recurses target-to-target (`applyStateChild`) — no `wrap()`/`$PROXY`/`$TARGET` proxy round-trips per visited child. A lookup miss now means the child was never observed, so the subtree is skipped entirely: the diff is O(observed graph), not O(payload graph). Per-family lookups (projections/optimistic) keep their proxy contract and their wrap-based recursion.
+  - Keyed arrays: identity-equal matched slots skip recursion dispatch outright, and a fully-matched equal-length pass (the steady-state polling tick) returns before allocating its staging array/Map or re-syncing membership.
+  - `applyDescendants` and `syncArrayNodeMembership` iterate in place instead of allocating key arrays per object per pass.
+  - Effect values direct-commit on plain sync flushes instead of taking the `queuePendingNode`/`commitPendingNodes` round-trip that exists to sequence transition reveals.
+
 ## 2.0.0-beta.24
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @solidjs/web
 
+## 2.0.0-beta.25
+
+### Patch Changes
+
+- fc6cbaf: Fix the packaged frames client shipping without its transport half. `frames/dist/client.js` bundled a PRIVATE copy of the server-function client; because the frames entry never calls that copy's readers, rollup concluded the `configureServerFunctionsClient({ responseHandler: ... })` write inside `installServerComponents` was unobservable and tree-shook the entire call out of the artifact — published beta.23/24 could adopt document boundaries but never installed the frame-stream transport (t=0 intercept, refetch morphs, fresh boundaries all dead). The private copy was a correctness hazard even without the shake: its module-scoped config would never be seen by the compiled reference proxies, which call through `@solidjs/web/server-functions`. The frames client now imports `@solidjs/web/server-functions/client` and keeps it external, so the dist configures the same built instance the proxies resolve to, and a build-time assertion (`assertFramesClientTransport` in rollup.config.js) fails the frames build if the transport wiring ever drops out of the emitted chunk again.
+- e654a59: Fix the frames types build: `types:copy-frames` expected compiled declarations at `frames/types/` that no step ever generated, breaking `pnpm types` (and CI builds). Frames declarations now compile via a dedicated `frames/tsconfig.build.json` (mirroring the storage submodule), and the published `types/frames` facades get their bundled `@dom-expressions/runtime` specifiers rewritten to relative paths so they resolve against the runtime d.ts files shipped alongside them.
+  - solid-js@2.0.0-beta.25
+
 ## 2.0.0-beta.24
 
 ### Patch Changes
