@@ -61,13 +61,18 @@ const solid = mode => ({
   }
 });
 
-// Pre-facade wiring: @solidjs/web has no ./frames dist entry yet, and each
-// bundle must hold exactly ONE runtime instance (the frames transport
-// configures the server-function client it shares a module with) — so the
-// subpaths route through the package's source bridges.
+// The frames subpaths consume the PACKAGED dist entries — the exact files
+// an npm consumer's bundler resolves through the exports map (spelled out
+// here only because the bare `@solidjs/web` → source alias below shadows
+// every subpath). The one-runtime-instance invariant is import topology
+// now, not hand-aliasing: frames/dist/client.js keeps the server-function
+// client EXTERNAL (`@solidjs/web/server-functions/client`) and configures
+// the same module the compiled reference proxies call through — both
+// specifiers route to the source bridge below, like every server-functions
+// import in this from-source build.
 const alias = {
-  "@solidjs/web/frames/server": web("frames/src/server.ts"),
-  "@solidjs/web/frames": web("frames/src/client.ts"),
+  "@solidjs/web/frames/server": web("frames/dist/server.js"),
+  "@solidjs/web/frames": web("frames/dist/client.js"),
   "@solidjs/web/server-functions/server": web("server-functions/src/server.ts"),
   "@solidjs/web/server-functions/client": web("server-functions/src/client.ts"),
   "@solidjs/web/storage": web("storage/src/index.ts"),
