@@ -1,5 +1,17 @@
 # @solidjs/signals
 
+## 2.0.0-beta.25
+
+### Patch Changes
+
+- a7d42f6: `mapArray` update passes shed their fixed O(n) overhead. Previously every non-empty update staged the matched suffix, copied the whole changed range back at commit, and unconditionally re-sliced `_mappings` (plus the `newItems` copy) — ~4 full-array passes even for a single-row removal. The suffix is now counted rather than staged, and commit lands the retained prefix/suffix plus the diffed window into fresh arrays in one pass each and swaps them in (the swap provides the new array identity downstream change propagation relied on the slice for). Sparse `j in temp` checks became `tempNodes[j] === undefined`. New no-change fast path: when every position matches in place at equal length — the common shape after `reconcile` preserves row identities — the same mapped array is returned, so downstream `<For>` insert effects don't re-run at all. Staged-commit exception safety (#2903) is unchanged: mappers still run before any live state is touched, and an aborted pass disposes only the owners it created.
+- 588a572: `NotReadyError` no longer pays V8's eager stack capture in production builds. It is thrown on every read of a pending source — pure control flow, with real cost proportional to stack depth under SSR — so the constructor now zeroes `Error.stackTraceLimit` around `super()` on V8 and restores it after. Dev builds keep full stacks for debuggability; non-V8 engines take the plain path.
+- 09e7d64: `reconcile`'s `key` parameter is now optional, defaulting to `"id"`, and accepts `null` to opt into purely positional merging — index N of the new array merges into index N of the old, preserving slot identity with no keyed diff pass. This restores the classic 1.x `{ key: null, merge: true }` pattern (fixed-shape data that churns in place — dashboards, monitors); merge semantics are always on in 2.0. Items missing the key field already fell back to positional matching, so the `"id"` default degrades gracefully for unkeyed data.
+- 635182a: Store hot-path trims, measured on high-frequency full-graph updates (dbmon-shaped: reconcile of a fresh 7k-object graph + ~13k effect re-reads per tick, ~9% faster end to end):
+  - The proxy `get` trap takes a dedicated fast path for the common shape of an effect re-read — an existing node on a plain target (no firewall, no override layers, no write scope, raw source) — paying one node read and the wrap check instead of the full layered resolution.
+  - `StoreNode` targets now pre-initialize every field in one fixed order (`createStoreProxy`), so all targets share a single hidden class and the traps' and reconcile's field loads stay monomorphic; the field `delete`s in optimistic-layer teardown and snapshot clearing became `undefined` assignments to preserve the shape.
+  - `applyStateFast`'s object diff iterates plain string-keyed node records with `for...in` instead of allocating a fresh `Object.keys` array per object per pass (tracked and symbol-keyed records keep the array path).
+
 ## 2.0.0-beta.24
 
 ### Patch Changes

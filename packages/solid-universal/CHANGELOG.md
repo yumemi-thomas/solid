@@ -1,5 +1,11 @@
 # @solidjs/universal
 
+## 2.0.0-beta.25
+
+### Patch Changes
+
+- solid-js@2.0.0-beta.25
+
 ## 2.0.0-beta.24
 
 ### Patch Changes
