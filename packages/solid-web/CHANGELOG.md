@@ -1,16 +1,5 @@
 # @solidjs/web
 
-## 2.0.0-beta.24
-
-### Patch Changes
-
-- f9a1e63: Frames: hydration claims are now gated to the adoption attach
-  (`ctx.adopted`) — a stream-driven re-call of an adopted occurrence renders
-  for real instead of claiming, so content the re-call displaces (moved-out
-  `{$frame}` region ranges) is re-placed rather than silently dropped
-  (dom-expressions#547).
-  - solid-js@2.0.0-beta.24
-
 ## 2.0.0-beta.23
 
 ### Patch Changes
