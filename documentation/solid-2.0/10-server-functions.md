@@ -2,7 +2,7 @@
 
 **Start here:** If you’re migrating an app, read the beta tester guide first: [MIGRATION.md](MIGRATION.md)
 
-> **Status note:** This RFC covers two layers. The base mechanics — the `"use server"` directive, the `@solidjs/web/server-functions` runtime, response helpers, single-flight, and no-JS handling — are **shipped** in the beta. The extension surface (`GET`, `withMeta`, the metadata accessors, `prepareRequest`, method enforcement, `id` on proxies) is now **shipped** as well; this document remains the canonical specification. Two follow-ups are deferred: dev-only compiler-emitted `name` metadata (in progress) and a dev observation hook for the server-function inspector (deliberately deferred until it can be designed together with its consumer).
+> **Status note:** This RFC covers two layers. The base mechanics — the `"use server"` directive, the `@solidjs/web/server-functions` runtime, response helpers, single-flight, and no-JS handling — are **shipped** in the beta. The extension surface (`GET`, `withMeta`, the metadata accessors, `prepareRequest`, method enforcement, `id` on proxies) is now **shipped** as well; this document remains the canonical specification. One follow-up remains deferred: a dev observation hook for the server-function inspector (deliberately deferred until it can be designed together with its consumer). Dev-only compiler-emitted `name` metadata has since shipped (`registerServerReference(id, fn, name)` / `createServerReference(id, name)` seed the metadata channel). Server components build on this runtime — see [11 — Server components](11-server-components.md).
 
 ## Summary
 
@@ -42,9 +42,9 @@ One architectural fact worth stating: **a wrapper wraps the *reference*, not the
 
 The package resolves to a client entry in the browser and a server entry elsewhere.
 
-**Client:** `configureServerFunctionsClient({ endpoint?, codec? })` — call once in the client entry, only when deviating from the defaults (endpoint defaults to `/_server`; `codec` takes seroval plugin options and must match the server’s). Compiled client output produces callables that POST to the endpoint with the function id in the `X-Server-Function-Id` header and a per-call `X-Server-Function-Instance` id; arguments with a natural HTTP encoding (string, FormData, File, Blob, ...) go as-is, everything else through the codec. Async returns (promises, streams) settle over the open connection via length-prefixed chunk framing.
+**Client:** `configureServerFunctionsClient({ endpoint?, codec?, prepareRequest?, serializeArgs?, responseHandler? })` — call once in the client entry, only when deviating from the defaults (endpoint defaults to `/_server`; `codec` takes seroval plugin options and must match the server’s; `prepareRequest` is the transport middleware hook below; `responseHandler` is the integration seam server components install — see [RFC 11](11-server-components.md)). Compiled client output produces callables that POST to the endpoint with the function id in the `X-Server-Function-Id` header and a per-call `X-Server-Function-Instance` id. **Argument encoding (updated since first draft):** arguments with a natural HTTP encoding (a lone string, FormData, File, Blob, ...) go as-is; everything else is sent as **plain JSON by default** — no serializer in the client bundle — and values JSON can’t carry faithfully (Dates, Maps, Sets, typed arrays, cycles) **throw with a directed message** unless you opt in once via `enableRichArguments()` from the `rich-args` entry, which installs the codec’s write half (~5 KB gz) as `serializeArgs`. *Results* are unaffected — they always travel through the codec, whose decode half the client carries regardless. Async returns (promises, streams) settle over the open connection via length-prefixed chunk framing.
 
-**Server:** `configureServerFunctionsServer({ endpoint?, codec?, provideEvent?, collectFlightData? })` plus the web-standard HTTP handler:
+**Server:** `configureServerFunctionsServer({ endpoint?, codec?, provideEvent?, collectFlightData?, transformResult?, transformDirectResult? })` plus the web-standard HTTP handler:
 
 ```ts
 import { handleServerFunctionRequest } from "@solidjs/web/server-functions";
@@ -60,7 +60,7 @@ The handler resolves the function id, decodes arguments, runs the function under
 
 - **`createEvent(request)`** — build the request event a call runs under; integrations supply their richer event (cookies, response helpers, platform handles).
 - **`provideEvent(event, fn)`** — establish the event scope; defaults to the AsyncLocalStorage instance that `@solidjs/web/storage`’s `provideRequestEvent` parks on the global.
-- **`transformResult(event, result, context)`** — observe or replace the result before encoding; the extension point for response-metadata policy. Runs for returned and thrown results alike.
+- **`transformResult(event, result, context)`** — observe or replace the result before encoding; the extension point for response-metadata policy. Runs for returned and thrown results alike. Also configurable **server-wide** via `configureServerFunctionsServer` (the per-request option overrides, following the `collectFlightData` fallback pattern), so generic dispatchers that call `handleServerFunctionRequest(request)` with no options still apply it — this is how server components install `frameTransformResult` once. Its in-process mirror for direct SSR calls is `transformDirectResult(value, { id })` (config-only; direct calls never pass through the HTTP handler).
 - **`collectFlightData(event, outcome)`** — the single-flight hook (below).
 - **`handleNoJS(result, request, args, thrown?)`** — build the response for unscripted calls (below).
 
@@ -100,7 +100,7 @@ The protocol folds integration data (typically revalidated route data) into a mu
 
 ### No-JS and progressive enhancement
 
-A reference’s `.url` serves as a form `action`. The absence of the `X-Server-Function-Instance` header marks an unscripted call (no-JS form post or direct HTTP); arguments are parsed from the query string or FormData by content-type sniffing — a no-JS form post decodes to a lone `FormData` argument. The `handleNoJS` handler hook builds the response for these calls (default: the normal serialized response).
+A reference’s `.url` serves as a form `action`, and action urls are **self-describing** (`?id=...&args=...`): an integration can reconstruct a callable from a server-rendered action url alone, with bound arguments kept in the query string where the server reads them for natural-encoding bodies. The absence of the `X-Server-Function-Instance` header marks an unscripted call (no-JS form post or direct HTTP); arguments are parsed from the query string or FormData by content-type sniffing — a no-JS form post decodes to a lone `FormData` argument. The `handleNoJS` handler hook builds the response for these calls (default: the normal serialized response).
 
 The full unscripted flow (flash cookie → redirect → SSR-seeded submission state) has a settled ownership chain:
 
@@ -206,7 +206,7 @@ Unprivileged patterns that need neither core nor router access — the validatio
 
 - **None, by design.** `GET` (like any in-body helper) is an ordinary runtime import; the wrapper round-trip and body-scoped DCE that make the design work are existing, verified behavior.
 - **One pre-existing bug to fix regardless:** with a *module-level* `"use server"` directive, a wrapped export (`export const x = wrapper(async () => ...)`) is silently dropped from the client build — only direct function exports become references. This gets more visible with `GET(fn)` as the blessed idiom. Minimum: a diagnostic; better: extract the inner function and preserve the call in client output.
-- **Optional, additive:** a third `registerServerReference(id, fn, meta)` argument carrying the compiler-*static* metadata the directive pass already collects (`name`, filename in dev) would enrich `getServerFunctionMeta()` for logging/devtools. This is compiler-*produced* metadata flowing to the runtime — not a userland convention the compiler recognizes.
+- **Shipped since first draft:** the third `registerServerReference(id, fn, name)` argument carrying the compiler-*static* dev `name` now exists on both proxies (development output only); it seeds the metadata channel as a default that explicit `withMeta`/`GET` writes shallow-merge over. Compiler-*produced* metadata flowing to the runtime — not a userland convention the compiler recognizes.
 
 ## Migration / replacement
 
