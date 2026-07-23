@@ -4,7 +4,7 @@
 
 ## Summary
 
-Solid 2.0’s store layer leans into “mutable draft” ergonomics by default: store setters accept a draft callback (produce-style) and can optionally return a value to perform a shallow replacement/diff. Helper APIs are simplified (`mergeProps` → `merge`, `splitProps` → `omit`), and a new derived-store primitive (`createProjection`, also reachable via `createStore(fn)`) replaces selector-style patterns with a more general “mutate a projection” approach. A `deep()` helper is provided for cases where you need deep observation rather than property-level tracking.
+Solid 2.0’s store layer leans into “mutable draft” ergonomics by default: store setters accept a draft callback (produce-style) and can optionally return a value to perform a shallow replacement/diff. Helper APIs are simplified (`mergeProps` → `merge`, `splitProps` → `omit`), and a new derived-store primitive (`createProjection`, also reachable via `createStore(fn)`) replaces selector-style patterns with a more general “mutate a projection” approach. A `deep()` helper is provided for cases where you need deep observation rather than property-level tracking, and `createStore(value, { shallow: true })` provides a single-layer store for record-granularity data — root keys reactive, values plain records replaced by reference.
 
 ## Motivation
 
@@ -128,9 +128,9 @@ const [cache, setCache] = createStore((draft) => {
 setCache(s => { s.override = true; });
 ```
 
-### `reconcile(value, key)` (diffing into stores)
+### `reconcile(value, key?)` (diffing into stores)
 
-`reconcile` returns a diffing function that updates a store (or a nested part of a store) from new data while preserving identity for unchanged entries. The second argument is the key used for identity matching (a string property name or a function).
+`reconcile` returns a diffing function that updates a store (or a nested part of a store) from new data while preserving identity for unchanged entries. The second argument is the key used for identity matching (a string property name or a function). It defaults to `"id"`; pass `null` for **positional** matching — index N of the new array merges into index N of the old, with no keyed diff pass. Positional mode is the classic pattern for fixed-shape data that churns in place (dashboards, monitors), and is what 1.x expressed as `reconcile(v, { key: null, merge: true })` — merge semantics are always on in 2.0.
 
 In 2.0 the usage changes from 1.x because setters are now draft-first: you call `reconcile` *inside* the setter callback, targeting the specific part of the draft you want to reconcile.
 
@@ -145,6 +145,37 @@ setStore(s => {
 ```
 
 This pairs naturally with `createProjection`, where returning a value from the derive function uses reconciliation automatically (keyed by `options.key`, default `"id"`).
+
+### Shallow stores (`shallow: true`)
+
+By default stores track at property level all the way down. `createStore(value, { shallow: true })` creates a **single-layer** store instead: the root's own keys are fully reactive (per-key tracking, membership, enumeration, `length`), while the values under them are **plain records replaced by reference** — no proxies, no tracking, and no deep diffing below the boundary.
+
+```js
+const [rows, setRows] = createStore(initialRows, { shallow: true });
+
+// each poll delivers a completely fresh payload
+onPoll(fresh => setRows(reconcile(fresh, null)));
+```
+
+Use this when the *record* is the unit of change: rows, entities, or feed items that arrive or update wholesale (server collections, polling dashboards, streamed lists). Deep tracking earns its cost by skipping unchanged leaves; when every leaf of a changed record changes together, that machinery is pure overhead — a shallow store makes ingestion a per-slot reference compare and reads below the boundary plain property access.
+
+The contract, stated once: **records are replaced, never edited.**
+
+- Reads below the boundary — including inside a setter — hand back the plain record, so read-then-replace, `filter`/`pop` removal idioms, and projection derives all work naturally. Mutating a record in place notifies nothing.
+- Records that pass through a shallow boundary stay plain permanently and present identically through every store (one identity — never wrapped elsewhere). Ingesting a value that is already deep-tracked throws in dev.
+- `reconcile` at the boundary is positional (`reconcile(fresh, null)`). Keyed row identity belongs to the consumer:
+
+```js
+<For each={rows} keyed={(row) => row.id}>
+  {(row) => <tr>...{row().name}...</tr>}
+</For>
+```
+
+Unchanged slots skip by reference equality (a partial payload that reuses row objects re-renders nothing), same-key replacements update through the row accessor without touching the DOM row, and new/removed keys create and dispose as usual.
+
+`shallow` is also accepted by `createProjection` and `createOptimisticStore`. Optimistic writes compose cleanly with the replacement contract: a tentative record replacement stages in the overlay, shows immediately, and reverts to the untouched original — the base records are never mutated.
+
+When *not* to use it: state you edit field-by-field (forms, editors, sparse in-place mutation). That is exactly what the default deep store is optimal for — shallow trades leaf granularity for record-granularity throughput, and re-runs all of a record's bindings when the record is replaced.
 
 ### `snapshot(store)` (replaces `unwrap`)
 
