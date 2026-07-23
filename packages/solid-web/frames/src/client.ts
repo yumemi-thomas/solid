@@ -19,7 +19,15 @@ import {
   createFrameInsertable
 } from "@dom-expressions/runtime/src/frame-client.js";
 import { createServerComponentHandler } from "@dom-expressions/runtime/src/frame-transport.js";
-import { configureServerFunctionsClient } from "@dom-expressions/runtime/src/server-functions/client.js";
+// The one import that must resolve to the SHARED built instance, not a
+// bundled copy: configuring the server-function client only counts if it's
+// the same module the compiled reference proxies call through
+// (`@solidjs/web/server-functions` resolves to this file in the browser).
+// A private copy breaks instance identity — and, because this entry never
+// calls that copy's readers, rollup would tree-shake the whole
+// `configureServerFunctionsClient` call out of the dist as unobservable.
+// Kept external in rollup.config.js for the same reason.
+import { configureServerFunctionsClient } from "@solidjs/web/server-functions/client";
 import { createJSONDataTable } from "@dom-expressions/runtime/src/serializer.js";
 
 export {
@@ -101,9 +109,7 @@ function claimRender(prefix: string, existing: Node[], render: () => any) {
     const el = n as Element;
     if (el.nodeType !== 1) continue;
     if (el.hasAttribute("_hk")) registry.set(el.getAttribute("_hk")!, el);
-    el.querySelectorAll("*[_hk]").forEach(child =>
-      registry.set(child.getAttribute("_hk")!, child)
-    );
+    el.querySelectorAll("*[_hk]").forEach(child => registry.set(child.getAttribute("_hk")!, child));
   }
   if (!registry.size) return render();
   const prevRegistry = sc.registry;
@@ -254,7 +260,13 @@ function documentBoundary(host: any, id: string, props: Record<string, any>) {
     const slotPrefix = `sc:slot:${id}:`;
     for (const key of Object.keys(hy.r)) {
       if (key.startsWith(slotPrefix)) {
-        host.apply({ type: "slot", id, version: 0, key: key.slice(slotPrefix.length), args: hy.r[key] });
+        host.apply({
+          type: "slot",
+          id,
+          version: 0,
+          key: key.slice(slotPrefix.length),
+          args: hy.r[key]
+        });
       } else if (key.startsWith("sc:region:")) {
         const childId = key.slice("sc:region:".length);
         if (childId.startsWith(id + ".")) {

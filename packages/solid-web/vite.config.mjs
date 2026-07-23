@@ -39,7 +39,16 @@ export default defineConfig({
   resolve: {
     conditions: ["development", "browser"],
     alias: {
-      rxcore: [resolve(rootDir, "../../packages/solid-web/src/core")]
+      rxcore: [resolve(rootDir, "../../packages/solid-web/src/core")],
+      // frames/src/client.ts configures the SHARED server-function client
+      // through the packaged specifier (kept external in its dist build).
+      // The frames specs stub fetch/createServerReference against the
+      // runtime SOURCE, so route the specifier to that same module — one
+      // instance, like every from-source consumer of this seam.
+      "@solidjs/web/server-functions/client": resolve(
+        rootDir,
+        "../../node_modules/@dom-expressions/runtime/src/server-functions/client.js"
+      )
     }
   }
 });

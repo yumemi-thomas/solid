@@ -38,6 +38,29 @@ const replaceDev = isDev =>
     delimiters: ["", ""]
   });
 
+// Build-time regression guard for the frames client entry: the emitted
+// chunk must still contain its transport half. `responseHandler` is the
+// config write inside installServerComponents and
+// `configureServerFunctionsClient` is the (external) import that applies
+// it — both were silently tree-shaken out of beta.23/24 when the
+// server-function client was bundled as a private copy.
+const assertFramesClientTransport = {
+  name: "assert-frames-client-transport",
+  generateBundle(_, bundle) {
+    for (const [fileName, chunk] of Object.entries(bundle)) {
+      if (chunk.type !== "chunk") continue;
+      for (const marker of ["configureServerFunctionsClient", "responseHandler"]) {
+        if (!chunk.code.includes(marker)) {
+          throw new Error(
+            `frames client output ${fileName} lost its transport wiring ("${marker}" missing) — ` +
+              "the server-function config call was tree-shaken or removed"
+          );
+        }
+      }
+    }
+  }
+};
+
 export default [
   {
     input: "src/index.ts",
@@ -152,8 +175,17 @@ export default [
   // bundles the frame runtime (store/morph/host/transport; frame-client is
   // importless by design — cross-bundle seams like the element-claim
   // registry and the FRAME brand ride registered symbols, so this copy and
-  // dist/web.js agree by construction). The server half bundles the frame
-  // sink and its SSR pipeline (rxcore → src/core, like every entry here).
+  // dist/web.js agree by construction). The server-function CLIENT is the
+  // exception: it carries the transport config as module state, so it must
+  // stay external — the dist imports the same built instance the compiled
+  // reference proxies call through (`@solidjs/web/server-functions`, client
+  // half). Bundling a private copy breaks instance identity AND lets rollup
+  // tree-shake the `configureServerFunctionsClient` call away (this entry
+  // never calls the copy's readers, so the config write looks
+  // unobservable) — which shipped a frames client with no transport in
+  // beta.23/24; assertFramesClientTransport keeps that from regressing.
+  // The server half bundles the frame sink and its SSR pipeline (rxcore →
+  // src/core, like every entry here).
   {
     input: "frames/src/client.ts",
     output: [
@@ -167,8 +199,13 @@ export default [
         format: "es"
       }
     ],
-    external: ["solid-js", "seroval", "seroval-plugins/web"],
-    plugins
+    external: [
+      "solid-js",
+      "seroval",
+      "seroval-plugins/web",
+      "@solidjs/web/server-functions/client"
+    ],
+    plugins: plugins.concat(assertFramesClientTransport)
   },
   {
     input: "frames/src/server.ts",
