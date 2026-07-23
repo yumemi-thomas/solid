@@ -30,8 +30,19 @@ export class NotReadyError extends Error {
    * construction.
    */
   declare _markVisual?: boolean;
-  constructor(public source: any) {
+  source: any;
+  constructor(source: any) {
+    // Control-flow throw: it happens on every read of a pending source, so in
+    // production skip V8's eager stack capture (proportional to stack depth —
+    // real cost under SSR) by zeroing the V8-specific stackTraceLimit around
+    // super(). Dev keeps the stack for debuggability; non-V8 engines (no
+    // stackTraceLimit) take the plain path.
+    const ErrorCtor = Error as unknown as { stackTraceLimit?: number };
+    const limit = !__DEV__ ? ErrorCtor.stackTraceLimit : undefined;
+    if (limit !== undefined) ErrorCtor.stackTraceLimit = 0;
     super();
+    if (limit !== undefined) ErrorCtor.stackTraceLimit = limit;
+    this.source = source;
   }
 }
 
