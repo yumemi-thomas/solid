@@ -32,7 +32,7 @@
     "@codspeed/vitest-plugin": "^5.4.0",
     "@dom-expressions/babel-plugin-jsx": "0.50.0-next.25",
     "@dom-expressions/hyperscript": "0.50.0-next.25",
-    "@dom-expressions/runtime": "0.50.0-next.28",
+    "@dom-expressions/runtime": "0.50.0-next.29",
     "@dom-expressions/tagged-jsx": "0.50.0-next.25",
     "@rollup/plugin-babel": "^6.0.3",
     "@rollup/plugin-commonjs": "^24.0.0",
