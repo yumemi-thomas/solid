@@ -258,6 +258,14 @@ export function markRaw<T>(value: T): T {
 
 function markRawOne(v: any) {
   if (isWrappable(v)) {
+    // A store proxy is already tracked elsewhere: the shallow boundary passes
+    // it through by reference (replaced, never edited — same slot semantics
+    // as a raw) instead of claiming it raw. The sticky mark is global, so
+    // marking a live proxy would make wrap() serve it verbatim through every
+    // OTHER store too — downstream deep stores then captured it instead of
+    // wrapping it in their own family, and their writes landed in the
+    // upstream store's override layer (#2932).
+    if (v[$TARGET] !== undefined) return;
     if (__DEV__ && storeLookup.has(v))
       throw new Error(
         "shallow store: an ingested record is already tracked as a deep store — one value cannot present both wrapped and raw"
@@ -1141,8 +1149,19 @@ export const storeTraps: ProxyHandler<StoreNode> = {
         const prevHas = prevLayer
           ? prevLayer[property] !== $DELETED
           : property in target[STORE_VALUE];
-        const value = unwrapStoreValue(rawValue);
-        if (target[STORE_SHALLOW] && isWrappable(value)) rawValues.add(value);
+        // Shallow slots hold store proxies verbatim (pass-through reference,
+        // never raw-marked — see markRawOne/#2932); everything else unwraps
+        // and marks as usual.
+        const passThrough = !!target[STORE_SHALLOW] && (rawValue as any)?.[$TARGET] !== undefined;
+        const value = passThrough ? rawValue : unwrapStoreValue(rawValue);
+        if (target[STORE_SHALLOW] && !passThrough && isWrappable(value)) {
+          // Flip the live gate too: a bare add was inert unless something else
+          // had already marked a raw somewhere (wrap() checks rawValuesUsed
+          // first), so the documented set-trap ingest mark silently no-oped in
+          // apps whose only shallow data arrived through writes.
+          rawValuesUsed = true;
+          rawValues.add(value);
+        }
         // Symbol-keyed writes on arrays are metadata, not index writes — never run
         // them through the numeric index/length machinery (`parseInt` on a symbol
         // throws). #2769
