@@ -89,8 +89,42 @@ export function forEachDependent(
 // settles and when an `isPending` observer must re-evaluate after a real error):
 // shared scheduling helper in heap.ts (tracked effects bypass the heap).
 
+// Settle-time counterpart of unlinkSubs' last-one-out check. A lazy node that
+// loses its last subscriber while STATUS_PENDING is exempt from autodispose
+// (the in-flight work is an observer), so whatever CLEARS that pending state
+// must run the release — otherwise the node stays linked and recomputes
+// forever with zero subscribers (#2934). The node's own promise/iterator
+// callbacks handle their own release (settleAutodispose in handleAsync); this
+// covers derivatively-pending dependents, which have no callbacks of their own.
+function releaseIfSettledUnobserved(node: Computed<any>): void {
+  (node as any)._fn &&
+    node._config & CONFIG_AUTO_DISPOSE &&
+    !node._subs &&
+    !(node._flags & REACTIVE_ZOMBIE) &&
+    !(node._statusFlags & STATUS_PENDING) &&
+    unobserved(node);
+}
+
+// Error-path sweep: notifyStatus(STATUS_ERROR) clears dependents' pending
+// sources through its own recursion (no per-node settle callback), so after
+// the propagation completes, walk the same graph for stranded lazy nodes.
+// Collect-then-release so unobserved() never unlinks under the walk.
+export function releaseSettledDependents(el: Computed<any>): void {
+  let candidates: Computed<any>[] | undefined;
+  const visited = new Set<Computed<any>>();
+  const visit = (node: Computed<any>) => {
+    if (visited.has(node)) return;
+    visited.add(node);
+    if (!node._subs && node._config & CONFIG_AUTO_DISPOSE) (candidates ??= []).push(node);
+    forEachDependent(node, visit);
+  };
+  forEachDependent(el, visit);
+  if (candidates) for (const node of candidates) releaseIfSettledUnobserved(node);
+}
+
 export function settlePendingSource(el: Computed<any>): void {
   let scheduled = false;
+  let released: Computed<any>[] | undefined;
   const visited = new Set<Computed<any>>();
   // Companion updates no-op without the verdict layer (null hook).
   const updateCompanions = GlobalQueue._updatePendingSignal;
@@ -111,11 +145,19 @@ export function settlePendingSource(el: Computed<any>): void {
         scheduled = true;
       }
       node._blocked = false;
+      // Fully settled with nobody watching: release candidate (#2934). Checked
+      // again at release time — deferred so unobserved() can't unlink subs
+      // lists this walk is still iterating.
+      if (!node._subs && node._config & CONFIG_AUTO_DISPOSE) (released ??= []).push(node);
     }
     forEachDependent(node, settle);
   };
 
   forEachDependent(el, settle);
+
+  // Release before the flush schedule below: unobserved() pulls the node back
+  // out of the heap, so the enqueueSub above never recomputes a released node.
+  if (released) for (const node of released) releaseIfSettledUnobserved(node);
 
   if (scheduled) schedule();
 }
@@ -178,8 +220,13 @@ export function handleAsync<T>(
     if (el._inFlight !== result) return;
     globalQueue.initTransition(resolveTransition(el as any));
     // NotReadyError from rejected promises should be treated as pending, not error
-    notifyStatus(el, error instanceof NotReadyError ? STATUS_PENDING : STATUS_ERROR, error);
+    const stillPending = error instanceof NotReadyError;
+    notifyStatus(el, stillPending ? STATUS_PENDING : STATUS_ERROR, error);
     el._time = clock;
+    // A real error settles derivatively-pending dependents (notifyStatus
+    // cleared their pending sources), so stranded lazy ones release here —
+    // the error twin of settlePendingSource's release (#2934).
+    if (!stillPending) releaseSettledDependents(el);
   };
 
   const asyncWrite = (value: T, then?: () => void) => {
@@ -262,10 +309,14 @@ export function handleAsync<T>(
   // work (a lazy async memo would otherwise tear down and re-execute — one
   // fetch per suspended re-read). Settling is that observer's release, so
   // it runs the same last-one-out check the other release sites run.
-  const settleAutodispose = () => {
+  // Returns whether the node released, so the iterator branch can stop
+  // pulling values instead of pumping an unobserved stream forever (#2935).
+  const settleAutodispose = (): boolean => {
     if (el._config & CONFIG_AUTO_DISPOSE && !el._subs && !(el._statusFlags & STATUS_PENDING)) {
       unobserved(el as Computed<unknown>);
+      return true;
     }
+    return false;
   };
 
   if (thenable) {
@@ -321,6 +372,13 @@ export function handleAsync<T>(
       } catch {}
     });
 
+    // Release check before each next pull: an unobserved lazy node must tear
+    // down (its cleanup above closes the iterator) instead of pumping the
+    // stream forever with zero subscribers (#2935).
+    const iterateOrRelease = () => {
+      if (!settleAutodispose()) iterate();
+    };
+
     const iterate = (): boolean => {
       let syncResult: IteratorResult<T>,
         syncError: unknown,
@@ -337,7 +395,7 @@ export function handleAsync<T>(
             return;
           } else if (!r.done) {
             hadValue = true;
-            asyncWrite(r.value, iterate);
+            asyncWrite(r.value, iterateOrRelease);
           } else {
             completed = true;
             if (hadValue) {
@@ -347,6 +405,7 @@ export function handleAsync<T>(
               // Empty completion settles like the immediately-done sync path.
               asyncWrite(undefined as T);
             }
+            settleAutodispose();
           }
         },
         e => {
@@ -356,6 +415,7 @@ export function handleAsync<T>(
           } else if (el._inFlight === result) {
             completed = true;
             handleError(e);
+            settleAutodispose();
           }
         }
       );
