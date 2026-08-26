@@ -6,6 +6,7 @@ use oxc_span::SourceType;
 
 use crate::dom::element::{AstDomTransform, DomTransformConfig};
 use crate::error::CompileError;
+use crate::semantic_trace::{ExecutionCensus, SemanticTrace, TraceRecorder};
 use crate::ssr::transform::AstSsrTransform;
 use crate::universal::transform::{
     AstUniversalTransform, DynamicDomConfig, UniversalWrapperConfig,
@@ -86,6 +87,9 @@ pub struct CompileOptions {
     pub omit_last_closing_tag: bool,
     pub built_ins: Vec<String>,
     pub renderers: Vec<Renderer>,
+    /// Collect DOM-lowering execution facts without changing generated code.
+    /// Unsupported output modes fail closed with a configuration error.
+    pub semantic_trace: bool,
 }
 
 impl Default for CompileOptions {
@@ -115,6 +119,7 @@ impl Default for CompileOptions {
             omit_last_closing_tag: true,
             built_ins: default_built_ins(),
             renderers: Vec::new(),
+            semantic_trace: false,
         }
     }
 }
@@ -124,6 +129,8 @@ impl Default for CompileOptions {
 pub struct CompileOutput {
     pub code: String,
     pub source_map: Option<String>,
+    /// Present only when `CompileOptions::semantic_trace` is enabled.
+    pub semantic_trace: Option<SemanticTrace>,
 }
 
 /// Compile one JavaScript or TypeScript module containing JSX.
@@ -150,6 +157,11 @@ pub(crate) fn compile_for_node_adapter(
 }
 
 fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput, CompileError> {
+    if options.semantic_trace && options.generate != Generate::Dom {
+        return Err(CompileError::configuration(
+            "semantic tracing currently requires the DOM generate",
+        ));
+    }
     let source_type = source_type_for_filename(options.filename.as_deref())?;
     let allocator = Allocator::default();
     // Babel has no ParenthesizedExpression node (parens are trivia), so the
@@ -170,21 +182,35 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     if let Some(lib) = options.require_import_source.as_deref()
         && !has_jsx_import_source(&parsed.program, source, lib)
     {
+        if options.semantic_trace {
+            return Err(CompileError::configuration(
+                "semantic tracing cannot claim coverage for a file skipped by requireImportSource",
+            ));
+        }
         return Ok(CompileOutput {
             code: source.to_string(),
             source_map: None,
+            semantic_trace: None,
         });
     }
 
     let mut program = parsed.program;
+    let mut semantic_trace = None;
     match options.generate {
         Generate::Dom => {
+            let census = options.semantic_trace.then(|| {
+                ExecutionCensus::from_program(&program, &options.built_ins, options.inline_styles)
+            });
             let mut transform = AstDomTransform::new(
                 &allocator,
                 source,
                 &options.module_name,
                 dom_transform_config(options, options.built_ins.clone()),
             );
+            if let Some(census) = census {
+                transform.semantic_trace =
+                    TraceRecorder::new(census, matches!(options.effect_wrapper, Wrapper::Default));
+            }
             transform.visit_program(&mut program);
             if let Some(error) = transform.error.take() {
                 return Err(CompileError::transform(error));
@@ -192,6 +218,10 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             transform
                 .prepend_helpers(&mut program)
                 .map_err(|error| CompileError::transform(error.to_string()))?;
+            semantic_trace = transform
+                .semantic_trace
+                .finish()
+                .map_err(CompileError::transform)?;
         }
         Generate::Dynamic => {
             if let Some(renderer) = dom_renderer(&options.renderers) {
@@ -273,6 +303,7 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     Ok(CompileOutput {
         code: build.code,
         source_map: build.map.map(|map| map.to_json_string()),
+        semantic_trace,
     })
 }
 

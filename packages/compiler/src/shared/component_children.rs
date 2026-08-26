@@ -19,6 +19,9 @@ use crate::shared::utils::{decode_html_entities, trim_jsx_text};
 /// children keep their setup statements (template declarations + operations)
 /// separate so the caller can host them in the `children` getter.
 pub(crate) trait ComponentChildLower<'a>: ModeLower<'a> {
+    /// Records a deferred child callback and its receiving JSX component.
+    fn trace_deferred_callback(&mut self, _span: oxc_span::Span, _receiver_span: oxc_span::Span) {}
+
     fn lower_child_element_with_setup(
         &mut self,
         element: &JSXElement<'a>,
@@ -50,11 +53,14 @@ struct ChildValue<'a> {
     /// per-child IIFE inside multi-child arrays — matching Babel, where each
     /// array entry is its own `(() => { ... })()`.
     setup: std::vec::Vec<Statement<'a>>,
+    semantic_span: Option<oxc_span::Span>,
 }
 
 pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
     ctx: &mut C,
     children: &[JSXChild<'a>],
+    render_callbacks: bool,
+    receiver_span: oxc_span::Span,
 ) -> Result<Option<ComponentChildren<'a>>> {
     let allocator = ctx.condition_allocator();
     let ast = mode_ast(ctx);
@@ -69,6 +75,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                         value: ast.expression_string_literal(span, ast.str(&value), None),
                         kind: ChildKind::Static,
                         setup: std::vec::Vec::new(),
+                        semantic_span: None,
                     });
                 }
             }
@@ -89,6 +96,20 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                         ctx.classify()
                             .is_dynamic(Some(container.span.start), expression, true)
                     });
+                let render_callback = render_callbacks
+                    && matches!(
+                        container.expression,
+                        JSXExpression::ArrowFunctionExpression(_)
+                            | JSXExpression::FunctionExpression(_)
+                    );
+                if render_callback {
+                    ctx.trace_deferred_callback(container.expression.span(), receiver_span);
+                    ctx.trace_callback(
+                        container.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::ControlFlowRender,
+                        crate::semantic_trace::CallbackDecision::LaterRender,
+                    );
+                }
                 let mut value = container.expression.clone_in(allocator).into_expression();
                 if dynamic && ctx.wrap_conditionals_enabled() && is_condition_shape(&value) {
                     // `transformCondition(..., true)` — memos collapse inline.
@@ -102,6 +123,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                         ChildKind::Static
                     },
                     setup: std::vec::Vec::new(),
+                    semantic_span: (!render_callback).then(|| container.expression.span()),
                 });
             }
             JSXChild::Element(element) => {
@@ -110,6 +132,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                     value,
                     kind: ChildKind::Element,
                     setup,
+                    semantic_span: None,
                 });
             }
             JSXChild::Spread(spread) => {
@@ -123,6 +146,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                         ChildKind::Static
                     },
                     setup: std::vec::Vec::new(),
+                    semantic_span: Some(spread.expression.span()),
                 });
             }
             JSXChild::Fragment(fragment) => {
@@ -134,12 +158,17 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                 // (Babel's zero-arg callee unwrap in
                 // `transformComponentChildren`); arrays re-fold the setup into
                 // a per-entry IIFE, reproducing the original shape.
-                let value = lower_fragment(ctx, fragment)?;
+                let value = lower_fragment(
+                    ctx,
+                    fragment,
+                    crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                )?;
                 let (value, setup) = crate::shared::ast::split_zero_arg_iife(allocator, value);
                 values.push(ChildValue {
                     value,
                     kind: ChildKind::Element,
                     setup,
+                    semantic_span: None,
                 });
             }
         }
@@ -149,6 +178,17 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
         0 => None,
         1 => {
             let child = values.pop().expect("component child exists");
+            if let Some(span) = child.semantic_span {
+                ctx.trace_value(
+                    span,
+                    crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                    if matches!(child.kind, ChildKind::Static) {
+                        crate::semantic_trace::ValueDecision::EagerOnce
+                    } else {
+                        crate::semantic_trace::ValueDecision::CallerContext
+                    },
+                );
+            }
             Some(ComponentChildren {
                 value: child.value,
                 needs_getter: !matches!(child.kind, ChildKind::Static),
@@ -156,6 +196,15 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
             })
         }
         _ => {
+            for child in &values {
+                if let Some(span) = child.semantic_span {
+                    ctx.trace_value(
+                        span,
+                        crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                        crate::semantic_trace::ValueDecision::CallerContext,
+                    );
+                }
+            }
             let span = children
                 .first()
                 .map_or_else(|| oxc_span::Span::new(0, 0), JSXChild::span);
@@ -163,6 +212,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                 .into_iter()
                 .map(|child| {
                     let span = child.value.span();
+                    let trace_span = child.semantic_span.unwrap_or(span);
                     // Element children keep their setup in a per-entry IIFE;
                     // dynamic expression children are memo-wrapped
                     // (`createTemplate(wrap: true)` with an arrow thunk —
@@ -175,7 +225,7 @@ pub(crate) fn component_children<'a, C: ComponentChildLower<'a>>(
                         ast.expression_call(span, iife, None, ast.vec(), false)
                     } else if matches!(child.kind, ChildKind::DynamicExpression) {
                         let thunk = arrow_return_expression(allocator, span, child.value);
-                        ctx.memo_wrap_dynamic_child(span, thunk)
+                        ctx.memo_wrap_dynamic_child(span, trace_span, thunk)
                     } else {
                         child.value
                     };

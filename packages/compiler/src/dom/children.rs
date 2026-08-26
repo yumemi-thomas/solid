@@ -14,6 +14,7 @@ use oxc_ast::ast::{
     JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXExpression,
     Statement,
 };
+use oxc_span::GetSpan;
 
 impl<'a> AstDomTransform<'a, '_> {
     #[allow(clippy::too_many_arguments)]
@@ -164,6 +165,8 @@ impl<'a> AstDomTransform<'a, '_> {
                             lowered,
                             marker,
                         ));
+                        self.semantic_trace
+                            .owner_establishment(child.span, "insert", None);
                     } else if let Some(static_template) = lower_static_native_template(
                         self,
                         child,
@@ -228,6 +231,11 @@ impl<'a> AstDomTransform<'a, '_> {
                         continue;
                     }
                     if let Some(value) = self.static_jsx_expression_value(&container.expression) {
+                        self.semantic_trace.value(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                            crate::semantic_trace::ValueDecision::Elided,
+                        );
                         template.push_both(&escape_html_text_expression(&value));
                         if !in_text_run {
                             if filtered_index(child).is_some_and(|position| {
@@ -298,6 +306,15 @@ impl<'a> AstDomTransform<'a, '_> {
                         // shared predicate, and a non-dynamic hole inserts
                         // its expression untouched.
                         let dynamic = self.classify().is_dynamic_child_slot(dynamic_child);
+                        self.semantic_trace.value(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                            if dynamic {
+                                crate::semantic_trace::ValueDecision::ReactiveRerun
+                            } else {
+                                crate::semantic_trace::ValueDecision::EagerOnce
+                            },
+                        );
                         // JSX inside the hole stays raw for the deferred pass
                         // (Babel wraps the untransformed expression and its
                         // outer traversal lowers the JSX later).
@@ -316,7 +333,11 @@ impl<'a> AstDomTransform<'a, '_> {
                             && self.hydratable
                             && child_slot_allocates_ids(dynamic_child)
                         {
-                            self.scope_child_expression(container.span, value)
+                            self.scope_child_expression(
+                                container.span,
+                                container.expression.span(),
+                                value,
+                            )
                         } else {
                             value
                         };
@@ -344,6 +365,11 @@ impl<'a> AstDomTransform<'a, '_> {
                             value,
                             marker,
                         ));
+                        self.semantic_trace.owner_establishment(
+                            container.expression.span(),
+                            "insert",
+                            None,
+                        );
                     }
                     index = run_end;
                     continue;
@@ -351,11 +377,21 @@ impl<'a> AstDomTransform<'a, '_> {
                 JSXChild::Spread(spread) => {
                     in_text_run = false;
                     self.template_state.uses_insert = true;
+                    let dynamic = self.classify().is_dynamic(None, &spread.expression, false);
+                    self.semantic_trace.value(
+                        spread.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                        if dynamic {
+                            crate::semantic_trace::ValueDecision::ReactiveRerun
+                        } else {
+                            crate::semantic_trace::ValueDecision::EagerOnce
+                        },
+                    );
                     let value = spread_child_expression(self, spread.span, &spread.expression);
                     // Spread children always allocate ids; scope keyed off the
                     // same shared dynamic predicate as the ssr generate.
                     let value = if self.hydratable && self.classify().is_dynamic_child_slot(child) {
-                        self.scope_child_expression(spread.span, value)
+                        self.scope_child_expression(spread.span, spread.expression.span(), value)
                     } else {
                         value
                     };
@@ -371,6 +407,11 @@ impl<'a> AstDomTransform<'a, '_> {
                         declarations,
                     );
                     operations.push(self.insert_statement(element.span, element_id, value, marker));
+                    self.semantic_trace.owner_establishment(
+                        spread.expression.span(),
+                        "insert",
+                        None,
+                    );
                 }
                 _ => {
                     return Err(Error::from_reason(
@@ -804,6 +845,46 @@ impl<'a> AstDomTransform<'a, '_> {
         Ok(self.call_identifier(child.span, "_$getNextMatch", vec![base, tag]))
     }
 
+    /// Withdraw censused sites from a child list this lowering discards
+    /// without visiting.
+    pub(crate) fn retract_children_sites(&mut self, children: &[JSXChild<'a>]) {
+        let Some(first) = children.first() else {
+            return;
+        };
+        let last = children
+            .last()
+            .expect("a non-empty child list has a last child");
+        self.semantic_trace
+            .retract_within(oxc_span::Span::new(first.span().start, last.span().end));
+    }
+
+    /// Resolve a void template root's unvisited children as one elided range.
+    pub(crate) fn discard_void_children_sites(&mut self, children: &[JSXChild<'a>]) {
+        let Some(first) = children.first() else {
+            return;
+        };
+        let last = children
+            .last()
+            .expect("a non-empty child list has a last child");
+        self.semantic_trace.value(
+            oxc_span::Span::new(first.span().start, last.span().end),
+            crate::ExecutionSiteKind::JsxChild,
+            crate::ValueDecision::Elided,
+        );
+    }
+
+    /// Reconcile a textarea `value` fold with its discarded source children
+    /// and synthesized replacement child.
+    pub(crate) fn discard_folded_children(
+        &mut self,
+        source_children: &[JSXChild<'a>],
+        replacement: &JSXChild<'a>,
+    ) {
+        self.retract_children_sites(source_children);
+        self.semantic_trace
+            .ignore_synthesized_child(replacement.span());
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_dynamic_native_child(
         &mut self,
@@ -826,19 +907,16 @@ impl<'a> AstDomTransform<'a, '_> {
             .attributes
             .iter()
             .any(|attr| matches!(attr, JSXAttributeItem::SpreadAttribute(_)));
-        let child: &JSXElement<'a> = if !crate::shared::utils::is_void_element(&tag_name)
+        let attribute_child = (!crate::shared::utils::is_void_element(&tag_name)
             && !has_spread
-            && child.children.is_empty()
-        {
-            if let Some(attribute_child) =
-                crate::dom::element::children_attribute_child(self, child)
-            {
-                let mut clone = child.clone_in(self.allocator);
-                clone.children.push(attribute_child);
-                self.allocator.alloc(clone)
-            } else {
-                child
-            }
+            && child.children.is_empty())
+        .then(|| crate::dom::element::children_attribute_child(self, child))
+        .flatten();
+        let children_from_attribute = attribute_child.is_some();
+        let child: &JSXElement<'a> = if let Some(attribute_child) = attribute_child {
+            let mut clone = child.clone_in(self.allocator);
+            clone.children.push(attribute_child);
+            self.allocator.alloc(clone)
         } else {
             child
         };
@@ -852,6 +930,7 @@ impl<'a> AstDomTransform<'a, '_> {
             &tag_name,
             &child_id,
             !child.children.is_empty(),
+            children_from_attribute,
             &mut child_template.html,
             &mut child_declarations,
             &mut child_operations,
@@ -861,9 +940,13 @@ impl<'a> AstDomTransform<'a, '_> {
             child_operations.push(self.custom_element_context_statement(child.span, &child_id));
         }
 
-        // Babel's textarea `value` fold replaces the element's children.
+        let source_children = child.children.as_slice();
+
+        // The textarea `value` fold replaces the element's children. Record
+        // the discarded source without changing the lowering decision.
         let child: &JSXElement<'a> = match attrs_lowering.children_replacement {
             Some(replacement) => {
+                self.discard_folded_children(source_children, &replacement);
                 let mut clone = child.clone_in(self.allocator);
                 clone.children.clear();
                 clone.children.push(replacement);
@@ -913,9 +996,12 @@ impl<'a> AstDomTransform<'a, '_> {
     fn scope_child_expression(
         &mut self,
         span: oxc_span::Span,
+        trace_span: oxc_span::Span,
         value: Expression<'a>,
     ) -> Expression<'a> {
         self.template_state.uses_scope = true;
+        self.semantic_trace
+            .owner_establishment(trace_span, "scope", None);
         let already_function = match &value {
             Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => true,
             Expression::CallExpression(call) => matches!(

@@ -439,9 +439,12 @@ impl<'a> DirectivesTransform<'a> {
                         &export.declaration,
                         ExportDefaultDeclarationKind::FunctionDeclaration(function)
                             if function.id.is_none()
-                    ) || export.declaration.as_expression().is_some_and(|expression| {
-                        !matches!(unwrap_expression(expression), Expression::Identifier(_))
-                    }) =>
+                    ) || export
+                        .declaration
+                        .as_expression()
+                        .is_some_and(|expression| {
+                            !matches!(unwrap_expression(expression), Expression::Identifier(_))
+                        }) =>
                 {
                     let mut export = export;
                     let placeholder =
