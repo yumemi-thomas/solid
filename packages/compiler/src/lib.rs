@@ -35,9 +35,16 @@ mod universal;
 pub use compiler::{CompileOptions, CompileOutput, Generate, Renderer, Wrapper, compile};
 pub use error::{CompileError, CompileErrorKind};
 pub use semantic_trace::{
-    CallbackDecision, ComponentRenderSite, DeferredCallbackSite, ExecutionSite, ExecutionSiteKind,
-    OwnerEstablishment, OwnershipDecision, OwnershipSite, SEMANTIC_TRACE_VERSION, SemanticTrace,
-    SourceSpan, TerminalDecision, ValueDecision,
+    CallbackDecision, ComponentRenderSite, DeferredCallbackSite, ExecutionCardinality,
+    ExecutionDisposition, ExecutionSchedule, ExecutionSemantics, ExecutionSite, ExecutionSiteKind,
+    ExecutionTrigger, GeneratedOperation, GeneratedOperationKind, OwnerEstablishment,
+    OwnerRelation, OwnershipDecision, OwnershipSite, SEMANTIC_TRACE_IMPLEMENTATION_REVISION,
+    SEMANTIC_TRACE_UPSTREAM_REVISION, SEMANTIC_TRACE_VERSION, SemanticCompilerIdentity,
+    SemanticRendererConfig, SemanticTrace, SemanticTraceConfig, SemanticTraceIdentity,
+    SemanticTraceMode, ServerFunctionImportConfig, ServerFunctionOperation, ServerFunctionScope,
+    ServerFunctionSemanticTrace, ServerFunctionTraceConfig, ServerFunctionTraceIdentity,
+    ServerFunctionTransformEnv, ServerFunctionTransformMode, SourceSpan, TerminalDecision,
+    TrackingRelation, ValueDecision,
 };
 
 /// Cargo package version of the compiler implementation producing semantic

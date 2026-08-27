@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use solidjs_compiler::{CompileOptions, compile};
+use solidjs_compiler::{CompileOptions, Generate, compile};
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -123,6 +123,17 @@ fn options(semantic_trace: bool) -> CompileOptions {
     }
 }
 
+fn ssr_options(semantic_trace: bool) -> CompileOptions {
+    CompileOptions {
+        generate: Generate::Ssr,
+        module_name: "r-dom".into(),
+        built_ins: vec!["For".into(), "Show".into()],
+        static_marker: "@once".into(),
+        semantic_trace,
+        ..CompileOptions::default()
+    }
+}
+
 fn corpus_sources() -> Vec<(String, String)> {
     fixture_sources()
         .into_iter()
@@ -175,6 +186,56 @@ fn semantic_trace_is_corpus_wide_output_neutral() {
         "{} trace-neutrality failures:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+#[test]
+fn ssr_semantic_trace_is_corpus_wide_output_neutral_and_reconciled() {
+    let mut plain_options = ssr_options(false);
+    plain_options.source_map = true;
+    let mut traced_options = ssr_options(true);
+    traced_options.source_map = true;
+
+    let mut failures = Vec::new();
+    let mut reconciled = 0;
+    for (id, source) in corpus_sources() {
+        let plain = compile(&source, &plain_options);
+        let traced = compile(&source, &traced_options);
+        match (plain, traced) {
+            (Ok(plain), Ok(traced)) => {
+                if plain.code != traced.code {
+                    failures.push(format!("{id}: generated JavaScript changed"));
+                }
+                if plain.source_map != traced.source_map {
+                    failures.push(format!("{id}: source map changed"));
+                }
+                if traced.semantic_trace.is_none() {
+                    failures.push(format!("{id}: tracing returned no semantic trace"));
+                } else {
+                    reconciled += 1;
+                }
+            }
+            (Err(plain), Err(traced)) if plain.to_string() == traced.to_string() => {}
+            (Err(plain), Err(traced)) => failures.push(format!(
+                "{id}: diagnostic changed: {plain:?} versus {traced:?}"
+            )),
+            (Ok(_), Err(error)) => {
+                failures.push(format!("{id}: tracing introduced a rejection: {error}"));
+            }
+            (Err(error), Ok(_)) => {
+                failures.push(format!("{id}: tracing removed a rejection: {error}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} SSR trace-neutrality/reconciliation failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        reconciled > 200,
+        "expected broad SSR corpus coverage, got {reconciled}"
     );
 }
 

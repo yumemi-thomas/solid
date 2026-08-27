@@ -141,11 +141,11 @@ fn semantic_trace_round_trips_and_rejects_unknown_fields() {
 }
 
 #[test]
-fn semantic_trace_fails_closed_for_unsupported_or_bypassed_modes() {
+fn semantic_trace_fails_closed_for_unreconciled_or_bypassed_modes() {
     let unsupported = compile(
         "const view = <div />;",
         &CompileOptions {
-            generate: Generate::Ssr,
+            generate: Generate::Universal,
             semantic_trace: true,
             ..CompileOptions::default()
         },

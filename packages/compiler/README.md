@@ -128,6 +128,14 @@ result.functions; // [{ id, name, exports }] for manifest building
 
 The runtime module defaults to `@solidjs/web/server-functions`. Function IDs use `xxhash32(root-relative path)-<count>` (name-suffixed with `env: "development"`). There are also experimental `transformLazy` and `transformRefresh` passes.
 
+### Semantic fact side channel (unstable)
+
+The host-independent `compile` API can set `CompileOptions::semantic_trace` for DOM or SSR compilation. Trace version 3 reports reconciled source and generated operations with independent trigger, schedule, tracking, cardinality, and owner relations. It binds the exact compiler revisions, source, generated code, optional source map, and complete compiler configuration by identity or SHA-256 digest. Collection is output-neutral and fails the compilation when the source census cannot be reconciled with an actual lowering decision.
+
+`transformDirectives` accepts `semanticTrace: true` and returns a JSON `semanticTrace` side channel for `"use server"` transformations. It records source/directive spans, export identity, client-reference creation, server registration, and the exact transformation mode without claiming runtime transport behavior.
+
+These facts are an unstable machine interface for exact-revision consumers. They do not change lowering, diagnostics, runtime behavior, or the supported Node `transform()` contract.
+
 ## Rust compiler core
 
 The crate also exposes a host-independent Rust API. The crate name is `solidjs-compiler`; the Node `transform()` delegates to the same core.

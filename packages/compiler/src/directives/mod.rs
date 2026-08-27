@@ -54,6 +54,9 @@ pub struct TransformDirectivesOptions {
     pub register: Option<DirectiveImportOption>,
     /// Runtime import for `createServerReference` (both outputs).
     pub create: Option<DirectiveImportOption>,
+    /// Emit a hash-bound semantic trace of the server-function boundary
+    /// transformation. This side channel never changes generated output.
+    pub semantic_trace: Option<bool>,
 }
 
 /// One extracted server function, for the bundler plugin's manifest.
@@ -77,6 +80,8 @@ pub struct TransformDirectivesResult {
     /// module when false.
     pub valid: bool,
     pub functions: Vec<ServerFunctionMeta>,
+    /// JSON-encoded [`crate::ServerFunctionSemanticTrace`] when requested.
+    pub semantic_trace: Option<String>,
 }
 
 pub fn transform_directives(
@@ -84,6 +89,8 @@ pub fn transform_directives(
     options: Option<TransformDirectivesOptions>,
 ) -> Result<TransformDirectivesResult> {
     let options = options.unwrap_or_default();
+    let semantic_trace_requested = options.semantic_trace.unwrap_or(false);
+    let source_sha256 = crate::semantic_trace::sha256_hex(code.as_bytes());
 
     let mode = match options.mode.as_deref() {
         Some("server") => Mode::Server,
@@ -141,15 +148,26 @@ pub fn transform_directives(
             .map_err(Error::from_reason)?;
     }
 
-    let mut pass = DirectivesTransform::new(
-        &allocator,
-        mode,
-        env,
-        directive,
-        hash,
-        import_def(options.register.as_ref(), "registerServerReference"),
-        import_def(options.create.as_ref(), "createServerReference"),
-    );
+    let register = import_def(options.register.as_ref(), "registerServerReference");
+    let create = import_def(options.create.as_ref(), "createServerReference");
+    let semantic_config = crate::semantic_trace::ServerFunctionTraceConfig {
+        filename: filename.to_string(),
+        root: options.root.clone(),
+        mode: match mode {
+            Mode::Client => crate::semantic_trace::ServerFunctionTransformMode::Client,
+            Mode::Server => crate::semantic_trace::ServerFunctionTransformMode::Server,
+        },
+        env: match env {
+            Env::Development => crate::semantic_trace::ServerFunctionTransformEnv::Development,
+            Env::Production => crate::semantic_trace::ServerFunctionTransformEnv::Production,
+        },
+        directive: directive.clone(),
+        source_map: options.source_map.unwrap_or(false),
+        register: semantic_import_config(&register),
+        create: semantic_import_config(&create),
+    };
+    let mut pass =
+        DirectivesTransform::new(&allocator, mode, env, directive, hash, register, create);
     pass.run(&mut program);
 
     let valid = pass.valid;
@@ -162,6 +180,21 @@ pub fn transform_directives(
             exports: function.exports.clone(),
         })
         .collect();
+    let semantic_functions = pass
+        .functions
+        .iter()
+        .map(|function| crate::semantic_trace::ServerFunctionOperation {
+            id: function.id.clone(),
+            name: function.name.clone(),
+            exports: function.exports.clone(),
+            source_span: function.source_span,
+            directive_span: function.directive_span,
+            scope: function.scope,
+            boundary: "server-function-reference".to_string(),
+            creates_reference: true,
+            registers_server_implementation: mode == Mode::Server,
+        })
+        .collect::<Vec<_>>();
     let needs_dce = pass.needs_dce();
     let orphans = std::mem::take(&mut pass.orphans);
     drop(pass);
@@ -200,12 +233,177 @@ pub fn transform_directives(
         (build_code, build_map)
     };
 
+    let semantic_trace = semantic_trace_requested
+        .then(|| {
+            serde_json::to_string(&crate::semantic_trace::ServerFunctionSemanticTrace {
+                version: crate::semantic_trace::SEMANTIC_TRACE_VERSION,
+                identity: crate::semantic_trace::ServerFunctionTraceIdentity {
+                    compiler: crate::semantic_trace::SemanticCompilerIdentity {
+                        package_version: crate::COMPILER_VERSION.to_string(),
+                        upstream_revision: crate::semantic_trace::SEMANTIC_TRACE_UPSTREAM_REVISION
+                            .to_string(),
+                        implementation_revision:
+                            crate::semantic_trace::SEMANTIC_TRACE_IMPLEMENTATION_REVISION
+                                .to_string(),
+                    },
+                    source_sha256,
+                    output_sha256: crate::semantic_trace::sha256_hex(code.as_bytes()),
+                    source_map_sha256: map
+                        .as_deref()
+                        .map(|map| crate::semantic_trace::sha256_hex(map.as_bytes())),
+                    config: semantic_config,
+                },
+                functions: semantic_functions,
+            })
+            .map_err(|error| Error::from_reason(format!("serialize semantic trace: {error}")))
+        })
+        .transpose()?;
+
     Ok(TransformDirectivesResult {
         code,
         map,
         valid,
         functions,
+        semantic_trace,
     })
+}
+
+fn semantic_import_config(import: &ImportDef) -> crate::semantic_trace::ServerFunctionImportConfig {
+    crate::semantic_trace::ServerFunctionImportConfig {
+        kind: match import.kind {
+            ImportKind::Named => "named",
+            ImportKind::Default => "default",
+        }
+        .to_string(),
+        name: import.name.clone(),
+        source: import.source.clone(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod semantic_tests {
+    use super::*;
+
+    fn options(mode: &str, semantic_trace: bool) -> TransformDirectivesOptions {
+        TransformDirectivesOptions {
+            filename: Some("/project/src/actions.ts".to_string()),
+            root: Some("/project".to_string()),
+            mode: Some(mode.to_string()),
+            env: Some("production".to_string()),
+            directive: Some("use server".to_string()),
+            source_map: Some(true),
+            register: None,
+            create: None,
+            semantic_trace: Some(semantic_trace),
+        }
+    }
+
+    #[test]
+    fn server_function_trace_is_output_neutral_hash_bound_and_mode_exact() {
+        let source = "export const save = async () => { \"use server\"; return await write(); };";
+        let plain = transform_directives(source.to_string(), Some(options("server", false)))
+            .expect("plain directive transform");
+        let traced = transform_directives(source.to_string(), Some(options("server", true)))
+            .expect("traced directive transform");
+        assert_eq!(plain.code, traced.code);
+        assert_eq!(plain.map, traced.map);
+        assert!(plain.semantic_trace.is_none());
+
+        let trace: crate::semantic_trace::ServerFunctionSemanticTrace = serde_json::from_str(
+            traced
+                .semantic_trace
+                .as_deref()
+                .expect("semantic trace JSON"),
+        )
+        .expect("typed server-function trace");
+        assert_eq!(trace.version, crate::semantic_trace::SEMANTIC_TRACE_VERSION);
+        assert_eq!(
+            trace.identity.config.mode,
+            crate::semantic_trace::ServerFunctionTransformMode::Server
+        );
+        assert_eq!(trace.identity.config.filename, "/project/src/actions.ts");
+        assert_eq!(trace.identity.source_sha256.len(), 64);
+        assert_eq!(trace.identity.output_sha256.len(), 64);
+        assert_ne!(trace.identity.source_sha256, trace.identity.output_sha256);
+        assert_eq!(trace.functions.len(), 1);
+        let function = &trace.functions[0];
+        assert_eq!(function.name, "save");
+        assert_eq!(
+            function.scope,
+            crate::semantic_trace::ServerFunctionScope::Function
+        );
+        assert_eq!(function.boundary, "server-function-reference");
+        assert!(function.creates_reference);
+        assert!(function.registers_server_implementation);
+        assert_eq!(
+            &source[function.directive_span.start as usize..function.directive_span.end as usize],
+            "\"use server\";"
+        );
+        assert!(
+            source[function.source_span.start as usize..function.source_span.end as usize]
+                .starts_with("async ()")
+        );
+
+        let client = transform_directives(source.to_string(), Some(options("client", true)))
+            .expect("client directive transform");
+        let client_trace: crate::semantic_trace::ServerFunctionSemanticTrace =
+            serde_json::from_str(client.semantic_trace.as_deref().expect("client trace JSON"))
+                .expect("typed client trace");
+        assert_eq!(
+            client_trace.identity.config.mode,
+            crate::semantic_trace::ServerFunctionTransformMode::Client
+        );
+        assert_eq!(client_trace.functions[0].id, function.id);
+        assert!(client_trace.functions[0].creates_reference);
+        assert!(!client_trace.functions[0].registers_server_implementation);
+    }
+
+    #[test]
+    fn module_directive_trace_preserves_export_and_initializer_identity() {
+        let source = "\"use server\"; const impl = async () => read(); export { impl as load, impl as reload };";
+        let server = transform_directives(source.to_string(), Some(options("server", true)))
+            .expect("server module transform");
+        let server_trace: crate::semantic_trace::ServerFunctionSemanticTrace =
+            serde_json::from_str(
+                server
+                    .semantic_trace
+                    .as_deref()
+                    .expect("server module trace"),
+            )
+            .expect("typed server module trace");
+        let function = &server_trace.functions[0];
+        assert_eq!(
+            function.scope,
+            crate::semantic_trace::ServerFunctionScope::Module
+        );
+        assert_eq!(function.exports, ["load", "reload"]);
+        assert_eq!(
+            &source[function.directive_span.start as usize..function.directive_span.end as usize],
+            "\"use server\";"
+        );
+        assert_eq!(
+            &source[function.source_span.start as usize..function.source_span.end as usize],
+            "async () => read()"
+        );
+
+        let client = transform_directives(source.to_string(), Some(options("client", true)))
+            .expect("client module transform");
+        let client_trace: crate::semantic_trace::ServerFunctionSemanticTrace =
+            serde_json::from_str(
+                client
+                    .semantic_trace
+                    .as_deref()
+                    .expect("client module trace"),
+            )
+            .expect("typed client module trace");
+        let client_function = &client_trace.functions[0];
+        assert_eq!(client_function.id, function.id);
+        assert_eq!(client_function.exports, function.exports);
+        assert_eq!(client_function.source_span, function.source_span);
+        assert_eq!(client_function.directive_span, function.directive_span);
+        assert!(!client_function.registers_server_implementation);
+    }
 }
 
 fn import_def(option: Option<&DirectiveImportOption>, default_name: &str) -> ImportDef {

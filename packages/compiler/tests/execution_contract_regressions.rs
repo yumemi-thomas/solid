@@ -7,8 +7,11 @@
 #![cfg(not(feature = "node"))]
 
 use solidjs_compiler::{
-    CallbackDecision, CompileOptions, ExecutionSiteKind, SemanticTrace, TerminalDecision,
-    ValueDecision, Wrapper, compile,
+    CallbackDecision, CompileOptions, ExecutionCardinality, ExecutionDisposition,
+    ExecutionSchedule, ExecutionSiteKind, ExecutionTrigger, Generate, GeneratedOperationKind,
+    OwnerRelation, SEMANTIC_TRACE_IMPLEMENTATION_REVISION, SEMANTIC_TRACE_UPSTREAM_REVISION,
+    SemanticTrace, SemanticTraceMode, TerminalDecision, TrackingRelation, ValueDecision, Wrapper,
+    compile,
 };
 
 fn options(semantic_trace: bool) -> CompileOptions {
@@ -33,22 +36,164 @@ fn source_text(source: &str, start: u32, end: u32) -> &str {
 }
 
 #[test]
+fn trace_v3_binds_identity_and_reports_independent_execution_axes() {
+    let source = r#"const C = (p) => <div title={p.title} onClick={p.onClick} ref={makeRef()}>{p.child}</div>;"#;
+    let output = compile(source, &options(true)).expect("compile with trace v3");
+    let trace = output.semantic_trace.expect("semantic trace");
+
+    assert_eq!(trace.version, 3);
+    assert_eq!(trace.identity.config.mode, SemanticTraceMode::Dom);
+    assert_eq!(trace.identity.config.module_name, "r-dom");
+    assert_eq!(trace.identity.source_sha256.len(), 64);
+    assert_eq!(trace.identity.output_sha256.len(), 64);
+    assert_eq!(
+        trace.identity.compiler.upstream_revision,
+        SEMANTIC_TRACE_UPSTREAM_REVISION
+    );
+    assert_eq!(
+        trace.identity.compiler.implementation_revision,
+        SEMANTIC_TRACE_IMPLEMENTATION_REVISION
+    );
+
+    let ref_factory = trace
+        .sites
+        .iter()
+        .find(|site| source_text(source, site.span.start, site.span.end) == "makeRef()")
+        .expect("ref factory source operation");
+    assert_eq!(
+        ref_factory.semantics.disposition,
+        ExecutionDisposition::RefFactory
+    );
+    assert_eq!(ref_factory.semantics.trigger, ExecutionTrigger::Render);
+    assert_eq!(ref_factory.semantics.schedule, ExecutionSchedule::Inline);
+    assert_eq!(
+        ref_factory.semantics.cardinality,
+        ExecutionCardinality::ExactlyOnce
+    );
+    assert_eq!(
+        ref_factory.semantics.owner,
+        OwnerRelation::AmbientAtTransformSite
+    );
+    assert!(
+        ref_factory.semantics.generated_operations.iter().any(|id| {
+            trace.generated_operations.iter().any(|operation| {
+                operation.id == *id && operation.kind == GeneratedOperationKind::RefApplication
+            })
+        }),
+        "the factory and generated ref application must remain separate operations"
+    );
+
+    let event = trace
+        .sites
+        .iter()
+        .find(|site| source_text(source, site.span.start, site.span.end) == "p.onClick")
+        .expect("event source operation");
+    assert_eq!(event.semantics.trigger, ExecutionTrigger::Event);
+    assert_eq!(event.semantics.tracking, TrackingRelation::Untracked);
+    assert_eq!(
+        event.semantics.cardinality,
+        ExecutionCardinality::ZeroOrMore
+    );
+
+    let source_ids = trace
+        .sites
+        .iter()
+        .map(|site| site.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let generated_ids = trace
+        .generated_operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(source_ids.len(), trace.sites.len());
+    assert_eq!(generated_ids.len(), trace.generated_operations.len());
+    assert!(trace.sites.iter().all(|site| {
+        site.semantics
+            .generated_operations
+            .iter()
+            .all(|id| generated_ids.contains(id.as_str()))
+    }));
+}
+
+#[test]
+fn ssr_trace_distinguishes_render_callbacks_discarded_handlers_and_claims() {
+    let source =
+        r#"const C = (p) => <div title={p.title} onClick={p.onClick} ref={p.ref}>{p.child}</div>;"#;
+    let plain = compile(
+        source,
+        &CompileOptions {
+            generate: Generate::Ssr,
+            ..options(true)
+        },
+    )
+    .expect("compile SSR trace")
+    .semantic_trace
+    .expect("SSR trace");
+    assert_eq!(plain.identity.config.mode, SemanticTraceMode::Ssr);
+    for text in ["p.title", "p.child"] {
+        let site = plain
+            .sites
+            .iter()
+            .find(|site| source_text(source, site.span.start, site.span.end) == text)
+            .expect("SSR render callback site");
+        assert_eq!(
+            site.semantics.disposition,
+            ExecutionDisposition::SsrRenderCallback
+        );
+        assert_eq!(site.semantics.schedule, ExecutionSchedule::Render);
+        assert_eq!(
+            site.semantics.cardinality,
+            ExecutionCardinality::ExactlyOnce
+        );
+        assert_eq!(
+            site.semantics.owner,
+            OwnerRelation::AmbientAtGeneratedInvocation
+        );
+    }
+    for text in ["p.onClick", "p.ref"] {
+        let site = plain
+            .sites
+            .iter()
+            .find(|site| source_text(source, site.span.start, site.span.end) == text)
+            .expect("discarded SSR callback");
+        assert_eq!(site.semantics.disposition, ExecutionDisposition::Discarded);
+        assert_eq!(site.semantics.cardinality, ExecutionCardinality::Never);
+    }
+
+    let claims = compile(
+        source,
+        &CompileOptions {
+            generate: Generate::Ssr,
+            server_components: true,
+            ..options(true)
+        },
+    )
+    .expect("compile server-component claims")
+    .semantic_trace
+    .expect("claim trace");
+    assert!(claims.generated_operations.iter().any(|operation| {
+        operation.kind == GeneratedOperationKind::SsrClaim
+            && operation.cardinality == ExecutionCardinality::ZeroOrOne
+    }));
+    assert!(claims.sites.iter().any(|site| {
+        source_text(source, site.span.start, site.span.end) == "p.onClick"
+            && site.decision == TerminalDecision::Callback(CallbackDecision::ConditionalEventClaim)
+    }));
+    assert!(claims.sites.iter().any(|site| {
+        source_text(source, site.span.start, site.span.end) == "p.ref"
+            && site.decision == TerminalDecision::Callback(CallbackDecision::ConditionalRefClaim)
+    }));
+}
+
+#[test]
 fn control_flow_render_is_authoritative_and_requires_configuration() {
     let source = r#"const C = () => <Show>{() => <span>{value()}</span>}</Show>;"#;
     let configured = trace(source);
-    assert!(
-        configured.sites.contains(&solidjs_compiler::ExecutionSite {
-            span: configured
-                .sites
-                .iter()
-                .find(|site| source_text(source, site.span.start, site.span.end)
-                    == "() => <span>{value()}</span>")
-                .expect("function child site")
-                .span,
-            kind: ExecutionSiteKind::ControlFlowRender,
-            decision: TerminalDecision::Callback(CallbackDecision::LaterRender),
-        })
-    );
+    assert!(configured.sites.iter().any(|site| {
+        source_text(source, site.span.start, site.span.end) == "() => <span>{value()}</span>"
+            && site.kind == ExecutionSiteKind::ControlFlowRender
+            && site.decision == TerminalDecision::Callback(CallbackDecision::LaterRender)
+    }));
 
     let unconfigured = compile(
         source,

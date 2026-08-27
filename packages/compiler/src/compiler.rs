@@ -6,7 +6,9 @@ use oxc_span::SourceType;
 
 use crate::dom::element::{AstDomTransform, DomTransformConfig};
 use crate::error::CompileError;
-use crate::semantic_trace::{ExecutionCensus, SemanticTrace, TraceRecorder};
+use crate::semantic_trace::{
+    ExecutionCensus, SemanticTrace, SemanticTraceConfig, SemanticTraceMode, TraceRecorder,
+};
 use crate::ssr::transform::AstSsrTransform;
 use crate::universal::transform::{
     AstUniversalTransform, DynamicDomConfig, UniversalWrapperConfig,
@@ -157,9 +159,9 @@ pub(crate) fn compile_for_node_adapter(
 }
 
 fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput, CompileError> {
-    if options.semantic_trace && options.generate != Generate::Dom {
+    if options.semantic_trace && !matches!(options.generate, Generate::Dom | Generate::Ssr) {
         return Err(CompileError::configuration(
-            "semantic tracing currently requires the DOM generate",
+            "semantic tracing currently requires the DOM or SSR generate",
         ));
     }
     let source_type = source_type_for_filename(options.filename.as_deref())?;
@@ -195,11 +197,16 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     }
 
     let mut program = parsed.program;
-    let mut semantic_trace = None;
+    let mut semantic_recorder = None;
     match options.generate {
         Generate::Dom => {
             let census = options.semantic_trace.then(|| {
-                ExecutionCensus::from_program(&program, &options.built_ins, options.inline_styles)
+                ExecutionCensus::from_program(
+                    &program,
+                    &options.built_ins,
+                    options.inline_styles,
+                    SemanticTraceMode::Dom,
+                )
             });
             let mut transform = AstDomTransform::new(
                 &allocator,
@@ -218,10 +225,7 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             transform
                 .prepend_helpers(&mut program)
                 .map_err(|error| CompileError::transform(error.to_string()))?;
-            semantic_trace = transform
-                .semantic_trace
-                .finish()
-                .map_err(CompileError::transform)?;
+            semantic_recorder = Some(transform.semantic_trace);
         }
         Generate::Dynamic => {
             if let Some(renderer) = dom_renderer(&options.renderers) {
@@ -257,6 +261,14 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             }
         }
         Generate::Ssr => {
+            let census = options.semantic_trace.then(|| {
+                ExecutionCensus::from_program(
+                    &program,
+                    &options.built_ins,
+                    options.inline_styles,
+                    SemanticTraceMode::Ssr,
+                )
+            });
             let mut transform = AstSsrTransform::new(
                 &allocator,
                 source,
@@ -268,11 +280,15 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
                 options.static_marker.clone(),
                 options.built_ins.clone(),
             );
+            if let Some(census) = census {
+                transform.semantic_trace = TraceRecorder::new(census, false);
+            }
             transform.visit_program(&mut program);
             if let Some(error) = transform.error.take() {
                 return Err(CompileError::transform(error));
             }
             transform.prepend_helpers(&mut program);
+            semantic_recorder = Some(transform.semantic_trace);
         }
         Generate::Universal => {
             let mut transform = AstUniversalTransform::new(
@@ -299,10 +315,26 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             ..CodegenOptions::default()
         })
         .build(&program);
+    let code = build.code;
+    let source_map = build.map.map(|map| map.to_json_string());
+
+    let semantic_trace = semantic_recorder
+        .map(|recorder| {
+            recorder.finish(
+                source,
+                SemanticTraceConfig::from_options(options)
+                    .expect("only traceable modes install a semantic recorder"),
+                &code,
+                source_map.as_deref(),
+            )
+        })
+        .transpose()
+        .map_err(CompileError::transform)?
+        .flatten();
 
     Ok(CompileOutput {
-        code: build.code,
-        source_map: build.map.map(|map| map.to_json_string()),
+        code,
+        source_map,
         semantic_trace,
     })
 }

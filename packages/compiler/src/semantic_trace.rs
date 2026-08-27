@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use oxc_ast::ast::{
     JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXExpression,
@@ -10,7 +11,17 @@ use oxc_ast_visit::Visit;
 use oxc_span::{GetSpan, Span};
 
 /// Version of the typed semantic-trace schema.
-pub const SEMANTIC_TRACE_VERSION: u32 = 2;
+pub const SEMANTIC_TRACE_VERSION: u32 = 3;
+
+/// Exact upstream revision whose compiler behavior this semantic-only branch
+/// observes. The fork may add facts, but it may not change that behavior.
+pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "a10cf1a147209d885f148396068175ab2f0a996a";
+
+/// Revision containing the trace-v3 semantic implementation. This is filled
+/// with the first semantic implementation commit before the distribution pin
+/// is cut; the following identity-only commit does not change lowering or the
+/// meaning of any fact.
+pub const SEMANTIC_TRACE_IMPLEMENTATION_REVISION: &str = "PENDING";
 
 use crate::shared::attr_plan::static_style_key;
 use crate::shared::bindings::BindingTable;
@@ -23,6 +34,187 @@ use crate::shared::utils::{
 pub struct SourceSpan {
     pub start: u32,
     pub end: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SemanticTraceMode {
+    Dom,
+    Ssr,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticCompilerIdentity {
+    pub package_version: String,
+    pub upstream_revision: String,
+    pub implementation_revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticTraceConfig {
+    pub filename: Option<String>,
+    pub module_name: String,
+    pub mode: SemanticTraceMode,
+    pub hydratable: bool,
+    pub server_components: bool,
+    pub dev: bool,
+    pub source_map: bool,
+    pub context_to_custom_elements: bool,
+    pub delegate_events: bool,
+    pub delegated_events: Vec<String>,
+    pub omit_quotes: bool,
+    pub omit_attribute_spacing: bool,
+    pub inline_styles: bool,
+    pub effect_wrapper: String,
+    pub wrap_conditionals: bool,
+    pub memo_wrapper: String,
+    pub patch_driver: String,
+    pub static_marker: String,
+    pub require_import_source: Option<String>,
+    pub validate: bool,
+    pub omit_nested_closing_tags: bool,
+    pub omit_last_closing_tag: bool,
+    pub built_ins: Vec<String>,
+    pub renderers: Vec<SemanticRendererConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticRendererConfig {
+    pub name: String,
+    pub module_name: Option<String>,
+    pub elements: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticTraceIdentity {
+    pub compiler: SemanticCompilerIdentity,
+    pub source_sha256: String,
+    pub output_sha256: String,
+    pub source_map_sha256: Option<String>,
+    pub config: SemanticTraceConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionDisposition {
+    Unknown,
+    Discarded,
+    EagerOnce,
+    Deferred,
+    ReactiveRerun,
+    EventTriggered,
+    RefFactory,
+    RefApplication,
+    ComponentPropertyGetter,
+    ControlFlowRender,
+    SsrEvaluation,
+    SsrRenderCallback,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionTrigger {
+    Unknown,
+    None,
+    Render,
+    Dependency,
+    Event,
+    RefApplication,
+    Caller,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionSchedule {
+    Unknown,
+    None,
+    Inline,
+    Render,
+    Deferred,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrackingRelation {
+    Unknown,
+    None,
+    Tracked,
+    Untracked,
+    Inherited,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionCardinality {
+    Never,
+    ZeroOrOne,
+    ExactlyOnce,
+    ZeroOrMore,
+    OneOrMore,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnerRelation {
+    None,
+    AmbientAtTransformSite,
+    AmbientAtGeneratedInvocation,
+    CapturedGeneratedOwner,
+    CreatedGeneratedOwner,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSemantics {
+    pub disposition: ExecutionDisposition,
+    pub trigger: ExecutionTrigger,
+    pub schedule: ExecutionSchedule,
+    pub tracking: TrackingRelation,
+    pub cardinality: ExecutionCardinality,
+    pub owner: OwnerRelation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_operations: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeneratedOperationKind {
+    Effect,
+    Insert,
+    Memo,
+    Scope,
+    ComponentInvocation,
+    DeferredCallback,
+    DelegatedEvent,
+    RefApplication,
+    SsrClaim,
+    RuntimeWrapper,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedOperation {
+    pub id: String,
+    pub source_id: String,
+    pub source_span: SourceSpan,
+    pub kind: GeneratedOperationKind,
+    pub trigger: ExecutionTrigger,
+    pub schedule: ExecutionSchedule,
+    pub tracking: TrackingRelation,
+    pub cardinality: ExecutionCardinality,
+    pub owner: OwnerRelation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_span: Option<SourceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<String>,
 }
 
 impl From<Span> for SourceSpan {
@@ -60,6 +252,37 @@ impl ExecutionSiteKind {
                 | Self::ComponentChild
         )
     }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::JsxChild => "jsx-child",
+            Self::NativeAttribute => "native-attribute",
+            Self::NativeSpread => "native-spread",
+            Self::ComponentProperty => "component-property",
+            Self::ComponentSpread => "component-spread",
+            Self::ComponentChild => "component-child",
+            Self::EventHandler => "event-handler",
+            Self::Ref => "ref",
+            Self::ControlFlowRender => "control-flow-render",
+        }
+    }
+}
+
+impl GeneratedOperationKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Effect => "effect",
+            Self::Insert => "insert",
+            Self::Memo => "memo",
+            Self::Scope => "scope",
+            Self::ComponentInvocation => "component-invocation",
+            Self::DeferredCallback => "deferred-callback",
+            Self::DelegatedEvent => "delegated-event",
+            Self::RefApplication => "ref-application",
+            Self::SsrClaim => "ssr-claim",
+            Self::RuntimeWrapper => "runtime-wrapper",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -69,14 +292,21 @@ pub enum ValueDecision {
     ReactiveRerun,
     CallerContext,
     Elided,
+    SsrEvaluation,
+    SsrRenderCallback,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallbackDecision {
+    Elided,
     LaterEvent,
     LaterRender,
     RefApply,
+    RefFactoryOnly,
+    ConditionalEventClaim,
+    ConditionalRefClaim,
+    ConditionalRefFactoryClaim,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -86,12 +316,14 @@ pub enum TerminalDecision {
     Callback(CallbackDecision),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionSite {
+    pub id: String,
     pub span: SourceSpan,
     pub kind: ExecutionSiteKind,
     pub decision: TerminalDecision,
+    pub semantics: ExecutionSemantics,
 }
 
 /// Reactive owner state established by compiler-generated lowering around a
@@ -140,6 +372,7 @@ pub struct DeferredCallbackSite {
 #[serde(deny_unknown_fields)]
 pub struct SemanticTrace {
     pub version: u32,
+    pub identity: SemanticTraceIdentity,
     pub sites: Vec<ExecutionSite>,
     pub ownership_sites: Vec<OwnershipSite>,
     #[serde(default)]
@@ -148,19 +381,81 @@ pub struct SemanticTrace {
     pub component_render_sites: Vec<ComponentRenderSite>,
     #[serde(default)]
     pub deferred_callback_sites: Vec<DeferredCallbackSite>,
+    pub generated_operations: Vec<GeneratedOperation>,
 }
 
-impl Default for SemanticTrace {
-    fn default() -> Self {
-        Self {
-            version: SEMANTIC_TRACE_VERSION,
-            sites: Vec::new(),
-            ownership_sites: Vec::new(),
-            owner_establishments: Vec::new(),
-            component_render_sites: Vec::new(),
-            deferred_callback_sites: Vec::new(),
-        }
-    }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerFunctionTransformMode {
+    Client,
+    Server,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerFunctionTransformEnv {
+    Development,
+    Production,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerFunctionScope {
+    Function,
+    Module,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFunctionImportConfig {
+    pub kind: String,
+    pub name: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFunctionTraceConfig {
+    pub filename: String,
+    pub root: Option<String>,
+    pub mode: ServerFunctionTransformMode,
+    pub env: ServerFunctionTransformEnv,
+    pub directive: String,
+    pub source_map: bool,
+    pub register: ServerFunctionImportConfig,
+    pub create: ServerFunctionImportConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFunctionTraceIdentity {
+    pub compiler: SemanticCompilerIdentity,
+    pub source_sha256: String,
+    pub output_sha256: String,
+    pub source_map_sha256: Option<String>,
+    pub config: ServerFunctionTraceConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFunctionOperation {
+    pub id: String,
+    pub name: String,
+    pub exports: Vec<String>,
+    pub source_span: SourceSpan,
+    pub directive_span: SourceSpan,
+    pub scope: ServerFunctionScope,
+    pub boundary: String,
+    pub creates_reference: bool,
+    pub registers_server_implementation: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFunctionSemanticTrace {
+    pub version: u32,
+    pub identity: ServerFunctionTraceIdentity,
+    pub functions: Vec<ServerFunctionOperation>,
 }
 
 impl ValueDecision {
@@ -171,6 +466,8 @@ impl ValueDecision {
             Self::ReactiveRerun => "reactive-rerun",
             Self::CallerContext => "caller-context",
             Self::Elided => "elided",
+            Self::SsrEvaluation => "ssr-evaluation",
+            Self::SsrRenderCallback => "ssr-render-callback",
         }
     }
 }
@@ -179,9 +476,14 @@ impl CallbackDecision {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Elided => "elided",
             Self::LaterEvent => "later-event",
             Self::LaterRender => "later-render",
             Self::RefApply => "ref-apply",
+            Self::RefFactoryOnly => "ref-factory-only",
+            Self::ConditionalEventClaim => "conditional-event-claim",
+            Self::ConditionalRefClaim => "conditional-ref-claim",
+            Self::ConditionalRefFactoryClaim => "conditional-ref-factory-claim",
         }
     }
 }
@@ -196,6 +498,8 @@ struct SiteKey {
 pub(crate) struct ExecutionCensus {
     sites: BTreeSet<SiteKey>,
     ignored_literal_spans: BTreeSet<SourceSpan>,
+    ref_factory_spans: BTreeSet<SourceSpan>,
+    mode: SemanticTraceMode,
 }
 
 impl ExecutionCensus {
@@ -203,6 +507,7 @@ impl ExecutionCensus {
         program: &Program<'_>,
         built_ins: &[String],
         inline_styles: bool,
+        mode: SemanticTraceMode,
     ) -> Self {
         let mut bindings = BindingTable::default();
         bindings.scan_builtin_shadowing(program, built_ins);
@@ -214,9 +519,11 @@ impl ExecutionCensus {
             /// Void native elements whose child list survives into DOM
             /// lowering. See [`Self::mark_nested_void_children`].
             nested_void_elements: BTreeSet<SourceSpan>,
+            ref_factory_spans: BTreeSet<SourceSpan>,
             built_ins: HashSet<&'a str>,
             bindings: &'bindings BindingTable,
             inline_styles: bool,
+            mode: SemanticTraceMode,
         }
 
         impl CensusVisitor<'_, '_> {
@@ -561,6 +868,7 @@ impl ExecutionCensus {
                             }
                             if !component
                                 && !has_spread
+                                && self.mode == SemanticTraceMode::Dom
                                 && (name == "class" || (name == "style" && self.inline_styles))
                                 && let Some(oxc_ast::ast::Expression::ObjectExpression(object)) =
                                     container.expression.as_expression()
@@ -614,6 +922,7 @@ impl ExecutionCensus {
                             }
                             if !component
                                 && !has_spread
+                                && self.mode == SemanticTraceMode::Dom
                                 && name == "class"
                                 && let Some(expression) = container.expression.as_expression()
                                 && let Some(object) = Self::split_class_array_object(expression)
@@ -633,6 +942,13 @@ impl ExecutionCensus {
                                 }
                             }
                             let kind = if name == "ref" {
+                                if matches!(
+                                    container.expression.as_expression(),
+                                    Some(oxc_ast::ast::Expression::CallExpression(_))
+                                ) {
+                                    self.ref_factory_spans
+                                        .insert(container.expression.span().into());
+                                }
                                 ExecutionSiteKind::Ref
                             } else if !component && name.starts_with("on") {
                                 ExecutionSiteKind::EventHandler
@@ -676,7 +992,7 @@ impl ExecutionCensus {
                     oxc_ast_visit::walk::walk_jsx_opening_element(self, &element.opening_element);
                     return;
                 }
-                if !component {
+                if !component && self.mode == SemanticTraceMode::Dom {
                     self.mark_nested_void_children(&element.children);
                 }
                 for child in &element.children {
@@ -746,14 +1062,18 @@ impl ExecutionCensus {
             ignored_literal_spans: BTreeSet::new(),
             component_child_fragments: BTreeSet::new(),
             nested_void_elements: BTreeSet::new(),
+            ref_factory_spans: BTreeSet::new(),
             built_ins: built_ins.iter().map(String::as_str).collect(),
             bindings: &bindings,
             inline_styles,
+            mode,
         };
         visitor.visit_program(program);
         Self {
             sites: visitor.sites,
             ignored_literal_spans: visitor.ignored_literal_spans,
+            ref_factory_spans: visitor.ref_factory_spans,
+            mode,
         }
     }
 }
@@ -930,6 +1250,38 @@ impl TraceRecorder {
         });
     }
 
+    /// Mark every still-unresolved source operation inside a range as
+    /// discarded. Unlike [`Self::retract_within`], this preserves negative
+    /// proof: lowering reached the source construct and proved that none of
+    /// the nested values or callbacks survive into generated code.
+    pub(crate) fn discard_within(&mut self, span: Span) {
+        let Some(census) = &self.census else {
+            return;
+        };
+        let sites = census
+            .sites
+            .iter()
+            .copied()
+            .filter(|site| {
+                span.start <= site.span.start
+                    && site.span.end <= span.end
+                    && !self.decisions.contains_key(site)
+            })
+            .collect::<Vec<_>>();
+        for site in sites {
+            let decision = if site.kind.is_value() {
+                TerminalDecision::Value(ValueDecision::Elided)
+            } else {
+                TerminalDecision::Callback(CallbackDecision::Elided)
+            };
+            self.resolve(
+                Span::new(site.span.start, site.span.end),
+                site.kind,
+                decision,
+            );
+        }
+    }
+
     /// Declare that a span carries a child the lowering *synthesized*, so a
     /// decision recorded there is not an execution site.
     ///
@@ -1026,10 +1378,24 @@ impl TraceRecorder {
         }
     }
 
-    pub(crate) fn finish(self) -> Result<Option<SemanticTrace>, String> {
+    pub(crate) fn finish(
+        self,
+        source: &str,
+        config: SemanticTraceConfig,
+        output: &str,
+        source_map: Option<&str>,
+    ) -> Result<Option<SemanticTrace>, String> {
         let Some(census) = self.census else {
             return Ok(None);
         };
+        if config.mode != census.mode {
+            return Err("semantic trace mode does not match the lowering census".to_string());
+        }
+        if config.source_map != source_map.is_some() {
+            return Err(
+                "semantic trace source-map configuration does not match output".to_string(),
+            );
+        }
         if let Some(error) = self.error {
             return Err(error);
         }
@@ -1044,15 +1410,6 @@ impl TraceRecorder {
                 unresolved.join(", ")
             ));
         }
-        let sites = census
-            .sites
-            .into_iter()
-            .map(|site| ExecutionSite {
-                span: site.span,
-                kind: site.kind,
-                decision: self.decisions[&site],
-            })
-            .collect::<Vec<_>>();
         let mut ownership_sites = self.ownership_sites;
         ownership_sites.sort_unstable();
         ownership_sites.dedup();
@@ -1065,14 +1422,447 @@ impl TraceRecorder {
         let mut deferred_callback_sites = self.deferred_callback_sites;
         deferred_callback_sites.sort_unstable();
         deferred_callback_sites.dedup();
+        let mut generated = owner_establishments
+            .iter()
+            // `component_render_sites` is the authoritative one-per-call
+            // source. The legacy wrapper observation remains serialized for
+            // trace-v2 consumers but must not duplicate the generated call.
+            .filter(|site| site.wrapper != "createComponent")
+            .map(generated_from_owner)
+            .chain(
+                component_render_sites
+                    .iter()
+                    .map(|site| GeneratedOperation {
+                        id: String::new(),
+                        source_id: generated_source_id(site.span, "component-invocation"),
+                        source_span: site.span,
+                        kind: GeneratedOperationKind::ComponentInvocation,
+                        trigger: ExecutionTrigger::Render,
+                        schedule: ExecutionSchedule::Inline,
+                        tracking: TrackingRelation::Untracked,
+                        cardinality: ExecutionCardinality::ExactlyOnce,
+                        owner: OwnerRelation::Unknown,
+                        receiver_span: None,
+                        group_id: None,
+                        wrapper: None,
+                    }),
+            )
+            .chain(
+                deferred_callback_sites
+                    .iter()
+                    .map(|site| GeneratedOperation {
+                        id: String::new(),
+                        source_id: generated_source_id(site.span, "deferred-callback"),
+                        source_span: site.span,
+                        kind: GeneratedOperationKind::DeferredCallback,
+                        trigger: ExecutionTrigger::Caller,
+                        schedule: ExecutionSchedule::Deferred,
+                        tracking: TrackingRelation::Inherited,
+                        cardinality: ExecutionCardinality::Unknown,
+                        owner: OwnerRelation::AmbientAtGeneratedInvocation,
+                        receiver_span: Some(site.receiver_span),
+                        group_id: None,
+                        wrapper: None,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        generated.sort_unstable_by(|left, right| {
+            (
+                left.source_span,
+                left.kind,
+                &left.wrapper,
+                left.receiver_span,
+                left.group_id,
+            )
+                .cmp(&(
+                    right.source_span,
+                    right.kind,
+                    &right.wrapper,
+                    right.receiver_span,
+                    right.group_id,
+                ))
+        });
+        generated.dedup_by(|left, right| {
+            left.source_span == right.source_span
+                && left.kind == right.kind
+                && left.wrapper == right.wrapper
+                && left.receiver_span == right.receiver_span
+                && left.group_id == right.group_id
+        });
+        for (index, operation) in generated.iter_mut().enumerate() {
+            operation.id = format!("g{index}");
+        }
+        let mode = census.mode;
+        let ref_factory_spans = census.ref_factory_spans;
+        let sites = census
+            .sites
+            .into_iter()
+            .map(|site| {
+                let id = source_operation_id(site);
+                let generated_operations = generated
+                    .iter()
+                    .filter(|operation| {
+                        site.span.start <= operation.source_span.start
+                            && operation.source_span.end <= site.span.end
+                    })
+                    .map(|operation| operation.id.clone())
+                    .collect();
+                let decision = self.decisions[&site];
+                ExecutionSite {
+                    id,
+                    span: site.span,
+                    kind: site.kind,
+                    decision,
+                    semantics: execution_semantics(
+                        mode,
+                        site,
+                        decision,
+                        ref_factory_spans.contains(&site.span),
+                        self.default_effect_wrapper,
+                        generated_operations,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(Some(SemanticTrace {
             version: SEMANTIC_TRACE_VERSION,
+            identity: SemanticTraceIdentity {
+                compiler: SemanticCompilerIdentity {
+                    package_version: crate::COMPILER_VERSION.to_string(),
+                    upstream_revision: SEMANTIC_TRACE_UPSTREAM_REVISION.to_string(),
+                    implementation_revision: SEMANTIC_TRACE_IMPLEMENTATION_REVISION.to_string(),
+                },
+                source_sha256: sha256_hex(source.as_bytes()),
+                output_sha256: sha256_hex(output.as_bytes()),
+                source_map_sha256: source_map.map(|map| sha256_hex(map.as_bytes())),
+                config,
+            },
             sites,
             ownership_sites,
             owner_establishments,
             component_render_sites,
             deferred_callback_sites,
+            generated_operations: generated,
         }))
+    }
+}
+
+fn source_operation_id(site: SiteKey) -> String {
+    format!(
+        "s:{}:{}:{}",
+        site.span.start,
+        site.span.end,
+        site.kind.name()
+    )
+}
+
+fn generated_source_id(span: SourceSpan, kind: &str) -> String {
+    format!("s:{}:{}:{kind}", span.start, span.end)
+}
+
+fn generated_from_owner(site: &OwnerEstablishment) -> GeneratedOperation {
+    let (kind, trigger, schedule, tracking, cardinality, owner) = match site.wrapper.as_str() {
+        "effect" => (
+            GeneratedOperationKind::Effect,
+            ExecutionTrigger::Dependency,
+            ExecutionSchedule::Render,
+            TrackingRelation::Tracked,
+            ExecutionCardinality::OneOrMore,
+            OwnerRelation::CreatedGeneratedOwner,
+        ),
+        "insert" => (
+            GeneratedOperationKind::Insert,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Render,
+            TrackingRelation::Tracked,
+            ExecutionCardinality::OneOrMore,
+            OwnerRelation::CreatedGeneratedOwner,
+        ),
+        "memo" => (
+            GeneratedOperationKind::Memo,
+            ExecutionTrigger::Dependency,
+            ExecutionSchedule::Render,
+            TrackingRelation::Tracked,
+            ExecutionCardinality::OneOrMore,
+            OwnerRelation::CreatedGeneratedOwner,
+        ),
+        "scope" => (
+            GeneratedOperationKind::Scope,
+            ExecutionTrigger::Caller,
+            ExecutionSchedule::Render,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::Unknown,
+            OwnerRelation::CapturedGeneratedOwner,
+        ),
+        "createComponent" => (
+            GeneratedOperationKind::ComponentInvocation,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Inline,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ExactlyOnce,
+            OwnerRelation::Unknown,
+        ),
+        "delegated" => (
+            GeneratedOperationKind::DelegatedEvent,
+            ExecutionTrigger::Event,
+            ExecutionSchedule::Deferred,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ZeroOrMore,
+            OwnerRelation::None,
+        ),
+        "ref-apply" => (
+            GeneratedOperationKind::RefApplication,
+            ExecutionTrigger::RefApplication,
+            ExecutionSchedule::Render,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ZeroOrMore,
+            OwnerRelation::None,
+        ),
+        "ssr-claim" => (
+            GeneratedOperationKind::SsrClaim,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Render,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::ZeroOrOne,
+            OwnerRelation::AmbientAtGeneratedInvocation,
+        ),
+        _ => (
+            GeneratedOperationKind::RuntimeWrapper,
+            ExecutionTrigger::Unknown,
+            ExecutionSchedule::Unknown,
+            TrackingRelation::Unknown,
+            ExecutionCardinality::Unknown,
+            OwnerRelation::Unknown,
+        ),
+    };
+    GeneratedOperation {
+        id: String::new(),
+        source_id: generated_source_id(site.span, kind.name()),
+        source_span: site.span,
+        kind,
+        trigger,
+        schedule,
+        tracking,
+        cardinality,
+        owner,
+        receiver_span: None,
+        group_id: site.group_id,
+        wrapper: Some(site.wrapper.clone()),
+    }
+}
+
+fn execution_semantics(
+    mode: SemanticTraceMode,
+    site: SiteKey,
+    decision: TerminalDecision,
+    ref_factory: bool,
+    default_effect_wrapper: bool,
+    generated_operations: Vec<String>,
+) -> ExecutionSemantics {
+    let (disposition, trigger, schedule, tracking, cardinality, owner) = match decision {
+        TerminalDecision::Value(ValueDecision::Elided) => (
+            ExecutionDisposition::Discarded,
+            ExecutionTrigger::None,
+            ExecutionSchedule::None,
+            TrackingRelation::None,
+            ExecutionCardinality::Never,
+            OwnerRelation::None,
+        ),
+        TerminalDecision::Value(ValueDecision::SsrEvaluation) => (
+            ExecutionDisposition::SsrEvaluation,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Render,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::ExactlyOnce,
+            OwnerRelation::AmbientAtTransformSite,
+        ),
+        TerminalDecision::Value(ValueDecision::SsrRenderCallback) => (
+            ExecutionDisposition::SsrRenderCallback,
+            ExecutionTrigger::Caller,
+            ExecutionSchedule::Render,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::ExactlyOnce,
+            OwnerRelation::AmbientAtGeneratedInvocation,
+        ),
+        TerminalDecision::Value(ValueDecision::ReactiveRerun) => (
+            ExecutionDisposition::ReactiveRerun,
+            ExecutionTrigger::Dependency,
+            ExecutionSchedule::Render,
+            TrackingRelation::Tracked,
+            ExecutionCardinality::OneOrMore,
+            if default_effect_wrapper {
+                OwnerRelation::CreatedGeneratedOwner
+            } else {
+                OwnerRelation::Unknown
+            },
+        ),
+        TerminalDecision::Value(ValueDecision::CallerContext) => (
+            if site.kind == ExecutionSiteKind::ComponentProperty {
+                ExecutionDisposition::ComponentPropertyGetter
+            } else {
+                ExecutionDisposition::Deferred
+            },
+            ExecutionTrigger::Caller,
+            ExecutionSchedule::Deferred,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::Unknown,
+            OwnerRelation::AmbientAtGeneratedInvocation,
+        ),
+        TerminalDecision::Value(ValueDecision::EagerOnce) => (
+            if mode == SemanticTraceMode::Ssr {
+                ExecutionDisposition::SsrEvaluation
+            } else {
+                ExecutionDisposition::EagerOnce
+            },
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Inline,
+            if mode == SemanticTraceMode::Ssr {
+                TrackingRelation::Inherited
+            } else {
+                TrackingRelation::Untracked
+            },
+            ExecutionCardinality::ExactlyOnce,
+            OwnerRelation::AmbientAtTransformSite,
+        ),
+        TerminalDecision::Callback(CallbackDecision::Elided) => (
+            ExecutionDisposition::Discarded,
+            ExecutionTrigger::None,
+            ExecutionSchedule::None,
+            TrackingRelation::None,
+            ExecutionCardinality::Never,
+            OwnerRelation::None,
+        ),
+        TerminalDecision::Callback(
+            CallbackDecision::LaterEvent | CallbackDecision::ConditionalEventClaim,
+        ) => (
+            ExecutionDisposition::EventTriggered,
+            ExecutionTrigger::Event,
+            ExecutionSchedule::Deferred,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ZeroOrMore,
+            OwnerRelation::None,
+        ),
+        TerminalDecision::Callback(CallbackDecision::LaterRender) => (
+            ExecutionDisposition::ControlFlowRender,
+            ExecutionTrigger::Caller,
+            ExecutionSchedule::Render,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ZeroOrMore,
+            OwnerRelation::AmbientAtGeneratedInvocation,
+        ),
+        TerminalDecision::Callback(CallbackDecision::RefFactoryOnly) => (
+            ExecutionDisposition::RefFactory,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Inline,
+            TrackingRelation::Untracked,
+            ExecutionCardinality::ExactlyOnce,
+            OwnerRelation::AmbientAtTransformSite,
+        ),
+        TerminalDecision::Callback(CallbackDecision::ConditionalRefFactoryClaim) => (
+            ExecutionDisposition::RefFactory,
+            ExecutionTrigger::Render,
+            ExecutionSchedule::Render,
+            TrackingRelation::Inherited,
+            ExecutionCardinality::ZeroOrOne,
+            OwnerRelation::AmbientAtGeneratedInvocation,
+        ),
+        TerminalDecision::Callback(
+            CallbackDecision::RefApply | CallbackDecision::ConditionalRefClaim,
+        ) => (
+            if ref_factory {
+                ExecutionDisposition::RefFactory
+            } else {
+                ExecutionDisposition::RefApplication
+            },
+            if ref_factory {
+                ExecutionTrigger::Render
+            } else {
+                ExecutionTrigger::RefApplication
+            },
+            if ref_factory {
+                ExecutionSchedule::Inline
+            } else {
+                ExecutionSchedule::Render
+            },
+            TrackingRelation::Untracked,
+            if ref_factory {
+                ExecutionCardinality::ExactlyOnce
+            } else {
+                ExecutionCardinality::ZeroOrMore
+            },
+            if ref_factory {
+                OwnerRelation::AmbientAtTransformSite
+            } else {
+                OwnerRelation::None
+            },
+        ),
+    };
+    ExecutionSemantics {
+        disposition,
+        trigger,
+        schedule,
+        tracking,
+        cardinality,
+        owner,
+        generated_operations,
+    }
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+impl SemanticTraceConfig {
+    pub(crate) fn from_options(options: &crate::compiler::CompileOptions) -> Option<Self> {
+        use crate::compiler::Generate;
+
+        let mode = match options.generate {
+            Generate::Dom => SemanticTraceMode::Dom,
+            Generate::Ssr => SemanticTraceMode::Ssr,
+            Generate::Universal | Generate::Dynamic => return None,
+        };
+        Some(Self {
+            filename: options.filename.clone(),
+            module_name: options.module_name.clone(),
+            mode,
+            hydratable: options.hydratable,
+            server_components: options.server_components,
+            dev: options.dev,
+            source_map: options.source_map,
+            context_to_custom_elements: options.context_to_custom_elements,
+            delegate_events: options.delegate_events,
+            delegated_events: options.delegated_events.clone(),
+            omit_quotes: options.omit_quotes,
+            omit_attribute_spacing: options.omit_attribute_spacing,
+            inline_styles: options.inline_styles,
+            effect_wrapper: wrapper_identity(&options.effect_wrapper),
+            wrap_conditionals: options.wrap_conditionals,
+            memo_wrapper: wrapper_identity(&options.memo_wrapper),
+            patch_driver: wrapper_identity(&options.patch_driver),
+            static_marker: options.static_marker.clone(),
+            require_import_source: options.require_import_source.clone(),
+            validate: options.validate,
+            omit_nested_closing_tags: options.omit_nested_closing_tags,
+            omit_last_closing_tag: options.omit_last_closing_tag,
+            built_ins: options.built_ins.clone(),
+            renderers: options
+                .renderers
+                .iter()
+                .map(|renderer| SemanticRendererConfig {
+                    name: renderer.name.clone(),
+                    module_name: renderer.module_name.clone(),
+                    elements: renderer.elements.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
+fn wrapper_identity(wrapper: &crate::compiler::Wrapper) -> String {
+    match wrapper {
+        crate::compiler::Wrapper::Default => "default".to_string(),
+        crate::compiler::Wrapper::Disabled => "disabled".to_string(),
+        crate::compiler::Wrapper::Name(name) => format!("name:{name}"),
     }
 }
 
@@ -1089,13 +1879,25 @@ mod tests {
             .into_iter()
             .collect(),
             ignored_literal_spans: BTreeSet::new(),
+            ref_factory_spans: BTreeSet::new(),
+            mode: SemanticTraceMode::Dom,
         }
+    }
+
+    fn finish(recorder: TraceRecorder) -> Result<Option<SemanticTrace>, String> {
+        recorder.finish(
+            "source",
+            SemanticTraceConfig::from_options(&crate::CompileOptions::default())
+                .expect("DOM is traceable"),
+            "output",
+            None,
+        )
     }
 
     #[test]
     fn finish_rejects_an_unresolved_site() {
         let recorder = TraceRecorder::new(census(ExecutionSiteKind::JsxChild), true);
-        assert!(recorder.finish().unwrap_err().contains("unresolved"));
+        assert!(finish(recorder).unwrap_err().contains("unresolved"));
     }
 
     #[test]
@@ -1111,7 +1913,7 @@ mod tests {
             ExecutionSiteKind::JsxChild,
             ValueDecision::ReactiveRerun,
         );
-        assert!(recorder.finish().unwrap_err().contains("conflicting"));
+        assert!(finish(recorder).unwrap_err().contains("conflicting"));
     }
 
     #[test]
@@ -1122,7 +1924,7 @@ mod tests {
             ExecutionSiteKind::JsxChild,
             ValueDecision::EagerOnce,
         );
-        assert!(recorder.finish().unwrap_err().contains("uncensused"));
+        assert!(finish(recorder).unwrap_err().contains("uncensused"));
     }
 
     #[test]
@@ -1134,7 +1936,7 @@ mod tests {
             ValueDecision::ReactiveRerun,
         );
         assert_eq!(
-            recorder.finish().unwrap().unwrap().ownership_sites,
+            finish(recorder).unwrap().unwrap().ownership_sites,
             vec![OwnershipSite {
                 span: SourceSpan { start: 1, end: 2 },
                 decision: OwnershipDecision::Owned,
@@ -1150,7 +1952,7 @@ mod tests {
         );
         recorder.owner_establishment(Span::new(3, 4), "effect", Some(group_id));
         recorder.owner_establishment(Span::new(1, 2), "effect", Some(group_id));
-        let trace = recorder.finish().unwrap().unwrap();
+        let trace = finish(recorder).unwrap().unwrap();
         assert_eq!(
             trace.owner_establishments,
             vec![
@@ -1177,8 +1979,7 @@ mod tests {
             ValueDecision::ReactiveRerun,
         );
         assert!(
-            recorder
-                .finish()
+            finish(recorder)
                 .unwrap()
                 .unwrap()
                 .ownership_sites
@@ -1192,6 +1993,6 @@ mod tests {
         recorder.owner_establishment(Span::new(1, 2), "customEffect", None);
         recorder.component_render_site(Span::new(1, 2));
         recorder.deferred_callback_site(Span::new(1, 2), Span::new(3, 4));
-        assert_eq!(recorder.finish().unwrap(), None);
+        assert_eq!(finish(recorder).unwrap(), None);
     }
 }

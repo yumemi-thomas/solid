@@ -115,6 +115,7 @@ pub(crate) struct AstSsrTransform<'a, 'source> {
     pub(crate) iife_callee_addrs: std::vec::Vec<usize>,
     pub(crate) bindings: BindingTable,
     pub(crate) error: Option<String>,
+    pub(crate) semantic_trace: crate::semantic_trace::TraceRecorder,
 }
 
 /// The Babel scope shapes `Scope.push` distinguishes when placing hoisted
@@ -150,6 +151,7 @@ struct VarScope {
 /// children (Babel's ChildProperties handling in the SSR generate).
 struct AttrChildren<'a> {
     span: Span,
+    semantic_span: Span,
     value: Expression<'a>,
     /// `innerHTML` renders raw; `textContent` escapes like a text child.
     do_not_escape: bool,
@@ -238,6 +240,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             iife_callee_addrs: std::vec::Vec::new(),
             bindings: BindingTable::default(),
             error: None,
+            semantic_trace: crate::semantic_trace::TraceRecorder::disabled(),
         }
     }
 
@@ -846,6 +849,15 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     }
 
     fn lower_component(&mut self, element: &JSXElement<'a>) -> Result<Expression<'a>> {
+        self.semantic_trace.component_render_site(element.span);
+        self.semantic_trace
+            .owner_establishment(element.span, "createComponent", None);
+        let render_callbacks = match &element.opening_element.name {
+            oxc_ast::ast::JSXElementName::IdentifierReference(name) => {
+                self.is_built_in(name.name.as_str()) && !self.is_builtin_shadowed(name.span)
+            }
+            _ => false,
+        };
         let root_tag = self.jsx_root_span == Some(element.span);
         let component = component_callee_expression(self, &element.opening_element.name, root_tag)?;
         let mut prop_objects = std::vec::Vec::new();
@@ -865,9 +877,23 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         &mut prop_objects,
                         element.span,
                     );
-                    let spread = component_spread_expression(self, &spread.argument, spread.span);
-                    force_merge_props = force_merge_props || spread.force_merge;
-                    prop_objects.push(spread.value);
+                    let semantic_span = spread.argument.span();
+                    let lowered = component_spread_expression(self, &spread.argument, spread.span);
+                    self.semantic_trace.value(
+                        semantic_span,
+                        crate::semantic_trace::ExecutionSiteKind::ComponentSpread,
+                        if lowered.force_merge {
+                            crate::semantic_trace::ValueDecision::CallerContext
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if lowered.force_merge {
+                        self.semantic_trace
+                            .deferred_callback_site(semantic_span, element.span);
+                    }
+                    force_merge_props = force_merge_props || lowered.force_merge;
+                    prop_objects.push(lowered.value);
                     continue;
                 }
             };
@@ -885,6 +911,12 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 && let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
                 && container.expression.as_expression().is_some()
             {
+                let semantic_span = container.expression.span();
+                self.semantic_trace.callback(
+                    semantic_span,
+                    crate::semantic_trace::ExecutionSiteKind::Ref,
+                    crate::semantic_trace::CallbackDecision::RefApply,
+                );
                 let value = self.transform_component_expression(&container.expression);
                 if let Some(prop) = crate::shared::refs::component_ref_property(
                     self,
@@ -892,6 +924,10 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     value,
                     &mut component_setup,
                 ) {
+                    self.semantic_trace
+                        .deferred_callback_site(semantic_span, element.span);
+                    self.semantic_trace
+                        .owner_establishment(semantic_span, "ref-apply", None);
                     running_props.push(prop);
                 }
                 continue;
@@ -916,6 +952,20 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 }
                 Some(JSXAttributeValue::ExpressionContainer(container)) => {
                     let needs_getter = self.component_prop_requires_getter(&name, container);
+                    let semantic_span = container.expression.span();
+                    self.semantic_trace.value(
+                        semantic_span,
+                        crate::semantic_trace::ExecutionSiteKind::ComponentProperty,
+                        if needs_getter {
+                            crate::semantic_trace::ValueDecision::CallerContext
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if needs_getter {
+                        self.semantic_trace
+                            .deferred_callback_site(semantic_span, element.span);
+                    }
                     if needs_getter {
                         // Babel leaves the raw expression in the generated
                         // getter and transforms it there on re-traversal: a
@@ -1007,7 +1057,9 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             }
         }
 
-        if let Some((children, dynamic)) = self.component_children_expression(&element.children)? {
+        if let Some((children, dynamic)) =
+            self.component_children_expression(&element.children, render_callbacks, element.span)?
+        {
             if dynamic {
                 // Babel's getter-body inlining for dynamic children: unwrap a
                 // `memo(fn)` call to `fn.body`, a plain function to its body,
@@ -1049,6 +1101,8 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     fn component_children_expression(
         &mut self,
         children: &[JSXChild<'a>],
+        render_callbacks: bool,
+        receiver_span: Span,
     ) -> Result<Option<(Expression<'a>, bool)>> {
         // `filterChildren`: drop empty expression containers and JSXText whose
         // raw starts with a newline and contains only whitespace.
@@ -1101,22 +1155,56 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     expression_source: false,
                 }),
                 JSXChild::Fragment(fragment) => values.push(ChildValue {
-                    value: self.lower_fragment(fragment)?,
+                    value: self.lower_fragment_with_kind(
+                        fragment,
+                        crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                    )?,
                     dynamic: false,
                     expression_source: false,
                 }),
                 JSXChild::ExpressionContainer(container) => {
+                    let render_callback = render_callbacks
+                        && matches!(
+                            container.expression,
+                            JSXExpression::ArrowFunctionExpression(_)
+                                | JSXExpression::FunctionExpression(_)
+                        );
+                    if render_callback {
+                        self.semantic_trace
+                            .deferred_callback_site(container.expression.span(), receiver_span);
+                        self.semantic_trace.callback(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::ControlFlowRender,
+                            crate::semantic_trace::CallbackDecision::LaterRender,
+                        );
+                    }
                     let dynamic = container.expression.as_expression().is_some_and(|raw| {
                         self.classify()
                             .is_dynamic(Some(container.span.start), raw, true)
                     });
                     if !dynamic {
+                        if !render_callback {
+                            self.semantic_trace.value(
+                                container.expression.span(),
+                                crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                                crate::semantic_trace::ValueDecision::SsrEvaluation,
+                            );
+                        }
                         values.push(ChildValue {
                             value: self.transform_component_expression(&container.expression),
                             dynamic: false,
                             expression_source: true,
                         });
                         continue;
+                    }
+                    if !render_callback {
+                        self.semantic_trace.value(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                            crate::semantic_trace::ValueDecision::CallerContext,
+                        );
+                        self.semantic_trace
+                            .deferred_callback_site(container.expression.span(), receiver_span);
                     }
                     let expression =
                         jsx_expression_to_expression(&container.expression, self.allocator);
@@ -1158,6 +1246,11 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     let expression = spread.expression.clone_in(self.allocator);
                     let dynamic = self.classify().is_dynamic(None, &expression, false);
                     if !dynamic {
+                        self.semantic_trace.value(
+                            spread.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                            crate::semantic_trace::ValueDecision::SsrEvaluation,
+                        );
                         values.push(ChildValue {
                             value: expression,
                             dynamic: false,
@@ -1165,6 +1258,13 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         });
                         continue;
                     }
+                    self.semantic_trace.value(
+                        spread.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::ComponentChild,
+                        crate::semantic_trace::ValueDecision::CallerContext,
+                    );
+                    self.semantic_trace
+                        .deferred_callback_site(spread.expression.span(), receiver_span);
                     let value = if wrap && self.memo_wrapper.is_none() {
                         expression
                     } else {
@@ -1297,6 +1397,11 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         if attributes.len() == 1
             && let JSXAttributeItem::SpreadAttribute(spread) = &attributes[0]
         {
+            self.semantic_trace.value(
+                spread.argument.span(),
+                crate::semantic_trace::ExecutionSiteKind::NativeSpread,
+                crate::semantic_trace::ValueDecision::SsrEvaluation,
+            );
             return Ok(spread.argument.clone_in(self.allocator));
         }
         let mut prop_objects = std::vec::Vec::new();
@@ -1309,7 +1414,19 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     let mut argument = spread.argument.clone_in(self.allocator);
                     // Dynamic spreads defer behind a thunk and force the
                     // mergeProps wrap (Babel's `dynamicSpread`).
-                    if self.classify().is_dynamic(None, &argument, false) {
+                    let dynamic = self.classify().is_dynamic(None, &argument, false);
+                    self.semantic_trace.value(
+                        spread.argument.span(),
+                        crate::semantic_trace::ExecutionSiteKind::NativeSpread,
+                        if dynamic {
+                            crate::semantic_trace::ValueDecision::SsrRenderCallback
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if dynamic {
+                        self.semantic_trace
+                            .deferred_callback_site(spread.argument.span(), spread.span);
                         dynamic_spread = true;
                         argument = self.inline_call_expression(argument);
                     }
@@ -1372,9 +1489,35 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             }
         };
         if has_children && name == "children" {
+            if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
+                self.semantic_trace.resolve_lowered_attribute(
+                    container.expression.span(),
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
+            }
             return Ok(None);
         }
         if name == "ref" || name.starts_with("prop:") || name.starts_with("on") {
+            if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
+                if name == "ref" {
+                    self.semantic_trace.callback(
+                        container.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::Ref,
+                        crate::semantic_trace::CallbackDecision::Elided,
+                    );
+                } else if name.starts_with("on") {
+                    self.semantic_trace.callback(
+                        container.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::EventHandler,
+                        crate::semantic_trace::CallbackDecision::Elided,
+                    );
+                } else {
+                    self.semantic_trace.resolve_lowered_attribute(
+                        container.expression.span(),
+                        crate::semantic_trace::ValueDecision::Elided,
+                    );
+                }
+            }
             return Ok(None);
         }
         match &attr.value {
@@ -1404,10 +1547,20 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 let value = expression.clone_in(self.allocator);
                 // Dynamic values become getters (Babel's objectMethod) unless
                 // marked static.
-                if self
-                    .classify()
-                    .is_dynamic(Some(container.span.start), expression, true)
-                {
+                let dynamic =
+                    self.classify()
+                        .is_dynamic(Some(container.span.start), expression, true);
+                self.semantic_trace.resolve_lowered_attribute(
+                    container.expression.span(),
+                    if dynamic {
+                        crate::semantic_trace::ValueDecision::SsrRenderCallback
+                    } else {
+                        crate::semantic_trace::ValueDecision::SsrEvaluation
+                    },
+                );
+                if dynamic {
+                    self.semantic_trace
+                        .deferred_callback_site(container.expression.span(), attr.span);
                     Ok(Some(self.object_getter_property(attr.span, &name, value)))
                 } else {
                     Ok(Some(self.object_property(attr.span, &name, value)))
@@ -1478,6 +1631,11 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         continue;
                     }
                     if let Some(value) = self.static_jsx_expression_value(&container.expression) {
+                        self.semantic_trace.value(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                            crate::semantic_trace::ValueDecision::Elided,
+                        );
                         // Static text results register as single-string
                         // templates rendered via `_$ssr(_tmpl$)`.
                         let text = if do_not_escape {
@@ -1498,6 +1656,19 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     let dynamic =
                         self.classify()
                             .is_dynamic(Some(container.span.start), &expression, false);
+                    self.semantic_trace.value(
+                        container.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                        if dynamic {
+                            crate::semantic_trace::ValueDecision::SsrRenderCallback
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if dynamic {
+                        self.semantic_trace
+                            .deferred_callback_site(container.expression.span(), element.span);
+                    }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
                     let value = self.dynamic_child_value(container.span, expression, dynamic);
                     let value = if do_not_escape {
@@ -1521,6 +1692,19 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 JSXChild::Spread(spread) => {
                     let expression = spread.expression.clone_in(self.allocator);
                     let dynamic = self.classify().is_dynamic(None, &expression, false);
+                    self.semantic_trace.value(
+                        spread.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                        if dynamic {
+                            crate::semantic_trace::ValueDecision::SsrRenderCallback
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if dynamic {
+                        self.semantic_trace
+                            .deferred_callback_site(spread.expression.span(), element.span);
+                    }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
                     let value = if dynamic {
                         self.arrow_return_expression(spread.span, expression)
@@ -1579,11 +1763,15 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     }
 
     pub(crate) fn lower_fragment(&mut self, fragment: &JSXFragment<'a>) -> Result<Expression<'a>> {
-        crate::shared::fragment::lower_fragment(
-            self,
-            fragment,
-            crate::semantic_trace::ExecutionSiteKind::JsxChild,
-        )
+        self.lower_fragment_with_kind(fragment, crate::semantic_trace::ExecutionSiteKind::JsxChild)
+    }
+
+    fn lower_fragment_with_kind(
+        &mut self,
+        fragment: &JSXFragment<'a>,
+        kind: crate::semantic_trace::ExecutionSiteKind,
+    ) -> Result<Expression<'a>> {
+        crate::shared::fragment::lower_fragment(self, fragment, kind)
     }
 
     /// Babel's `createTemplate` wrap for dynamic fragment children:
@@ -1628,7 +1816,17 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         let outcome = self
             .attr_planner()
             .plan_attributes(&element.opening_element.attributes, &tag_name)?;
+        for span in &outcome.elided_value_spans {
+            self.semantic_trace
+                .resolve_lowered_attribute(*span, crate::semantic_trace::ValueDecision::Elided);
+        }
         let has_children = !element.children.is_empty() || outcome.children_replacement.is_some();
+        if outcome.children_replacement.is_some()
+            && let (Some(first), Some(last)) = (element.children.first(), element.children.last())
+        {
+            self.semantic_trace
+                .discard_within(Span::new(first.span().start, last.span().end));
+        }
         let mut attr_children: Option<AttrChildren<'a>> = None;
         // Server-components behavior claims: ref/on* positions collected
         // across the element's attributes (Babel's `claims`).
@@ -1659,6 +1857,14 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 child_do_not_escape,
             )?;
             template.current_mut().push_str(&format!("</{tag_name}>"));
+        } else if let (Some(first), Some(last)) =
+            (element.children.first(), element.children.last())
+        {
+            self.semantic_trace.value(
+                Span::new(first.span().start, last.span().end),
+                crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                crate::semantic_trace::ValueDecision::Elided,
+            );
         }
         Ok(template)
     }
@@ -1680,6 +1886,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     ) -> Result<()> {
         let key = plan.key;
         let span = plan.span;
+        let semantic_span = plan.semantic_span;
         let reserved = key
             .split_once(':')
             .is_some_and(|(prefix, _)| reserved_namespace(prefix));
@@ -1703,6 +1910,12 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     self.ast()
                         .expression_string_literal(span, self.ast().str(&text), None)
                 } else {
+                    if let Some(semantic_span) = semantic_span {
+                        self.semantic_trace.resolve_lowered_attribute(
+                            semantic_span,
+                            crate::semantic_trace::ValueDecision::Elided,
+                        );
+                    }
                     if key == "$ServerOnly" {
                         return Ok(());
                     }
@@ -1722,6 +1935,12 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         );
 
         if !reserved && !child_properties(&key) && is_literal_container {
+            if let Some(semantic_span) = semantic_span {
+                self.semantic_trace.resolve_lowered_attribute(
+                    semantic_span,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
+            }
             // Babel's static branch for literal expression containers.
             if key == "$ServerOnly" {
                 return Ok(());
@@ -1749,8 +1968,35 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         // Babel's dynamic branch.
         if key == "ref" {
             if self.server_components {
+                if let Some(semantic_span) = semantic_span {
+                    let factory = matches!(&expression, Expression::CallExpression(_));
+                    self.semantic_trace.callback(
+                        semantic_span,
+                        crate::semantic_trace::ExecutionSiteKind::Ref,
+                        if factory {
+                            crate::semantic_trace::CallbackDecision::ConditionalRefFactoryClaim
+                        } else {
+                            crate::semantic_trace::CallbackDecision::ConditionalRefClaim
+                        },
+                    );
+                    self.semantic_trace
+                        .owner_establishment(semantic_span, "ssr-claim", None);
+                    self.semantic_trace
+                        .owner_establishment(semantic_span, "ref-apply", None);
+                }
                 claims.push(("ref".to_string(), expression));
                 return Ok(());
+            }
+            if let Some(semantic_span) = semantic_span {
+                self.semantic_trace.callback(
+                    semantic_span,
+                    crate::semantic_trace::ExecutionSiteKind::Ref,
+                    if matches!(&expression, Expression::CallExpression(_)) {
+                        crate::semantic_trace::CallbackDecision::RefFactoryOnly
+                    } else {
+                        crate::semantic_trace::CallbackDecision::Elided
+                    },
+                );
             }
             // `var _ref$N = <expr>;` keeps the evaluation without emitting
             // anything into the HTML. JSX inside stays raw for the deferred
@@ -1761,6 +2007,13 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             return Ok(());
         }
         if key.starts_with("prop:") {
+            if let Some(semantic_span) = semantic_span {
+                self.semantic_trace.discard_within(semantic_span);
+                self.semantic_trace.resolve_lowered_attribute(
+                    semantic_span,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
+            }
             return Ok(());
         }
         if let Some(rest) = key.strip_prefix("on") {
@@ -1774,22 +2027,59 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     rest.to_lowercase()
                 };
                 if !pos.is_empty() {
+                    if let Some(semantic_span) = semantic_span {
+                        self.semantic_trace.callback(
+                            semantic_span,
+                            crate::semantic_trace::ExecutionSiteKind::EventHandler,
+                            crate::semantic_trace::CallbackDecision::ConditionalEventClaim,
+                        );
+                        self.semantic_trace
+                            .owner_establishment(semantic_span, "ssr-claim", None);
+                    }
                     claims.push((pos, expression));
+                    return Ok(());
                 }
+            }
+            if let Some(semantic_span) = semantic_span {
+                self.semantic_trace.discard_within(semantic_span);
+                self.semantic_trace.callback(
+                    semantic_span,
+                    crate::semantic_trace::ExecutionSiteKind::EventHandler,
+                    crate::semantic_trace::CallbackDecision::Elided,
+                );
             }
             return Ok(());
         }
         if child_properties(&key) {
             if key == "children" && is_void_element(tag_name) {
+                if let Some(semantic_span) = semantic_span {
+                    self.semantic_trace.discard_within(semantic_span);
+                    self.semantic_trace.resolve_lowered_attribute(
+                        semantic_span,
+                        crate::semantic_trace::ValueDecision::Elided,
+                    );
+                }
                 return Ok(());
             }
             if key == "innerHTML" {
                 *child_do_not_escape = true;
             }
-            let children = self.attr_children_value(&key, span, expression, plan.marker_static);
+            let children = self.attr_children_value(
+                &key,
+                span,
+                semantic_span.unwrap_or(span),
+                expression,
+                plan.marker_static,
+            );
             // Babel only redirects when the element has no real children.
             if !has_children {
                 *attr_children = children;
+            } else if let Some(semantic_span) = semantic_span {
+                self.semantic_trace.discard_within(semantic_span);
+                self.semantic_trace.resolve_lowered_attribute(
+                    semantic_span,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
             }
             return Ok(());
         }
@@ -1808,6 +2098,12 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         .any(|p| matches!(p, ObjectPropertyKind::SpreadProperty(_))) =>
                 {
                     if object.properties.is_empty() {
+                        if let Some(semantic_span) = semantic_span {
+                            self.semantic_trace.resolve_lowered_attribute(
+                                semantic_span,
+                                crate::semantic_trace::ValueDecision::Elided,
+                            );
+                        }
                         return Ok(());
                     }
                     value = self.ssr_style_property_chain(span, value);
@@ -1825,6 +2121,21 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         }
         if do_escape {
             value = self.escape_expression_recursive(value, true, false);
+        }
+
+        if let Some(semantic_span) = semantic_span {
+            self.semantic_trace.resolve_lowered_attribute(
+                semantic_span,
+                if is_dynamic_value {
+                    crate::semantic_trace::ValueDecision::SsrRenderCallback
+                } else {
+                    crate::semantic_trace::ValueDecision::SsrEvaluation
+                },
+            );
+            if is_dynamic_value {
+                self.semantic_trace
+                    .deferred_callback_site(semantic_span, span);
+            }
         }
 
         if !(do_escape || is_boolean) || is_literal_expression(&value) {
@@ -2119,6 +2430,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         &mut self,
         key: &str,
         span: Span,
+        semantic_span: Span,
         value: Expression<'a>,
         marker_static: bool,
     ) -> Option<AttrChildren<'a>> {
@@ -2138,6 +2450,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         self.attr_planner().fold_confident(&mut value);
         Some(AttrChildren {
             span,
+            semantic_span,
             value,
             do_not_escape: key == "innerHTML",
             groupable: key == "textContent",
@@ -2164,6 +2477,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         } else {
             &element.children
         };
+        let children_from_attribute = children_replacement.is_some();
         let pseudo_child = if children.is_empty() {
             attr_children
         } else {
@@ -2226,6 +2540,18 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         continue;
                     }
                     if let Some(value) = self.static_jsx_expression_value(&container.expression) {
+                        if children_from_attribute {
+                            self.semantic_trace.resolve_lowered_attribute(
+                                container.expression.span(),
+                                crate::semantic_trace::ValueDecision::Elided,
+                            );
+                        } else {
+                            self.semantic_trace.value(
+                                container.expression.span(),
+                                crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                                crate::semantic_trace::ValueDecision::Elided,
+                            );
+                        }
                         if do_not_escape {
                             template.current_mut().push_str(&value);
                         } else {
@@ -2240,6 +2566,25 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     let dynamic =
                         self.classify()
                             .is_dynamic(Some(container.span.start), &expression, false);
+                    let decision = if dynamic {
+                        crate::semantic_trace::ValueDecision::SsrRenderCallback
+                    } else {
+                        crate::semantic_trace::ValueDecision::SsrEvaluation
+                    };
+                    if children_from_attribute {
+                        self.semantic_trace
+                            .resolve_lowered_attribute(container.expression.span(), decision);
+                    } else {
+                        self.semantic_trace.value(
+                            container.expression.span(),
+                            crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                            decision,
+                        );
+                    }
+                    if dynamic {
+                        self.semantic_trace
+                            .deferred_callback_site(container.expression.span(), element.span);
+                    }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
                     let value = self.dynamic_child_value(container.span, expression, dynamic);
                     let value = if do_not_escape {
@@ -2257,6 +2602,19 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 JSXChild::Spread(spread) => {
                     let expression = spread.expression.clone_in(self.allocator);
                     let dynamic = self.classify().is_dynamic(None, &expression, false);
+                    self.semantic_trace.value(
+                        spread.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                        if dynamic {
+                            crate::semantic_trace::ValueDecision::SsrRenderCallback
+                        } else {
+                            crate::semantic_trace::ValueDecision::SsrEvaluation
+                        },
+                    );
+                    if dynamic {
+                        self.semantic_trace
+                            .deferred_callback_site(spread.expression.span(), element.span);
+                    }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
                     let value = if dynamic {
                         self.arrow_return_expression(spread.span, expression)
@@ -2296,6 +2654,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     ) -> Result<()> {
         let AttrChildren {
             span,
+            semantic_span,
             value,
             do_not_escape,
             groupable,
@@ -2306,6 +2665,10 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         // Literal after folding — Babel's `getStaticExpression` text path.
         match &value {
             Expression::StringLiteral(literal) => {
+                self.semantic_trace.resolve_lowered_attribute(
+                    semantic_span,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
                 if do_not_escape {
                     let text = literal.value.to_string();
                     template.current_mut().push_str(&text);
@@ -2317,6 +2680,10 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 return Ok(());
             }
             Expression::NumericLiteral(literal) => {
+                self.semantic_trace.resolve_lowered_attribute(
+                    semantic_span,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
                 template
                     .current_mut()
                     .push_str(&format_number(literal.value));
@@ -2325,6 +2692,18 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             _ => {}
         }
         let dynamic = !marker_static && self.classify().is_dynamic(None, &value, false);
+        self.semantic_trace.resolve_lowered_attribute(
+            semantic_span,
+            if dynamic {
+                crate::semantic_trace::ValueDecision::SsrRenderCallback
+            } else {
+                crate::semantic_trace::ValueDecision::SsrEvaluation
+            },
+        );
+        if dynamic {
+            self.semantic_trace
+                .deferred_callback_site(semantic_span, span);
+        }
         // Only the `children` attribute redirect may take the `_$scope` id
         // reservation — it is a real insert on the client and scopes there
         // too. innerHTML/textContent/innerText values are opaque content (an
@@ -2512,6 +2891,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
 
     fn scope_expression(&mut self, span: Span, value: Expression<'a>) -> Expression<'a> {
         self.uses_scope = true;
+        self.semantic_trace.owner_establishment(span, "scope", None);
         self.ast().expression_call(
             span,
             self.ast()
@@ -3201,6 +3581,19 @@ impl<'a> ConditionBuilder<'a> for AstSsrTransform<'a, '_> {
         self.memo_wrapper_local()
     }
 
+    fn trace_wrapper(&mut self, span: Span, wrapper: &str, group_id: Option<u64>) {
+        self.semantic_trace
+            .owner_establishment(span, wrapper, group_id);
+    }
+
+    fn trace_enabled(&self) -> bool {
+        self.semantic_trace.is_recording()
+    }
+
+    fn memo_wrapper_identity(&self) -> Option<&str> {
+        self.memo_wrapper.as_deref()
+    }
+
     fn next_condition_id(&mut self) -> String {
         crate::shared::utils::next_unique_local("_c", &mut self.condition_index, &self.bindings)
     }
@@ -3211,6 +3604,36 @@ impl<'a> ConditionBuilder<'a> for AstSsrTransform<'a, '_> {
 }
 
 impl<'a> crate::shared::mode_lower::ModeLower<'a> for AstSsrTransform<'a, '_> {
+    fn trace_value(
+        &mut self,
+        span: Span,
+        kind: crate::semantic_trace::ExecutionSiteKind,
+        decision: crate::semantic_trace::ValueDecision,
+    ) {
+        self.semantic_trace.value(
+            span,
+            kind,
+            match decision {
+                crate::semantic_trace::ValueDecision::EagerOnce => {
+                    crate::semantic_trace::ValueDecision::SsrEvaluation
+                }
+                crate::semantic_trace::ValueDecision::ReactiveRerun => {
+                    crate::semantic_trace::ValueDecision::SsrRenderCallback
+                }
+                decision => decision,
+            },
+        );
+    }
+
+    fn trace_callback(
+        &mut self,
+        span: Span,
+        kind: crate::semantic_trace::ExecutionSiteKind,
+        decision: crate::semantic_trace::CallbackDecision,
+    ) {
+        self.semantic_trace.callback(span, kind, decision);
+    }
+
     fn wrap_conditionals_enabled(&self) -> bool {
         self.wrap_conditionals
     }
@@ -3224,10 +3647,13 @@ impl<'a> crate::shared::mode_lower::ModeLower<'a> for AstSsrTransform<'a, '_> {
     fn memo_wrap_dynamic_child(
         &mut self,
         span: Span,
-        _trace_span: Span,
+        trace_span: Span,
         thunk: Expression<'a>,
     ) -> Expression<'a> {
-        // The ssr generate does not trace, so the source span is unused.
+        if let Some(wrapper) = self.memo_wrapper.clone() {
+            self.semantic_trace
+                .owner_establishment(trace_span, &wrapper, None);
+        }
         self.memo_wrap_fragment_child(span, thunk)
     }
 }
