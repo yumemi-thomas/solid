@@ -10,7 +10,71 @@ permissions:
   contents: write
 
 jobs:
+  # Build the @solidjs/compiler native/WASI bindings for every published
+  # target (mirrors upstream .github/workflows/compiler-binaries.yml). The
+  # compiler's tarball ships no binary; it resolves one of the
+  # @solidjs/compiler-<platform> optionalDependencies at install time, so a
+  # preview of the compiler is only meaningful if those platform packages are
+  # previewed too, with binaries built from the same commit.
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: x86_64-apple-darwin
+            host: macos-latest
+          - target: aarch64-apple-darwin
+            host: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            host: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            host: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            host: windows-latest
+          - target: wasm32-wasip1-threads
+            host: ubuntu-latest
+    name: binary ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/compiler
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+      - name: Install deps
+        run: pnpm install --ignore-scripts
+      - name: Build binary
+        if: matrix.settings.target != 'wasm32-wasip1-threads'
+        working-directory: packages/compiler
+        run: pnpm exec napi build --platform --no-js --release --strip --target ${{ matrix.settings.target }} --manifest-path ./Cargo.toml
+      - name: Build WASI binary
+        if: matrix.settings.target == 'wasm32-wasip1-threads'
+        working-directory: packages/compiler
+        # napi-build locates crt1-reactor.o relative to RUSTC. Cargo otherwise
+        # supplies the rustup proxy name, which produces a WASM module that
+        # deadlocks before its thread runtime is initialized.
+        run: RUSTC="$(rustup which rustc)" pnpm exec napi build --platform --release --strip --target ${{ matrix.settings.target }} --manifest-path ./Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            packages/compiler/compiler.*.node
+            packages/compiler/compiler.*.wasm
+            packages/compiler/compiler.wasi.cjs
+            packages/compiler/compiler.wasi.d.cts
+            packages/compiler/compiler.wasi-browser.js
+            packages/compiler/wasi-worker*.mjs
+          if-no-files-found: error
+
   publish:
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,19 +91,31 @@ jobs:
         run: pnpm install
 
       # Upstream pins @solidjs/compiler and its platform packages to workspace
-      # link stubs (pnpm-workspace.yaml overrides), so `pnpm install` yields an
-      # empty @solidjs/compiler-wasm32-wasi and no native binary. The examples
-      # build through @solidjs/vite-plugin, which hard-requires the compiler.
-      # Mirror upstream main-ci.yml: build the Rust binding first (the root
-      # build script filters the compiler out). The loader prefers a local
-      # compiler.node over any installed platform package.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # link stubs (pnpm-workspace.yaml overrides), so `pnpm install` yields
+      # empty packages/compiler/npm/* and no binary anywhere. Drop the built
+      # bindings into those stubs: the linux-x64 one then satisfies the
+      # examples' @solidjs/vite-plugin build (the compiler loader resolves the
+      # linked platform package), and all of them become the published
+      # platform previews below.
+      - uses: actions/download-artifact@v4
         with:
-          workspaces: packages/compiler
-
-      - name: Build compiler binding
-        run: pnpm --filter @solidjs/compiler run build
+          path: packages/compiler/artifacts
+      - name: Move binaries into platform packages
+        working-directory: packages/compiler
+        run: pnpm exec napi artifacts --build-output-dir artifacts/bindings-wasm32-wasip1-threads
+      - name: Verify every platform package got its binary
+        working-directory: packages/compiler
+        run: |
+          status=0
+          for d in npm/*/; do
+            if ls "$d"compiler.*.node "$d"compiler.wasi.cjs 2>/dev/null | grep -q .; then
+              echo "ok   $d: $(ls "$d" | grep -v -e package.json -e README.md | tr '\n' ' ')"
+            else
+              echo "::error::no binary in $d"
+              status=1
+            fi
+          done
+          exit "$status"
 
       # Upstream's turbo graph has a race: @solidjs/h#types (and web's) compile
       # self-imports that resolve through a symlink created by the `link` task,
@@ -53,8 +129,8 @@ jobs:
       # pkg-pr-new keys preview URLs off `git rev-parse HEAD` (for non-PR
       # events). The mirror head is upstream/next + our workflow commit, so
       # detach HEAD to the parent — the exact upstream solidjs/solid commit —
-      # to publish under Ryan's real sha. Build outputs are untracked and
-      # survive the checkout.
+      # to publish under Ryan's real sha. Build outputs and the binaries are
+      # untracked/ignored and survive the checkout.
       - name: Re-point HEAD at the upstream commit for the URL sha
         run: git checkout --detach HEAD^
 
@@ -62,30 +138,35 @@ jobs:
       # paths: pkg-pr-new silently ignores paths that don't exist, and upstream
       # renamed packages/solid-web -> packages/web etc. (4fba79d5, 2026-08-25),
       # which left only solid-js being published for two weeks.
-      # @solidjs/compiler is excluded: its tarball ships no binary and depends
-      # on registry platform packages pinned to the workspace version, which
-      # may not be published yet, so a preview of it could not load anyway.
+      # @solidjs/compiler and its six packages/compiler/npm/* platform packages
+      # are published in the same run: pkg-pr-new rewrites the compiler's
+      # optionalDependencies on them to the preview URLs, so installing the
+      # compiler preview loads a binary built from this commit.
       - name: Publish preview packages
         run: |
           pnpm -w add -D pkg-pr-new
-          PKGS=$(for f in packages/*/package.json; do
+          PKGS=$(for f in packages/*/package.json packages/compiler/npm/*/package.json; do
             node -e '
               const p = require(process.argv[1]);
-              if (!p.private && p.name !== "@solidjs/compiler")
-                console.log(require("path").dirname(process.argv[1]));
+              if (!p.private) console.log(require("path").dirname(process.argv[1]));
             ' "./$f"
           done)
           echo "Publishing:"; echo "$PKGS"
           COUNT=$(echo "$PKGS" | grep -c .)
-          if [ "$COUNT" -lt 8 ]; then
+          if [ "$COUNT" -lt 15 ]; then
             echo "::error::only $COUNT publishable packages found — workspace layout changed?"
             exit 1
           fi
           # shellcheck disable=SC2086
           pnpm exec pkg-pr-new publish --no-compact $PKGS
 
+  cleanup:
+    # Own job so an ad-hoc branch is deleted even when a binary build fails.
+    needs: [binaries, publish]
+    if: always() && startsWith(github.ref_name, 'preview-adhoc-')
+    runs-on: ubuntu-latest
+    steps:
       - name: Clean up ad-hoc branch
-        if: always() && startsWith(github.ref_name, 'preview-adhoc-')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }}" || true
