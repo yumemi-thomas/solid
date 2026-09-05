@@ -26,6 +26,21 @@ jobs:
       - name: Install deps
         run: pnpm install
 
+      # Upstream pins @solidjs/compiler and its platform packages to workspace
+      # link stubs (pnpm-workspace.yaml overrides), so `pnpm install` yields an
+      # empty @solidjs/compiler-wasm32-wasi and no native binary. The examples
+      # build through @solidjs/vite-plugin, which hard-requires the compiler.
+      # Mirror upstream main-ci.yml: build the Rust binding first (the root
+      # build script filters the compiler out). The loader prefers a local
+      # compiler.node over any installed platform package.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/compiler
+
+      - name: Build compiler binding
+        run: pnpm --filter @solidjs/compiler run build
+
       # Upstream's turbo graph has a race: @solidjs/h#types (and web's) compile
       # self-imports that resolve through a symlink created by the `link` task,
       # but `types` doesn't depend on `link`. Create the symlinks up front.
