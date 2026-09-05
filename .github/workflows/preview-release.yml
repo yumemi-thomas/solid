@@ -58,18 +58,31 @@ jobs:
       - name: Re-point HEAD at the upstream commit for the URL sha
         run: git checkout --detach HEAD^
 
+      # Derive the package list from the workspace instead of hard-coding
+      # paths: pkg-pr-new silently ignores paths that don't exist, and upstream
+      # renamed packages/solid-web -> packages/web etc. (4fba79d5, 2026-08-25),
+      # which left only solid-js being published for two weeks.
+      # @solidjs/compiler is excluded: its tarball ships no binary and depends
+      # on registry platform packages pinned to the workspace version, which
+      # may not be published yet, so a preview of it could not load anyway.
       - name: Publish preview packages
         run: |
           pnpm -w add -D pkg-pr-new
-          pnpm exec pkg-pr-new publish --no-compact \
-            './packages/solid' \
-            './packages/solid-web' \
-            './packages/solid-signals' \
-            './packages/solid-universal' \
-            './packages/solid-element' \
-            './packages/solid-h' \
-            './packages/solid-html' \
-            './packages/babel-preset-solid'
+          PKGS=$(for f in packages/*/package.json; do
+            node -e '
+              const p = require(process.argv[1]);
+              if (!p.private && p.name !== "@solidjs/compiler")
+                console.log(require("path").dirname(process.argv[1]));
+            ' "./$f"
+          done)
+          echo "Publishing:"; echo "$PKGS"
+          COUNT=$(echo "$PKGS" | grep -c .)
+          if [ "$COUNT" -lt 8 ]; then
+            echo "::error::only $COUNT publishable packages found — workspace layout changed?"
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          pnpm exec pkg-pr-new publish --no-compact $PKGS
 
       - name: Clean up ad-hoc branch
         if: always() && startsWith(github.ref_name, 'preview-adhoc-')
