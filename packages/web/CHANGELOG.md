@@ -1,5 +1,76 @@
 # @solidjs/web
 
+## 2.0.0-rc.8
+
+### Patch Changes
+
+- 9e6c867: Document the `createEvent(request)` contract: the request is a standards-shaped `Request` and nothing more. Body-size enforcement may hand a rebuilt `Request`, so host-specific fields on the inbound object are not carried; hosts surface platform handles on the event from their own request.
+- 3b4db21: Fix an rc.7 SSR hydration regression: a self-closing element that spreads props containing `children` (`<a {...props} />` in a wrapper component) read the compiled `children` getter twice on the server, building the child element twice and consuming a hydration id the client never allocates. Every element after the first such spread then hydrated against the wrong node and the client halted. `ssrElement` again reads each spread key at most once and never reads `children` when JSX children are present; the textarea `value`/`defaultValue`-as-content behaviour from #3286 is preserved.
+- 1807f7f: Observe tier: split dev-only checks from production-legal observability wiring.
+
+  **Breaking (pre-release):** `DEV.diagnostics` moved to a new `OBSERVE` export
+  — `OBSERVE.diagnostics.{subscribe,capture,emit}`, `OBSERVE.subjectOf(event)`.
+  `DEV` keeps the devtools surface (`hooks`, `getChildren`/`getSignals`/
+  `getParent`/`getSources`/`getObservers`) and gains the console face
+  (`DEV.report`, `DEV.setConsoleFooter` — formerly
+  `DEV.diagnostics.setConsoleFooter`). Both are exported from `@solidjs/signals`
+  and `solid-js` (client and server).
+
+  **Breaking (pre-release):** the attribution engine is its own entry.
+  `DEV.attribution.enable()` and friends are now
+  `import { attribution } from "solid-js/attribution"` (or
+  `@solidjs/signals/attribution`) — `enable/disable/subscribe/history/why/
+subscriptions/costs/waterfalls/holds/feedback/markFlight/format/formatOrigin`,
+  plus the record types (`RerunEvent`, `ChangeRecord`, `ChangeOrigin`,
+  `HoldEvent`, …) which were previously unexported. The runtime keeps only the
+  core's side as `OBSERVE.attribution`: `install(hooks)`/`installed` (the hook
+  slot an engine — built-in or a devtools' own — installs into) and
+  `withInteraction(ref, fn)` (the frame the web runtime opens around every event
+  dispatch; `fn()` when no engine is installed). A build that never imports the
+  engine never ships it: the observe tier costs ~1.3 KB brotli over prod on the
+  CSR scenario, the engine 9.7 KB more when enabled. The import is legal in
+  every tier — prod resolves an inert engine with the same surface.
+  `@solidjs/diagnostics` requires `OBSERVE` and imports the engine itself; it now
+  works against observe builds.
+
+  **New build tier.** Every package with wiring ships `<entry>.observe.{js,cjs}`
+  beside its prod and dev artifacts, selected by a new `observe` export condition
+  (listed after `development`, so dev still wins when both are set): signals
+  `dist/observe/` + `dist/node.observe.cjs` (each with an `attribution` entry
+  beside `index`; the flat dev/CJS builds are code-split so both entries share
+  one module instance), solid-js `solid.observe.*` and
+  `server.observe.*`, web `web.observe.*`, universal `universal.observe.*`.
+  Observe builds keep attribution hook sites, owner labels (`_name`, flow-control
+  memo names, component roots), graph edge counters and the diagnostics channel;
+  they fold out strict-read checks, invariants, forbidden-scope guards, devtools
+  brands and all console output. Entries without wiring (frames, server-functions,
+  storage, h, html, element) fall through to prod under `observe`. Signals gates
+  on `__OBSERVE__` (dev implies observe; asserted at init), solid-js/web/universal
+  on the `"_SOLID_OBSERVE_"` literal. Default prod artifacts are unchanged apart
+  from the new `OBSERVE = undefined` export; `_name` is reserved from property
+  mangling so the cross-package label survives in the observe tree.
+  `OBSERVE.diagnostics.emit` accepts an explicit `ownerPath` for hosts whose
+  owners are not signals' owners (the SSR runtime).
+
+- a71e42e: Rebuild the buffered server-function request from its url, method, headers and signal instead of through the `Request` copy constructor, so a host adapter's lazy request (Nitro via srvx) no longer fails every POST with 400 "Malformed server function arguments"; only a failed upload read answers 400 now, a failure to put the bytes back surfaces as its own error.
+- a39415c: **Breaking:** all runtime packages are ESM only and declare `engines.node >= 22.12`.
+
+  Every `.cjs` artifact, every `require` branch in the exports maps, and the `types-cjs/` declaration mirrors are gone. Node 22.12+ loads ESM through `require()` natively, so a CommonJS host resolves the same files through the same export conditions it always did (`browser`, `node`, `development`, `observe`, …) — there is one module graph per tier rather than two to keep in step. `main` now points at the ESM server entry.
+
+  For consumers:
+  - ESM apps, Vite, Vitest, Bun, Deno, workers: no change.
+  - CommonJS Node apps: require Node 22.12 or later. `require("solid-js")` keeps working.
+  - TypeScript CommonJS projects: use `module: "NodeNext"` (TS 5.8+), which type-checks `require()` of ESM packages; `module: "Node16"` will report TS1479.
+  - Jest: needs Node 22.12+ for `require(esm)`; any preset that maps specifiers to `.cjs` paths (as `solid-jest` does for Solid 1.x) has nothing to map to and must be updated.
+
+  `@solidjs/signals` drops its flat `dist/node*.cjs` builds; its ESM entries (`dist/prod/`, `dist/observe/`, `dist/dev.js`) are the only ones. `@solidjs/babel-plugin` and `@solidjs/compiler` (build-time tooling loaded by Babel/Node) are unchanged.
+
+- 8cfa272: Require `seroval` and `seroval-plugins` `~1.6.7` (minor-locked, as before). Seroval 1.6 ships bundled declarations with no extensionless relative imports, so the `@solidjs/web` `server-functions`, `serialization` and `frames` type surfaces now type-check under `module: NodeNext` from a CommonJS project without `skipLibCheck` — the packaged-types check covers every public `@solidjs/web` specifier.
+- Updated dependencies [1807f7f]
+- Updated dependencies [a39415c]
+- Updated dependencies [8cfa272]
+  - solid-js@2.0.0-rc.8
+
 ## 2.0.0-rc.7
 
 ### Patch Changes

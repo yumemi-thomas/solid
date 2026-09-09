@@ -1,5 +1,7 @@
 # @solidjs/compiler
 
+## 2.0.0-rc.8
+
 ## 2.0.0-rc.7
 
 ### Patch Changes
