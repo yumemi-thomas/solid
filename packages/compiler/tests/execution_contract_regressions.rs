@@ -73,7 +73,7 @@ fn ssr_lone_spread_records_discarded_native_refs() {
 
 #[test]
 fn trace_v3_binds_identity_and_reports_independent_execution_axes() {
-    const EXPECTED_UPSTREAM_REVISION: &str = "91088d2c2b867492c173b0e45f8b40cbe8390b1b";
+    const EXPECTED_UPSTREAM_REVISION: &str = "8cfa2724f893e07b03e977bd2902c6d0e6019ca7";
 
     let source = r#"const C = (p) => <div title={p.title} onClick={p.onClick} ref={makeRef()}>{p.child}</div>;"#;
     let output = compile(source, &options(true)).expect("compile with trace v3");
