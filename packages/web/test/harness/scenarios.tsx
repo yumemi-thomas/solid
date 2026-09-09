@@ -199,6 +199,24 @@ function ForList() {
 }
 
 // ---------------------------------------------------------------------------
+// 8b. For followed by static siblings in a top-level fragment (#3161): the
+// rc.4 regression — server spends top-level id slots on the rows and gives
+// the siblings the next ones; the rc.4 client asked for the siblings at 0/1,
+// so everything after the list hydrated detached (dead buttons).
+let bumpAfterFor!: () => void;
+function ForThenSiblings() {
+  const [count, setCount] = createSignal(0);
+  bumpAfterFor = () => setCount(c => c + 1);
+  return (
+    <>
+      <For each={[{ id: 1 }, { id: 2 }]}>{row => <div class="row">row {row.id}</div>}</For>
+      <button id="bump">bump</button>
+      <pre id="after">count: {count()}</pre>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 9. Spread with children in the spread object
 function SpreadChildren() {
   const props = { class: "sp", children: <em>spread</em> };
@@ -722,6 +740,45 @@ function ClientOnlyBeforeSuspending() {
       <Loading fallback={<i>wait</i>}>
         <p>{data()}</p>
       </Loading>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// #3010's FULL downstream shape: the top-level fragment's client-only sibling
+// precedes a router-like layer — a component whose `root` prop receives the
+// route children and wraps them in the boundary — and the route component
+// reads a suspending async source (the SolidStart app.tsx shape; 1.x threw
+// "Hydration Mismatch. Unable to find DOM nodes for hydration key" for the
+// route's <p> and cleared the app). The route's DOM must stay claimable
+// behind the root-prop indirection. (The real app loads the route via
+// lazy(); module-manifest hydration isn't drivable inside this jsdom
+// harness, and #3010's own controls showed the fragment + suspension is the
+// trigger, not lazy.)
+function RouteHome3010() {
+  const data = createMemo(async () => {
+    await sleep(10);
+    return "loaded";
+  });
+  return <p>{data()}</p>;
+}
+const RouterWidget3010 = clientOnly(() =>
+  Promise.resolve({ default: (_props: {}) => <b>widget </b> })
+);
+function RouterLike3010(props: { root: (p: { children?: any }) => any; children?: any }) {
+  return props.root({
+    get children() {
+      return props.children;
+    }
+  });
+}
+function ClientOnlyBeforeSuspendingRoute() {
+  return (
+    <>
+      <RouterWidget3010 />
+      <RouterLike3010 root={p => <Loading fallback={<i>wait</i>}>{p.children}</Loading>}>
+        <RouteHome3010 />
+      </RouterLike3010>
     </>
   );
 }
@@ -1443,6 +1500,46 @@ function InnerHTMLCallSiblings() {
 }
 
 // ---------------------------------------------------------------------------
+// solidjs/solid#3105: a reactive lone spread passes its accessor straight to
+// spread() on the client — no mergeProps, no memo, no hydration id — matching
+// the server's pass-through fast path. Before the fix the client-side merge
+// minted a memo that consumed an id the server never allocated, so every
+// element after the spread (the button here) went unclaimed.
+let setLoneSpreadLabel!: (v: string) => void;
+function ReactiveLoneSpread() {
+  const attrs = () => ({ class: "example" });
+  const [label, setLabel] = createSignal("before");
+  setLoneSpreadLabel = setLabel;
+  return (
+    <>
+      <div {...attrs()}>
+        <span>spread</span>
+      </div>
+      <button>{label()}</button>
+    </>
+  );
+}
+
+// An explicit ref does not add a spread prop source on the client. SSR must
+// make the same lone-source decision so the next element keeps the same key.
+let refSpreadButton!: HTMLButtonElement;
+function ReactiveRefLoneSpread() {
+  const attrs = () => ({ class: "example" });
+  const [label, setLabel] = createSignal("before");
+  let node!: HTMLDivElement;
+  return (
+    <>
+      <div ref={node} {...attrs()}>
+        <span>spread</span>
+      </div>
+      <button ref={refSpreadButton} onClick={() => setLabel("after")}>
+        {label()}
+      </button>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // solidjs/solid#3033: a conditional expression in a JSX prop compiles to a
 // condition memo INSIDE the prop getter, minted when the getter is first
 // read — and the two sides read it at different points in their walks (the
@@ -1536,6 +1633,14 @@ export const scenarios: Scenario[] = [
     update: () => setItems(["a", "b", "c", "d"]),
     expectedTextAfterUpdate: "abcd",
     stableSelector: "ul"
+  },
+  {
+    name: "for-then-siblings",
+    App: ForThenSiblings,
+    expectedText: "row 1row 2bumpcount: 0",
+    update: () => bumpAfterFor(),
+    expectedTextAfterUpdate: "row 1row 2bumpcount: 1",
+    stableSelector: "button, pre"
   },
   {
     name: "spread-children",
@@ -1956,6 +2061,14 @@ export const scenarios: Scenario[] = [
     serverText: "loaded"
   },
   {
+    name: "client-only-before-suspending-route",
+    App: ClientOnlyBeforeSuspendingRoute,
+    async: true,
+    expectedText: "widget loaded",
+    // The widget is client-only: the server renders only the routed side.
+    serverText: "loaded"
+  },
+  {
     name: "select-value-selected",
     App: SelectValue,
     expectedText: "EnglishFrenchfr",
@@ -1974,6 +2087,22 @@ export const scenarios: Scenario[] = [
     update: () => setInnerHTMLToggle(true),
     expectedTextAfterUpdate: "r1r2on",
     stableSelector: "div, label"
+  },
+  {
+    name: "reactive-lone-spread-id-parity",
+    App: ReactiveLoneSpread,
+    expectedText: "spreadbefore",
+    update: () => setLoneSpreadLabel("after"),
+    expectedTextAfterUpdate: "spreadafter",
+    stableSelector: "div, span, button"
+  },
+  {
+    name: "reactive-ref-lone-spread-id-parity",
+    App: ReactiveRefLoneSpread,
+    expectedText: "spreadbefore",
+    update: () => refSpreadButton.click(),
+    expectedTextAfterUpdate: "spreadafter",
+    stableSelector: "div, span, button"
   },
   {
     name: "prop-condition-memo-id-parity",

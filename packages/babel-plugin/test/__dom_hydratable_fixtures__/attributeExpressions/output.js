@@ -145,11 +145,7 @@ var _el$4 = _$getNextElement(_tmpl$2),
   _el$6 = _el$5.nextSibling,
   _el$7 = _el$6.firstChild,
   _el$8 = _el$6.nextSibling;
-_$spread(
-  _el$4,
-  _$mergeProps(() => getProps("test")),
-  true
-);
+_$spread(_el$4, () => getProps("test"), true);
 _$setProperty(_el$5, "textContent", rowId);
 _$setProperty(_el$8, "innerHTML", "<div/>");
 _$effect(
@@ -228,7 +224,7 @@ var _el$17 = _$getNextElement(_tmpl$9);
 _$effect(
   () => state.visible,
   _v$ => {
-    _el$17.checked = _v$;
+    _$setProperty(_el$17, "checked", _v$);
   }
 );
 const template14 = _el$17;
@@ -241,11 +237,11 @@ const template17 = _el$20;
 var _el$21 = _$getNextElement(_tmpl$4);
 _$spread(
   _el$21,
-  _$mergeProps(() => ({
+  () => ({
     get [key()]() {
       return props.value;
     }
-  })),
+  }),
   false
 );
 _$runHydrationEvents();
@@ -274,10 +270,10 @@ _$effect(
     n: max()
   }),
   ({ e, t, a, o, i, n }, _p$) => {
-    _el$24.value = e ?? "";
+    _$setProperty(_el$24, "value", e);
     t !== _p$?.t && _$setAttribute(_el$24, "min", t);
     a !== _p$?.a && _$setAttribute(_el$24, "max", a);
-    _el$25.checked = o;
+    _$setProperty(_el$25, "checked", o);
     i !== _p$?.i && _$setAttribute(_el$25, "min", i);
     n !== _p$?.n && _$setAttribute(_el$25, "max", n);
   }
@@ -373,11 +369,11 @@ var _el$36 = _$getNextElement(_tmpl$17),
   [_el$40, _co$2] = _$getNextMarker(_el$39.nextSibling),
   _el$41 = _el$37.nextSibling,
   _el$42 = _el$41.nextSibling;
-_$spread(_el$36, _$mergeProps(api), true);
-_$spread(_el$37, _$mergeProps(api), true);
+_$spread(_el$36, api, true);
+_$spread(_el$37, api, true);
 _$insert(_el$37, () => (api() ? "checked" : "unchecked"), _el$40, _co$2);
-_$spread(_el$41, _$mergeProps(api), false);
-_$spread(_el$42, _$mergeProps(api), false);
+_$spread(_el$41, api, false);
+_$spread(_el$42, api, false);
 _$runHydrationEvents();
 const template28 = _el$36;
 var _el$43 = _$getNextElement(_tmpl$4);
@@ -473,9 +469,9 @@ _$effect(
     a: Color.Blue
   }),
   ({ e, t, a }, _p$) => {
-    queueMicrotask(() => (_el$57.value = e)) || (_el$57.value = e);
-    _el$58.value = t;
-    _el$59.value = a;
+    _$setProperty(_el$57, "value", e);
+    _$setProperty(_el$58, "value", t);
+    _$setProperty(_el$59, "value", a);
   }
 );
 const template41 = _el$57;

@@ -1,5 +1,71 @@
 # @solidjs/universal
 
+## 2.0.0-rc.7
+
+### Patch Changes
+
+- bd22ac8: Rename the three legacy client dev artifacts to the `<entry>.dev.{js,cjs}` convention every other dev build already uses: `solid-js/dist/dev.*` → `dist/solid.dev.*`, `@solidjs/web/dist/dev.*` → `dist/web.dev.*`, `@solidjs/universal/dist/dev.*` → `dist/universal.dev.*`. With server dev builds now shipping as `dist/server.dev.*`, a bare `dev.js` no longer says which entry it is the dev build of. The `exports` maps are updated; only code deep-importing `dist/dev.js` directly (bypassing `exports`) is affected.
+- d601119: Remove the experimental patch channel and patch-mode list driver (always opt-in, never default). Graph-native regions own value delivery and the unified-For design owns list structure, so the channel's parallel delivery machinery is retired: `patch.ts`/`patch-driver.ts` deleted, the compiler-contract exports (`registerPatch`/`registerRowOps`/`registerSlotPatch`/`patchableRaw`, `patchDriver`/`rowProof`/`driveList`) removed, the `patchDriver` compiler option dropped from both compilers, the insert `$ll` seam stripped, and the write-side channel struct dieted to the single written-keys bound (`t.wk`) the core fold/notify paths actually use. Store-family app bundles reclaim up to ~900 B brotli; every measured tier shrinks.
+- Updated dependencies [215de3b]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [7c14e23]
+- Updated dependencies [c6c415b]
+- Updated dependencies [bd22ac8]
+- Updated dependencies [6c8c956]
+- Updated dependencies [d5aba4b]
+- Updated dependencies [3ae0ca0]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [6c8c956]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [b6a90f9]
+- Updated dependencies [3424f9a]
+- Updated dependencies [6c8c956]
+- Updated dependencies [f4d3c87]
+- Updated dependencies [d601119]
+- Updated dependencies [ac5159a]
+- Updated dependencies [de1c8b5]
+- Updated dependencies [80ff52e]
+- Updated dependencies [01e3a57]
+- Updated dependencies [6c8c956]
+  - solid-js@2.0.0-rc.7
+
+## 2.0.0-rc.6
+
+### Patch Changes
+
+- 3a6836d: Expose diagnostic names for renderer-owned effects (#3063). The public `Renderer` interface now accepts a trailing `RendererEffectOptions` (`{ name?: string }`) on `effect`, `insert`, and `spread` — `spread` forwards one shared name to its child insertion and internal ref/props effects — so dev attribution can correlate signal write → application computation → renderer effect → output mutation end-to-end. Renderer-created effects without a caller-supplied name get stable dev-only fallbacks ("renderer insert", "renderer spread props/ref/children", "renderer render", "renderer patch"); production builds tree-shake all of it via the `_SOLID_DEV_` constant.
+- Updated dependencies [a7c6b8e]
+- Updated dependencies [8d1ba82]
+- Updated dependencies [3e48a75]
+- Updated dependencies [04b5b7f]
+- Updated dependencies [da1f7bf]
+  - solid-js@2.0.0-rc.6
+
+## 2.0.0-rc.5
+
+### Patch Changes
+
+- Updated dependencies [51ffcb9]
+- Updated dependencies [91e300a]
+- Updated dependencies [00d1d5d]
+- Updated dependencies [07471da]
+- Updated dependencies [0c02d42]
+  - solid-js@2.0.0-rc.5
+
+## 2.0.0-rc.4
+
+### Patch Changes
+
+- Updated dependencies [8d249c7]
+- Updated dependencies [f0c3692]
+- Updated dependencies [f3da41e]
+- Updated dependencies [a10cf1a]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+  - solid-js@2.0.0-rc.4
+
 ## 2.0.0-rc.3
 
 ### Minor Changes

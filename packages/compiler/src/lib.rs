@@ -30,9 +30,11 @@ mod refresh;
 mod semantic_trace;
 mod shared;
 mod ssr;
+#[cfg(feature = "tsrx")]
+mod tsrx;
 mod universal;
 
-pub use compiler::{CompileOptions, CompileOutput, Generate, Renderer, Wrapper, compile};
+pub use compiler::{CompileOptions, CompileOutput, Generate, Renderer, Syntax, Wrapper, compile};
 pub use error::{CompileError, CompileErrorKind};
 pub use semantic_trace::{
     CallbackDecision, ComponentRenderSite, DeferredCallbackSite, ExecutionCardinality,
@@ -50,6 +52,11 @@ pub use semantic_trace::{
 /// Cargo package version of the compiler implementation producing semantic
 /// traces. Consumers should pair this with the trace semantics revision.
 pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(feature = "tsrx")]
+pub use tsrx::{
+    TsrxEmbeddedRegion, TsrxEmbeddedRegionKind, TsrxTypecheckMapping, TsrxTypecheckProjection,
+    TsrxTypecheckProjectionOptions, project_tsrx_for_typecheck,
+};
 
 #[cfg(feature = "node")]
 pub use node_adapter::*;

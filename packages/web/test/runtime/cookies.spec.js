@@ -44,10 +44,13 @@ class FakeStorage {
 
 beforeEach(() => {
   globalThis[RequestContext] = new FakeStorage();
+  // the flash codec is encrypted (#3239); the no-JS assertions need a key
+  globalThis.__SOLID_SECRET__ = "cookies-spec-key";
 });
 
 afterEach(() => {
   delete globalThis[RequestContext];
+  delete globalThis.__SOLID_SECRET__;
 });
 
 function eventWithCookies(cookieHeader) {
@@ -90,8 +93,43 @@ describe("serializeCookie", () => {
   });
 
   it("normalizes sameSite casing", () => {
-    expect(serializeCookie("a", "b", { sameSite: "none" })).toBe("a=b; Path=/; SameSite=None");
+    expect(serializeCookie("a", "b", { sameSite: "none", secure: true })).toBe(
+      "a=b; Path=/; Secure; SameSite=None"
+    );
     expect(serializeCookie("a", "b", { sameSite: "Strict" })).toBe("a=b; Path=/; SameSite=Strict");
+  });
+
+  it("emits Partitioned (CHIPS) when asked", () => {
+    expect(serializeCookie("widget", "v", { secure: true, partitioned: true })).toBe(
+      "widget=v; Path=/; Secure; Partitioned"
+    );
+  });
+
+  it("refuses in dev the shapes every browser silently rejects (#3138)", () => {
+    // The rejection happens on ARRIVAL and leaves no trace anywhere — the
+    // cookie simply never comes back. Dev is the only place the author can
+    // be told; each of these is one attribute away from a stored cookie.
+    // __Host-: requires Secure, Path=/, no Domain — and the option that
+    // breaks it is the one you would naturally set (`path: "/admin"` on a
+    // session cookie silently disables login).
+    expect(() => serializeCookie("__Host-sid", "v", { path: "/orders", secure: true })).toThrow(
+      /__Host-/
+    );
+    expect(() =>
+      serializeCookie("__Host-sid", "v", { domain: "example.com", secure: true })
+    ).toThrow(/__Host-/);
+    expect(() => serializeCookie("__Host-sid", "v", {})).toThrow(/__Host-/);
+    // prefixes are matched case-insensitively, as browsers apply them
+    expect(() => serializeCookie("__host-sid", "v", {})).toThrow(/__Host-/);
+    expect(() => serializeCookie("__Secure-tok", "v", {})).toThrow(/__Secure-/);
+    expect(() => serializeCookie("cross", "v", { sameSite: "none" })).toThrow(/SameSite=None/);
+    expect(() => serializeCookie("widget", "v", { partitioned: true })).toThrow(/Partitioned/);
+
+    // the controls: done right, each shape emits
+    expect(serializeCookie("__Host-ok", "v", { secure: true })).toBe("__Host-ok=v; Path=/; Secure");
+    expect(serializeCookie("__Secure-ok", "v", { secure: true })).toBe(
+      "__Secure-ok=v; Path=/; Secure"
+    );
   });
 
   it("percent-encodes name and value so any string round-trips", () => {
@@ -195,6 +233,20 @@ describe("createSSRResponse carries multiple Set-Cookie values", () => {
     expect(event.response.committed).toBe(true);
   });
 
+  it("runtime-composed HTML drops framing headers written before render", async () => {
+    const event = eventWithCookies();
+    event.response.headers.set("Content-Length", "1");
+    event.response.headers.set("Content-Encoding", "gzip");
+    event.response.headers.set("Transfer-Encoding", "chunked");
+
+    const response = r.createSSRResponse("hello", event);
+
+    expect(response.headers.get("Content-Length")).toBeNull();
+    expect(response.headers.get("Content-Encoding")).toBeNull();
+    expect(response.headers.get("Transfer-Encoding")).toBeNull();
+    expect(await response.text()).toBe("hello");
+  });
+
   it("redirect result: cookies ride the redirect head", () => {
     const event = eventWithCookies();
     appendCookie(event, "session", "fresh");
@@ -237,6 +289,28 @@ describe("createSSRResponse carries multiple Set-Cookie values", () => {
     expect(event.response.headers.get("Location")).toBe("/next");
     expect(response.headers.getSetCookie()).toEqual([]);
   });
+
+  it("late stream redirects emit script only for HTTP(S) targets", async () => {
+    async function finish(location) {
+      const event = eventWithCookies();
+      let sink;
+      const response = await r.createSSRResponse(
+        {
+          pipe(writable) {
+            sink = writable;
+            writable.write("<p>shell</p>");
+          }
+        },
+        event
+      );
+      event.response.headers.set("Location", location);
+      sink.end();
+      return response.text();
+    }
+
+    await expect(finish("/next")).resolves.toContain('window.location="/next"');
+    await expect(finish("java\tscript:alert(1)")).resolves.not.toContain("window.location=");
+  });
 });
 
 describe("handleServerFunctionRequest folds the event response stub", () => {
@@ -246,7 +320,7 @@ describe("handleServerFunctionRequest folds the event response stub", () => {
 
   function dispatch(id, event, extraHeaders = {}, options = {}) {
     return handleServerFunctionRequest(
-      new Request(`http://localhost/_server?id=${encodeURIComponent(id)}`, {
+      new Request(`http://localhost/_server/${encodeURIComponent(id)}`, {
         method: "POST",
         headers: { ...INSTANCE_HEADERS, ...extraHeaders }
       }),
@@ -325,7 +399,7 @@ describe("handleServerFunctionRequest folds the event response stub", () => {
       return "saved";
     });
     const response = await handleServerFunctionRequest(
-      new Request("http://localhost/_server?id=cookie-nojs-0", {
+      new Request("http://localhost/_server/cookie-nojs-0", {
         method: "POST",
         headers: {
           "content-type": "application/x-www-form-urlencoded",
@@ -372,7 +446,7 @@ describe("handleServerFunctionRequest folds the event response stub", () => {
       return "saved";
     });
     const response = await handleServerFunctionRequest(
-      new Request("http://localhost/_server?id=cookie-nojs-ct-0", {
+      new Request("http://localhost/_server/cookie-nojs-ct-0", {
         method: "POST",
         headers: {
           "content-type": "application/x-www-form-urlencoded",

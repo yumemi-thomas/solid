@@ -1031,6 +1031,29 @@ describe("errored derive follows memo rules", () => {
     flush();
   };
 
+  it("routes async reconciliation errors through the projection error state", async () => {
+    const boom = new Error("invalid projection key");
+    let store!: { id: number };
+    const dispose = createRoot(d => {
+      store = createProjection(
+        async () => ({ id: 2 }),
+        { id: 1 },
+        {
+          key: item => {
+            if (item.id === 2) throw boom;
+            return item.id;
+          }
+        }
+      );
+      return d;
+    });
+
+    flush();
+    await settle();
+    expect(() => untrack(() => store.id)).toThrow("invalid projection key");
+    dispose();
+  });
+
   it("untracked reads of a rejected uninitialized derive throw its error", async () => {
     const boom = new Error("boom");
     let store!: any;
@@ -1164,6 +1187,155 @@ describe("errored derive follows memo rules", () => {
     expect(views).toContain("recovered");
     expect(attempts).toBe(2);
     lateDispose();
+    dispose();
+  });
+});
+
+describe("a flight superseded by a synchronous settle wakes pending dependents (#3181)", () => {
+  // The cache-backed fetch shape (TanStack Query's adapter): the "cache"
+  // commits and announces via a signal write in the SAME synchronous step in
+  // which the flight's promise resolves. The write recomputes the derive
+  // first, so the flight lands pre-superseded — asyncWrite's
+  // settlePendingSource walk never runs, and before the recompute-side twin
+  // every dependent that registered the flight stayed STATUS_PENDING
+  // forever. The projection reconciles in place, so a memo over it recovers
+  // to an UNCHANGED value: nothing else ever re-notifies, and a reader that
+  // suspended through the memo re-parked on the dead source permanently.
+  it("notifies a leaf reader behind a memo over the projection", async () => {
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const throughMemo: Array<boolean> = [];
+    const direct: Array<boolean> = [];
+
+    let committed: { a: boolean };
+    let inFlight: Promise<{ value: { a: boolean } }> | null = null;
+    let land!: () => void;
+
+    const [version, setVersion] = createSignal(0);
+    const fetchNow = (next: { a: boolean }) => {
+      const gate = deferred<void>();
+      land = () => {
+        committed = next;
+        inFlight = null;
+        // announce first (sync recompute supersedes the flight)…
+        setVersion(v => v + 1);
+        // …then the flight's own promise resolves, already stale
+        gate.resolve();
+      };
+      inFlight = gate.promise.then(() => ({ value: next }));
+    };
+
+    let memo!: () => { a: boolean };
+    const dispose = createRoot(d => {
+      const store = createProjection(
+        () => {
+          version();
+          if (inFlight) return inFlight;
+          return { value: committed };
+        },
+        { value: { a: undefined as unknown as boolean } }
+      );
+      const data = () => store.value;
+      memo = createMemo(() => data());
+      createEffect(
+        () => memo().a,
+        v => {
+          throughMemo.push(v);
+        }
+      );
+      createEffect(
+        () => data().a,
+        v => {
+          direct.push(v);
+        }
+      );
+      return d;
+    });
+
+    fetchNow({ a: false });
+    flush();
+    land();
+    await sleep(5);
+    flush();
+    expect(throughMemo).toEqual([false]);
+    expect(direct).toEqual([false]);
+
+    // refetch: an extra announce while in flight, like the reporter's shape
+    fetchNow({ a: true });
+    setVersion(v => v + 1);
+    flush();
+    land();
+    await sleep(5);
+    flush();
+
+    // the commit is visible everywhere: directly, through the memo's own
+    // read, and — the regression — to the reader that suspended THROUGH the
+    // memo while the flight was pending
+    expect(direct).toEqual([false, true]);
+    expect(untrack(() => memo()).a).toBe(true);
+    expect(throughMemo).toEqual([false, true]);
+    dispose();
+  });
+
+  // The counterpart boundary: superseding a first-load flight with a fresh
+  // promise that has not landed yet must not wake dependents. The cache
+  // announces its commit via a signal write and the derive re-runs, but what
+  // it returns is a NEW promise still a microtask from landing (TanStack
+  // Query's adapter returns `query.promise.then(wrap)`, rebuilt whenever the
+  // underlying promise changes). The old flight is preempted, the new one
+  // has not landed, and the loading window has committed nothing to the
+  // store: the driver leaves STATUS_PENDING while still
+  // STATUS_UNINITIALIZED. Waking dependents there hands readers the
+  // projection's initial face — undefined data a read layer promised was
+  // settled. Leaving pending for uninitialized is not a settle.
+  it("does not wake dependents when a fresh not-yet-landed promise supersedes the first flight", async () => {
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const observed: Array<boolean | undefined> = [];
+
+    let inFlight: Promise<{ value: { a: boolean } }>;
+    let land!: () => void;
+
+    const [version, setVersion] = createSignal(0);
+    const gate = deferred<void>();
+    inFlight = gate.promise.then(() => ({ value: { a: false } }));
+    land = () => {
+      // The cache commits and announces: the derive re-runs synchronously
+      // and hands the engine a FRESH chained promise (one microtask from
+      // landing), then the original flight's own promise resolves stale.
+      inFlight = Promise.resolve({ value: { a: false } });
+      setVersion(v => v + 1);
+      gate.resolve();
+    };
+
+    const dispose = createRoot(d => {
+      const store = createProjection(
+        () => {
+          version();
+          return inFlight;
+        },
+        { value: { a: undefined as unknown as boolean } }
+      );
+      createEffect(
+        () => store.value.a,
+        v => {
+          observed.push(v);
+        }
+      );
+      return d;
+    });
+
+    flush();
+    expect(observed).toEqual([]);
+
+    land();
+    // The synchronous window right after the announce: the superseding
+    // promise has not landed. Parked means parked — a wake here observes
+    // the uninitialized initial face.
+    flush();
+    expect(observed).toEqual([]);
+
+    await sleep(5);
+    flush();
+    expect(observed).toEqual([false]);
     dispose();
   });
 });

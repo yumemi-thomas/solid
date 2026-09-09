@@ -189,7 +189,7 @@ impl<'a> AstDomTransform<'a, '_> {
                 }
                 continue;
             }
-            let disposition = self.classify_plan(&plan);
+            let disposition = self.classify_plan(&plan, tag_name);
             if matches!(
                 disposition,
                 PlanDisposition::Skip | PlanDisposition::Inline(_)
@@ -243,7 +243,7 @@ impl<'a> AstDomTransform<'a, '_> {
 
     /// Pure classification of one planned attribute, mirroring Babel's
     /// static-vs-expression branch in the attribute loop.
-    fn classify_plan(&self, plan: &AttrPlan<'a>) -> PlanDisposition {
+    fn classify_plan(&self, plan: &AttrPlan<'a>, tag_name: &str) -> PlanDisposition {
         if self.hydratable && plan.key == "$ServerOnly" {
             return PlanDisposition::Skip;
         }
@@ -254,6 +254,7 @@ impl<'a> AstDomTransform<'a, '_> {
             return PlanDisposition::Skip;
         }
         let reserved = plan.style_property || plan.class_property || plan.key.starts_with("prop:");
+        let select_value = tag_name == "select" && plan.key == "value";
         match &plan.value {
             PlanValue::None => {
                 if reserved {
@@ -265,7 +266,7 @@ impl<'a> AstDomTransform<'a, '_> {
                 }
             }
             PlanValue::Literal(value) => {
-                if reserved || child_properties(&plan.key) {
+                if reserved || child_properties(&plan.key) || select_value {
                     PlanDisposition::Runtime
                 } else {
                     PlanDisposition::Inline(Some(value.clone()))
@@ -286,14 +287,14 @@ impl<'a> AstDomTransform<'a, '_> {
                         }
                     }
                     Expression::StringLiteral(literal) => {
-                        if child_properties(&plan.key) {
+                        if child_properties(&plan.key) || select_value {
                             PlanDisposition::Runtime
                         } else {
                             PlanDisposition::Inline(Some(literal.value.to_string()))
                         }
                     }
                     Expression::NumericLiteral(literal) => {
-                        if child_properties(&plan.key) {
+                        if child_properties(&plan.key) || select_value {
                             PlanDisposition::Runtime
                         } else {
                             PlanDisposition::Inline(Some(format_number(literal.value)))
@@ -660,7 +661,7 @@ impl<'a> AstDomTransform<'a, '_> {
         let mut pending: std::vec::Vec<(String, Option<String>)> = std::vec::Vec::new();
         let mut semantic_spans = elided_value_spans;
         for plan in &plans {
-            match self.classify_plan(plan) {
+            match self.classify_plan(plan, tag_name) {
                 PlanDisposition::Skip => {}
                 PlanDisposition::Inline(value) => pending.push((plan.key.clone(), value)),
                 PlanDisposition::Runtime => return Ok(None),

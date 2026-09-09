@@ -245,6 +245,15 @@ export function lazy<T extends Component<any>>(
           if (typeof css === "string") ctx.registerAsset!("style", css);
           else ctx.registerAsset!("inline-style", css);
         }
+        if (assets.preloads) {
+          for (let i = 0; i < assets.preloads.length; i++) {
+            const preload = assets.preloads[i];
+            const as = (preload as any)?.as;
+            if (!noHydrate || typeof as !== "string" || as.toLowerCase() !== "script") {
+              ctx.registerAsset!("preload", preload);
+            }
+          }
+        }
         if (!noHydrate) {
           for (let i = 0; i < assets.js.length; i++) ctx.registerAsset!("module", assets.js[i]);
           if (hydrationKey != null) ctx.registerModule?.(hydrationKey, assets.js[0]);
@@ -311,17 +320,29 @@ export function lazy<T extends Component<any>>(
         assetsPending = assetsPending.then(clear, clear);
       }
     }
-    // The module promise is deliberately NOT registered as a renderer-blocking
-    // promise. Doing so gates the shell flush on the module load, so an
-    // enclosing boundary never shows its fallback and a slow module stalls the
-    // whole document. Suspending on read (below) lets the nearest boundary own
-    // the wait and stream the module in behind its placeholder; with no
-    // boundary to defer to the read becomes a root hole and the renderer
-    // blocks the shell on it anyway.
-    //
-    // Asset ordering does not depend on this: `assetsPending` gates the render
-    // memo separately, so a fragment still cannot flush before its styles and
-    // module map are registered.
+    // The module load is CODE, not data: the shell's "no new async discovered
+    // during the sync render" rule cannot be evaluated for a segment whose
+    // code has not run yet. So the shell waits for the chunk (and its asset
+    // registration) even under a boundary — otherwise a `deferStream` read
+    // inside a code-split route is created after the shell has shipped and is
+    // silently a no-op (#3299). The render below still suspends into the
+    // nearest boundary, which keeps owning the DATA the loaded code discovers:
+    // plain async streams behind the fallback as before. Only the first render
+    // that reaches an un-preloaded chunk pays (`p` is module-cached); a loaded
+    // module is a no-op here, and `block` is a no-op once the shell has flushed,
+    // so a lazy mounted by a post-shell fragment streams like any other content.
+    // Rejections are swallowed on this branch — the render memo surfaces
+    // `cur.error` to the nearest <Errored> and clearing the block is all the
+    // shell needs.
+    if (ctx?.async && ((cur.v === undefined && !cur.errored) || assetsPending)) {
+      const gate = assetsPending ? cur.then(() => assetsPending) : cur;
+      ctx.block(
+        gate.then(
+          () => {},
+          () => {}
+        )
+      );
+    }
     return createMemo(
       () => {
         if (cur.errored) throw cur.error;
@@ -349,6 +370,15 @@ export function lazy<T extends Component<any>>(
         const css = assets.css[i];
         if (typeof css === "string") ctx.registerAsset!("style", css);
         else ctx.registerAsset!("inline-style", css);
+      }
+      if (assets.preloads) {
+        for (let i = 0; i < assets.preloads.length; i++) {
+          const preload = assets.preloads[i];
+          const as = (preload as any)?.as;
+          if (!noHydrate || typeof as !== "string" || as.toLowerCase() !== "script") {
+            ctx.registerAsset!("preload", preload);
+          }
+        }
       }
       // Hint-only: registerModule files the module into the serialized
       // hydration map, whose key only the render that creates it knows.
@@ -407,6 +437,11 @@ export function lazy<T extends Component<any>>(
           // registration during render, so this access is the only signal
           // that the client will fetch these chunks.
           if (ctx.registerAsset) {
+            if (resolved.preloads) {
+              for (let i = 0; i < resolved.preloads.length; i++) {
+                ctx.registerAsset("preload", resolved.preloads[i]);
+              }
+            }
             for (let i = 0; i < resolved.js.length; i++)
               ctx.registerAsset("module", resolved.js[i]);
           }

@@ -32,13 +32,22 @@ export default (path: NodePath<t.Program>, state: PluginPass) => {
         if (typeof html === "string") {
           const result = isInvalidMarkup(html);
           if (result) {
+            // A compile ERROR, not a warning (#3099): once the validator has
+            // fired, the emitted template is guaranteed not to match its own
+            // positional walk — the browser rebuilds the DOM, and the walk
+            // binds against nodes that moved (crash or silent wrong-node
+            // bindings; under SSR the restructuring desyncs hydration too).
+            // Warn-and-emit put this diagnostic in server stdout while the
+            // browser failed with an unrelated-looking runtime crash. The
+            // error throws from the template's registration site, so
+            // bundlers surface it at the right file and line. `validate:
+            // false` remains the opt-out.
             const message =
-              "\nThe HTML provided is malformed and will yield unexpected output when evaluated by a browser.\n";
-            console.warn(message);
-            console.warn("User HTML:\n", result.html);
-            console.warn("Browser HTML:\n", result.browser);
-            console.warn("Original HTML:\n", html);
-            // throw path.buildCodeFrameError();
+              "The HTML provided is malformed and will yield unexpected output when evaluated by a browser.\n" +
+              `User HTML:\n ${result.html}\n` +
+              `Browser HTML:\n ${result.browser}\n` +
+              `Original HTML:\n ${html}`;
+            throw (template.path ?? path).buildCodeFrameError(message);
           }
         }
       }
@@ -47,30 +56,5 @@ export default (path: NodePath<t.Program>, state: PluginPass) => {
     let ssrTemplates = data.templates.filter(temp => temp.renderer === "ssr");
     domTemplates.length > 0 && appendTemplatesDOM(path, domTemplates);
     ssrTemplates.length > 0 && appendTemplatesSSR(path, ssrTemplates);
-  }
-
-  // Compile-time row proofs (DESIGN-PATCH-CHANNEL §3c): wrap each function
-  // recorded by recordPureRow with the runtime's `rowProof` marker so the
-  // patch-mode list driver can engage on proven-pure rows — admission is
-  // decided here, statically; there is no runtime purity probe. The stamp
-  // travels with the function object, so extracted row functions qualify at
-  // their definition site.
-  if (data.pureRows?.size) {
-    const rowProofId = registerImportMethod(
-      path,
-      "rowProof",
-      getRendererConfig(path, "dom").moduleName
-    );
-    const pureRows = data.pureRows;
-    path.traverse({
-      "ArrowFunctionExpression|FunctionExpression"(fnPath) {
-        if (!pureRows.has(fnPath.node as any)) return;
-        pureRows.delete(fnPath.node as any);
-        fnPath.replaceWith(
-          t.callExpression(t.cloneNode(rowProofId), [fnPath.node as t.Expression])
-        );
-        fnPath.skip();
-      }
-    });
   }
 };

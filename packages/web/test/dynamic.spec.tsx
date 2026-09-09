@@ -3,8 +3,17 @@
  * @vitest-environment jsdom
  */
 import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
-import { createRoot, createSignal, Component, createStore, flush, Show, Loading } from "solid-js";
-import { Dynamic, dynamic, type IntrinsicElement, type JSX } from "../src/index.js";
+import {
+  createRoot,
+  createSignal,
+  createTrackedEffect,
+  Component,
+  createStore,
+  flush,
+  Show,
+  Loading
+} from "solid-js";
+import { Dynamic, dynamic, Portal, type IntrinsicElement, type JSX } from "../src/index.js";
 
 describe("Testing Dynamic control flow", () => {
   let div!: HTMLDivElement, disposer: () => void;
@@ -59,6 +68,53 @@ describe("Testing Dynamic control flow", () => {
     setComp("path");
     flush();
     expect(div.querySelector("path")).toBeInstanceOf(SVGElement);
+  });
+});
+
+describe("Dynamic intrinsic elements are created eagerly (#3291)", () => {
+  // Pins the render semantics #3187 briefly changed: a string-component
+  // Dynamic IS an element at component creation — refs fire then, on both
+  // the CSR and hydration paths — not a thunk materialized by the consuming
+  // insert. Deferring creation moved ref writes into the render phase of the
+  // flush for Dynamic-in-Portal and broke every createTrackedEffect reader
+  // (Kobalte poppers). The ambiguous-SVG-tag namespace for Dynamic (#3187)
+  // is an accepted limitation, as in 1.x; use a static element.
+  let disposer: (() => void) | undefined;
+  afterEach(() => {
+    disposer?.();
+    disposer = undefined;
+  });
+
+  test("the memo resolves to the element itself, and the ref fires during creation", () => {
+    let refAtCreation: Element | undefined;
+    let returned: unknown;
+    createRoot(dispose => {
+      disposer = dispose;
+      returned = <Dynamic component="div" ref={(el: HTMLDivElement) => (refAtCreation = el)} />;
+      // Synchronous: no insert, no flush.
+      expect(refAtCreation).toBeInstanceOf(HTMLDivElement);
+    });
+    // The component's memo yields the element — not a thunk for insert to pull.
+    expect(typeof returned).toBe("function");
+    expect((returned as () => unknown)()).toBe(refAtCreation);
+  });
+
+  test("a signal written from a Dynamic ref inside a Portal wakes a tracked effect", () => {
+    const Wrapper = (props: Record<string, unknown>) => <Dynamic {...props} component="div" />;
+    const [el, setEl] = createSignal<HTMLElement>();
+    const seen: boolean[] = [];
+    createRoot(dispose => {
+      disposer = dispose;
+      createTrackedEffect(() => {
+        seen.push(!!el());
+      });
+      <Portal>
+        <Wrapper ref={setEl} />
+      </Portal>;
+    });
+    flush();
+    expect(el()).toBeInstanceOf(HTMLDivElement);
+    expect(seen).toContain(true);
   });
 });
 

@@ -3194,26 +3194,165 @@ describe("Async Iterable — createProjection", () => {
     expect([...fragmentResults.values()][0]).toBe("<div>Alice</div>");
   });
 
-  test("Promise projection throws NotReadyError until resolved", async () => {
+  test("Promise projection reads throw NotReadyError until resolved", async () => {
     const { context } = createStreamTrackingContext();
     sharedConfig.context = context;
 
-    const d = deferred<{ name: string }>();
+    const key = Symbol("status");
+    const d = deferred<{ name: string; [key]: string }>();
     let store: any;
 
     createRoot(
       () => {
-        store = createProjection(() => d.promise, { name: "init" });
+        store = createProjection(() => d.promise, { name: "init", [key]: "init" });
       },
       { id: "t" }
     );
 
     expect(() => store.name).toThrow(NotReadyError);
+    expect(() => store[key]).toThrow(NotReadyError);
+    expect(() => "name" in store).toThrow(NotReadyError);
+    expect(() => Object.keys(store)).toThrow(NotReadyError);
+    expect(() => Object.getOwnPropertyDescriptor(store, "name")).toThrow(NotReadyError);
+    expect(() => Object.hasOwn(store, "name")).toThrow(NotReadyError);
 
-    d.resolve({ name: "resolved" });
+    d.resolve({ name: "resolved", [key]: "ready" });
     await tick();
 
     expect(store.name).toBe("resolved");
+    expect(store[key]).toBe("ready");
+    expect("name" in store).toBe(true);
+    expect(Object.keys(store)).toEqual(["name"]);
+    expect(Object.getOwnPropertyDescriptor(store, "name")?.value).toBe("resolved");
+    expect(Object.hasOwn(store, "name")).toBe(true);
+  });
+
+  test("Promise projection preserves its error after rejection", async () => {
+    const { context } = createStreamTrackingContext();
+    sharedConfig.context = context;
+
+    const key = Symbol("status");
+    const d = deferred<{ name: string; [key]: string }>();
+    const error = new Error("projection failed");
+    let store: any;
+    let source!: Promise<unknown>;
+
+    createRoot(
+      () => {
+        store = createProjection(() => d.promise, { name: "init", [key]: "init" });
+      },
+      { id: "t" }
+    );
+
+    try {
+      store.name;
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotReadyError);
+      source = (error as NotReadyError).source;
+    }
+
+    d.reject(error);
+    await expect(source).rejects.toBe(error);
+    for (const read of [
+      () => store.name,
+      () => store[key],
+      () => "name" in store,
+      () => Object.keys(store),
+      () => Object.getOwnPropertyDescriptor(store, "name"),
+      () => Object.hasOwn(store, "name")
+    ]) {
+      let thrown: unknown;
+      try {
+        read();
+      } catch (reason) {
+        thrown = reason;
+      }
+      expect(thrown).toBe(error);
+    }
+  });
+
+  test("async iterable projection preserves a rejection before its first yield", async () => {
+    const { context } = createStreamTrackingContext();
+    sharedConfig.context = context;
+
+    const d = deferred<void>();
+    const error = new Error("projection failed");
+    let store: any;
+    let source!: Promise<unknown>;
+
+    createRoot(
+      () => {
+        store = createProjection(
+          async function* () {
+            await d.promise;
+            yield { name: "resolved", count: 1 };
+          },
+          { name: "init", count: 0 }
+        );
+      },
+      { id: "t" }
+    );
+
+    try {
+      store.name;
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotReadyError);
+      source = (error as NotReadyError).source;
+    }
+
+    d.reject(error);
+    await expect(source).rejects.toBe(error);
+
+    for (const read of [() => store.name, () => store.count, () => store.name]) {
+      let thrown: unknown;
+      try {
+        read();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBe(error);
+    }
+  });
+
+  test("seedLoadingValue projection preserves a rejected first result", async () => {
+    const { context, serializeLog } = createStreamTrackingContext();
+    sharedConfig.context = context;
+
+    const d = deferred<void>();
+    const error = new Error("seeded projection failed");
+    let store: any;
+
+    createRoot(
+      () => {
+        store = createProjection(
+          async function* () {
+            await d.promise;
+            yield { name: "resolved", count: 1 };
+          },
+          { name: "seed", count: 0 },
+          { seedLoadingValue: true }
+        );
+      },
+      { id: "t" }
+    );
+
+    expect(store.name).toBe("seed");
+    expect(store.count).toBe(0);
+
+    const iter = serializeLog[0].value[Symbol.asyncIterator]();
+    const first = iter.next();
+    d.reject(error);
+    await expect(first).rejects.toBe(error);
+
+    for (const read of [() => store.name, () => store.count, () => store.name]) {
+      let thrown: unknown;
+      try {
+        read();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBe(error);
+    }
   });
 
   test("sync projection does NOT throw NotReadyError", () => {
@@ -3857,16 +3996,20 @@ describe("Asset Manifest + lazy()", () => {
   test("lazy() with moduleUrl registers assets and module mapping", async () => {
     const { lazy } = await import("../../src/server/component.js");
 
-    const registered: Array<{ type: string; url: string }> = [];
+    const registered: Array<{ type: string; value: any }> = [];
     const modules: Record<string, string> = {};
     const { context } = createMockSSRContext();
-    context.registerAsset = (type: string, url: string) => registered.push({ type, url });
+    context.registerAsset = (type: string, value: any) => registered.push({ type, value });
     context.registerModule = (moduleUrl: string, entryUrl: string) => {
       modules[moduleUrl] = entryUrl;
     };
     context.resolveAssets = (id: string) => {
       if (id === "./MyComp.tsx")
-        return { js: ["/assets/MyComp-abc123.js", "/assets/shared-def456.js"], css: [] };
+        return {
+          js: ["/assets/MyComp-abc123.js", "/assets/shared-def456.js"],
+          css: [],
+          preloads: [{ href: "/assets/hero.avif", as: "image", fetchpriority: "high" }]
+        };
       return null;
     };
     sharedConfig.context = context;
@@ -3885,8 +4028,12 @@ describe("Asset Manifest + lazy()", () => {
     );
 
     expect(registered).toEqual([
-      { type: "module", url: "/assets/MyComp-abc123.js" },
-      { type: "module", url: "/assets/shared-def456.js" }
+      {
+        type: "preload",
+        value: { href: "/assets/hero.avif", as: "image", fetchpriority: "high" }
+      },
+      { type: "module", value: "/assets/MyComp-abc123.js" },
+      { type: "module", value: "/assets/shared-def456.js" }
     ]);
     // The mapping is keyed by the hydration id of lazy's render memo (the
     // next child id of the root owner "t"), not by moduleUrl — the client
@@ -3897,16 +4044,20 @@ describe("Asset Manifest + lazy()", () => {
   test("preload() hints the module's assets without rendering it", async () => {
     const { lazy } = await import("../../src/server/component.js");
 
-    const registered: Array<{ type: string; url: string }> = [];
+    const registered: Array<{ type: string; value: any }> = [];
     const modules: Record<string, string> = {};
     const { context } = createMockSSRContext();
-    context.registerAsset = (type: string, url: string) => registered.push({ type, url });
+    context.registerAsset = (type: string, value: any) => registered.push({ type, value });
     context.registerModule = (moduleUrl: string, entryUrl: string) => {
       modules[moduleUrl] = entryUrl;
     };
     context.resolveAssets = (id: string) =>
       id === "./Route.tsx"
-        ? { js: ["/assets/Route.js", "/assets/shared.js"], css: ["/assets/Route.css"] }
+        ? {
+            js: ["/assets/Route.js", "/assets/shared.js"],
+            css: ["/assets/Route.css"],
+            preloads: [{ href: "/assets/route-font.woff2", as: "font", crossorigin: "" }]
+          }
         : null;
     sharedConfig.context = context;
 
@@ -3918,9 +4069,13 @@ describe("Asset Manifest + lazy()", () => {
     await LazyRoute.preload!();
 
     expect(registered).toEqual([
-      { type: "style", url: "/assets/Route.css" },
-      { type: "module", url: "/assets/Route.js" },
-      { type: "module", url: "/assets/shared.js" }
+      { type: "style", value: "/assets/Route.css" },
+      {
+        type: "preload",
+        value: { href: "/assets/route-font.woff2", as: "font", crossorigin: "" }
+      },
+      { type: "module", value: "/assets/Route.js" },
+      { type: "module", value: "/assets/shared.js" }
     ]);
     // Hint-only: the hydration mapping belongs to the render that creates the
     // component, which knows the hydration key.
@@ -5357,6 +5512,136 @@ describe("Promise-of-AsyncIterable flattening", () => {
     expect(stream.returnCalls).toBe(1);
     const channel = await [...serialized.values()][0];
     expect(channel).toBe("current");
+  });
+
+  test("projection: promised live iterable auto-hybrids at its first value", async () => {
+    const { context, serialized } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const gate = deferred<void>();
+    const stream = controlledStream<{ name: string }>();
+    (stream.iterable as any)[Symbol.for("solid.LiveSource")] = true;
+    let store: any;
+
+    createRoot(
+      () => {
+        store = createProjection(() => gate.promise.then(() => stream.iterable) as any, {
+          name: "seed"
+        });
+      },
+      { id: "t" }
+    );
+
+    expect(() => store.name).toThrow(NotReadyError);
+
+    gate.resolve();
+    await tick();
+    expect(() => store.name).toThrow(NotReadyError);
+    expect(stream.openCalls).toBe(1);
+
+    stream.yield({ name: "current" });
+    await tick();
+
+    expect(store.name).toBe("current");
+    expect(stream.returnCalls).toBe(1);
+    const channel = await [...serialized.values()][0];
+    expect(channel).toEqual({ name: "current" });
+  });
+
+  test("projection: direct live iterable also selects hybrid automatically", async () => {
+    const { context, serialized } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const stream = controlledStream<{ name: string }>();
+    (stream.iterable as any)[Symbol.for("solid.LiveSource")] = true;
+    let store: any;
+
+    createRoot(
+      () => {
+        store = createProjection(() => stream.iterable as any, { name: "seed" });
+      },
+      { id: "t" }
+    );
+
+    await tick();
+    expect(stream.openCalls).toBe(1);
+    stream.yield({ name: "current" });
+    await tick();
+
+    expect(store.name).toBe("current");
+    expect(stream.returnCalls).toBe(1);
+    const channel = await [...serialized.values()][0];
+    expect(channel).toEqual({ name: "current" });
+  });
+
+  test("projection: an empty live iterable ignores its iterator return value", async () => {
+    const { context, serialized } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const source = {
+      [Symbol.for("solid.LiveSource")]: true,
+      [Symbol.asyncIterator]() {
+        return {
+          next: () =>
+            Promise.resolve({
+              done: true as const,
+              value: { name: "not-a-yield" }
+            })
+        };
+      }
+    };
+    let store: any;
+
+    createRoot(
+      () => {
+        store = createProjection(() => Promise.resolve(source) as any, { name: "seed" });
+      },
+      { id: "t" }
+    );
+
+    const channel = await [...serialized.values()][0];
+    expect(channel).toEqual({ name: "seed" });
+    expect(store.name).toBe("seed");
+  });
+
+  test("projection: a synchronous first-pull failure rejects the store and channel", async () => {
+    const { context, serialized } = createMockSSRContext();
+    sharedConfig.context = context;
+
+    const gate = deferred<void>();
+    const error = new Error("first pull failed");
+    const source = {
+      [Symbol.for("solid.LiveSource")]: true,
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            throw error;
+          }
+        };
+      }
+    };
+    let store: any;
+
+    createRoot(
+      () => {
+        store = createProjection(() => gate.promise.then(() => source) as any, {
+          name: "seed"
+        });
+      },
+      { id: "t" }
+    );
+
+    const channel = [...serialized.values()][0];
+    gate.resolve();
+    await expect(channel).rejects.toBe(error);
+
+    let thrown: unknown;
+    try {
+      store.name;
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect(thrown).toBe(error);
   });
 
   test("Loading boundary reveals at first yield, not at promise resolution", async () => {

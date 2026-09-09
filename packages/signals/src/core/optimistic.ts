@@ -34,6 +34,7 @@ import {
   findLane,
   getOrCreateLane,
   hasActiveOverride,
+  laneHeld,
   resolveLane,
   resolveTransition,
   signalLanes,
@@ -173,18 +174,22 @@ function runQueue(queue: QueueCallback[], type: number): void {
 }
 
 /**
- * Run effects from all lanes that are ready (no pending async).
+ * Run effects from all lanes that are ready (no OBSERVED pending async — see
+ * laneHeld).
  */
 function runLaneEffects(type: number): void {
   for (const lane of activeLanes) {
     if (__DEV__) devCheckMergedLaneEmpty(lane);
-    if (lane._mergedInto || lane._pendingAsync.size > 0) continue;
+    if (lane._mergedInto || laneHeld(lane)) continue;
     const effects = lane._effectQueues[type - 1];
     if (effects.length) {
       lane._effectQueues[type - 1] = [];
       runQueue(effects, type);
     }
   }
+  // Optimistic patch applications ride the same visibility slot as lane
+  // effects (in-flight DOM updates); no-op unless patches registered.
+  if (type === EFFECT_RENDER) GlobalQueue._drainPatchOptimistic?.();
 }
 
 function cleanupCompletedLanes(completingTransition: Transition | null): void {
@@ -209,6 +214,14 @@ function cleanupCompletedLanes(completingTransition: Transition | null): void {
 
 /** read()'s per-lane suspension test (pending-throw path, lane context). */
 function laneSuspends(owner: OptimisticNode): boolean {
+  // An UNINITIALIZED async source suspends regardless of lane (#3276): a
+  // lane mismatch preserves an already-committed stale value, but a source
+  // with no committed truth has nothing to serve — the cross-lane read
+  // surfaced a fabricated `undefined` where latest() itself suspends
+  // (latestRead rethrows NotReady for tracked uninitialized reads). Lives
+  // here rather than read()'s throw path so the floor bundles don't pay:
+  // this is only reachable under a lane, which implies the engine.
+  if ((owner as Computed<unknown>)._statusFlags & STATUS_UNINITIALIZED) return true;
   // Per-lane suspension: only throw if in same lane as pending async
   // AND the node doesn't have an active override (overrides are the visible value,
   // downstream in the lane should read the override, not throw)
@@ -320,14 +333,16 @@ function recomputeLane(el: Computed<any>, own: boolean): OptimisticLane | null |
   return null;
 }
 
-/** recompute()'s catch path: track pending async in the current lane. */
+/** recompute()'s catch path: record the pending async as the current lane's
+ * (ownership — laneHeld decides the hold). The lane source's isPending
+ * companion is NOT refreshed here: its verdict never read _pendingAsync, and
+ * the source's own write/commit/settlement paths keep it current. */
 function laneAsyncPending(el: Computed<any>): void {
   const lane = findLane(currentOptimisticLane!);
   if (lane._source !== el) {
     lane._pendingAsync.add(el);
     ext(el)._optimisticLane = lane;
     (el as any)._config |= CONFIG_HAS_LANE;
-    GlobalQueue._updatePendingSignal !== null && GlobalQueue._updatePendingSignal(lane._source);
   }
 }
 
@@ -336,8 +351,6 @@ function laneAsyncSettled(el: Computed<any>): void {
   const resolvedLane = resolveLane(el);
   if (resolvedLane) {
     resolvedLane._pendingAsync.delete(el);
-    GlobalQueue._updatePendingSignal !== null &&
-      GlobalQueue._updatePendingSignal(resolvedLane._source);
   }
 }
 

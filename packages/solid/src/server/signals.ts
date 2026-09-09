@@ -18,6 +18,7 @@ export {
   NotReadyError,
   NoOwnerError,
   ContextNotFoundError,
+  TimeoutError,
   isEqual,
   isWrappable,
   SUPPORTS_PROXY,
@@ -30,7 +31,12 @@ export { snapshot, omit, storePath, $PROXY, $TRACK } from "@solidjs/signals";
 
 // === Type re-exports ===
 
-import type { Accessor as SignalAccessor, Refreshable } from "@solidjs/signals";
+import type {
+  Accessor as SignalAccessor,
+  ProjectionOptions,
+  Refreshable,
+  StoreOptions
+} from "@solidjs/signals";
 
 export type SourceAccessor<T> = Refreshable<SignalAccessor<T>>;
 
@@ -471,17 +477,10 @@ interface ServerComputation<T = any> {
 const LIVE_SOURCE = Symbol.for("solid.LiveSource");
 
 type SsrSourceMode = "server" | "hybrid" | "client";
-type ServerSsrOptions = {
+interface ServerProjectionOptions extends ProjectionOptions {
   deferStream?: boolean;
   ssrSource?: SsrSourceMode;
-  /**
-   * Commit #0 for derived stores: serve the seed instead of suspending. The
-   * markup flushes with the seed (locked for the whole response — the
-   * first-value lock at commit #0) and the landing streams as data for the
-   * client, whose store is born committed with the same seed.
-   */
-  seedLoadingValue?: boolean;
-};
+}
 type ServerMemoOptions<T> = MemoOptions<T> & {
   /**
    * Keep this value out of the hydration payload. The subtree still hydrates;
@@ -493,7 +492,7 @@ type ServerMemoOptions<T> = MemoOptions<T> & {
   serialize?: false;
 };
 type ServerSignalOptions<T> = SignalOptions<T>;
-type ServerStoreOptions = ServerSsrOptions;
+type NoFn<T> = T extends Function ? never : T;
 
 /**
  * The pending source for BARE `ssrSource: "client"` (no declared commit #0):
@@ -1710,6 +1709,11 @@ export function createRenderEffect<T>(
   serverEffect(compute, effectFn, options);
 }
 
+/**
+ * @deprecated Do not use in new code: `createEffect(compute, effect)` for
+ * reactive side effects, `onSettled` for one-time post-render DOM work.
+ * Retained only to ease 1.x migration — see the JSDoc in `@solidjs/signals`.
+ */
 export function createTrackedEffect(
   compute: () => void | (() => void),
   options?: { name?: string }
@@ -1776,19 +1780,19 @@ function setProperty(state: any, property: PropertyKey, value: any) {
   } else state[property] = value;
 }
 
-export function createStore<T extends object>(
-  store: T | Store<T>,
-  options?: { name?: string; shallow?: boolean }
+export function createStore<T extends object = {}>(
+  initialValue: NoFn<T> | Store<NoFn<T>>,
+  options?: StoreOptions
 ): [get: Store<T>, set: StoreSetter<T>];
-export function createStore<T extends object>(
-  fn: (store: T) => void | T | Promise<void | T>,
-  store: Partial<T> | Store<T>,
-  options?: ServerStoreOptions & { name?: string; shallow?: boolean }
-): [get: Store<T>, set: StoreSetter<T>];
-export function createStore<T extends object>(
-  first: T | Store<T> | ((store: T) => void | T | Promise<void | T>),
+export function createStore<T extends object = {}>(
+  fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
+  seed: Partial<T> | Store<NoFn<T>>,
+  options?: ServerProjectionOptions
+): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
+export function createStore<T extends object = {}>(
+  first: T | Store<T> | ((store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>),
   second?: T | Store<T>,
-  options?: ServerSsrOptions & { name?: string; shallow?: boolean }
+  third?: ServerProjectionOptions
 ): [get: Store<T>, set: StoreSetter<T>] {
   if (typeof first === "function") {
     // Forward options: dropping them made ssrSource inert for derived stores —
@@ -1797,7 +1801,7 @@ export function createStore<T extends object>(
     // The impl signature stays loose; the public overload above enforces the
     // client/seedLoadingValue pairing, and createProjection re-checks at
     // runtime.
-    const store = createProjection(first as any, second as T, options as any);
+    const store = createProjection(first as any, second as Partial<T>, third as any);
     return [store as Store<T>, storeSetter(store as T)];
   }
   const state = first as T;
@@ -1821,55 +1825,75 @@ function storeSetter<T extends object>(state: T): StoreSetter<T> {
   }) as StoreSetter<T>;
 }
 
-export function createOptimisticStore<T extends object>(
-  store: T | Store<T>,
-  options?: { name?: string; shallow?: boolean }
+export function createOptimisticStore<T extends object = {}>(
+  initialValue: NoFn<T> | Store<NoFn<T>>,
+  options?: StoreOptions
 ): [get: Store<T>, set: StoreSetter<T>];
-export function createOptimisticStore<T extends object>(
-  fn: (store: T) => void | T | Promise<void | T>,
-  store: Partial<T> | Store<T>,
-  options?: ServerStoreOptions & { name?: string; shallow?: boolean }
-): [get: Store<T>, set: StoreSetter<T>];
-export function createOptimisticStore<T extends object>(
-  first: T | Store<T> | ((store: T) => void | T | Promise<void | T>),
+export function createOptimisticStore<T extends object = {}>(
+  fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
+  seed: Partial<T> | Store<NoFn<T>>,
+  options?: ServerProjectionOptions
+): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
+export function createOptimisticStore<T extends object = {}>(
+  first: T | Store<T> | ((store: T) => void | T | Promise<void | T> | AsyncIterable<void | T>),
   second?: T | Store<T>,
-  options?: ServerSsrOptions & { name?: string; shallow?: boolean }
+  third?: ServerProjectionOptions
 ): [get: Store<T>, set: StoreSetter<T>] {
   // Same no-op rationale as createOptimistic above: optimistic writes are
   // masks that revert at settle, and server output is settled state. The
   // setter never invokes its function — a draft mutation here would be a
   // literal (permanent) mutation, the opposite of optimistic.
-  const [store] = (createStore as Function)(first, second, options) as [Store<T>, StoreSetter<T>];
+  const [store] = (createStore as Function)(first, second, third) as [Store<T>, StoreSetter<T>];
   return [store, (() => warnServerWrite("optimistic")) as StoreSetter<T>];
 }
 
 /**
- * Wraps a store in a Proxy that throws NotReadyError on property reads
- * while the async data is pending. Once markReady() is called, reads
- * pass through to the underlying state.
+ * Wraps a store in a Proxy that throws NotReadyError on property and
+ * structural reads while the async data is pending. Once markReady() is
+ * called, reads pass through to the underlying state.
  */
 function createPendingProxy<T extends object>(
   state: T,
   source: Promise<any>
-): [proxy: Store<T>, markReady: (frozenState?: T) => void] {
-  let pending = true;
+): [proxy: Store<T>, markReady: (frozenState?: T) => void, markError: (error: any) => void] {
+  let status: 0 | 1 | 2 = 0;
+  let error: any;
   let readTarget: T = state;
+  const gate = () => {
+    if (status > 1) throw error;
+    if (status) return;
+    // Bare client store: same loud-outside-a-boundary rule as the memo
+    // read path (see clientHoleRead).
+    if (source === CLIENT_HOLE) clientHoleRead();
+    throw new NotReadyError(source);
+  };
   const proxy = new Proxy(state, {
     get(obj, key, receiver) {
-      if (pending && typeof key !== "symbol") {
-        // Bare client store: same loud-outside-a-boundary rule as the memo
-        // read path (see clientHoleRead).
-        if (source === CLIENT_HOLE) clientHoleRead();
-        throw new NotReadyError(source);
-      }
+      gate();
       return Reflect.get(readTarget, key);
+    },
+    has(obj, key) {
+      gate();
+      return Reflect.has(obj, key);
+    },
+    ownKeys(obj) {
+      gate();
+      return Reflect.ownKeys(obj);
+    },
+    getOwnPropertyDescriptor(obj, key) {
+      gate();
+      return Reflect.getOwnPropertyDescriptor(obj, key);
     }
   });
   return [
     proxy as Store<T>,
     (frozen?: T) => {
       if (frozen) readTarget = frozen;
-      pending = false;
+      status = 1;
+    },
+    (reason: any) => {
+      error = reason;
+      status = 2;
     }
   ];
 }
@@ -1946,10 +1970,15 @@ function replaceState<T extends object>(target: T, next: T): void {
   Object.assign(target, next);
 }
 
-export function createProjection<T extends object>(
+export function createProjection<T extends object = {}>(
   fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-  initialValue: Partial<T> | Store<T>,
-  options?: ServerStoreOptions
+  seed: Partial<T> | Store<NoFn<T>>,
+  options?: ServerProjectionOptions
+): Refreshable<Store<T>>;
+export function createProjection<T extends object = {}>(
+  fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
+  seed: Partial<T> | Store<NoFn<T>>,
+  options?: ServerProjectionOptions
 ): Store<T> {
   const ctx = sharedConfig.context;
   const owner = createOwner();
@@ -1978,7 +2007,7 @@ export function createProjection<T extends object>(
     if (slots) slots[slotId!] = proxy;
     return proxy;
   };
-  const [state] = createStore(initialValue as T);
+  const [state] = createStore(seed as NoFn<T>);
 
   if (options?.ssrSource === "client") {
     // seedLoadingValue = declared commit #0: the seed renders. Bare = the
@@ -1996,8 +2025,29 @@ export function createProjection<T extends object>(
 
   const ssrSource = options?.ssrSource;
   const useProxy = ssrSource !== "hybrid";
+  // Projections have no server-component continuation pump: a standing live
+  // answer always hands off after V1, including no-hydrate/frame consumers.
+  const usesHybrid = (source: AsyncIterable<unknown>) =>
+    ssrSource === "hybrid" || !!(source as any)[LIVE_SOURCE];
   const patches: PatchOp[] = [];
   const draft = useProxy ? createDeepProxy(state as any, patches) : (state as any as T);
+  const takeFirst = (source: AsyncIterable<void | T>) =>
+    Promise.resolve().then(() => {
+      const iter = source[Symbol.asyncIterator]();
+      return Promise.resolve(iter.next()).then((first: IteratorResult<void | T>) => {
+        if (first.done) return undefined;
+        closeAsyncIterator(iter);
+        return first.value;
+      });
+    });
+  const normalizeAsync = (value: any) =>
+    Promise.resolve(value).then(value =>
+      // A bounded Promise→AsyncIterable needs the projection patch-trace
+      // protocol; only one-shot hybrid/live sources normalize to a value here.
+      typeof value?.[Symbol.asyncIterator] === "function" && usesHybrid(value)
+        ? takeFirst(value)
+        : value
+    );
   // seedLoadingValue = commit #0: reads never throw, they serve a frozen copy
   // of the seed for the whole response (first-value lock — `state` still
   // advances underneath for patch/serialization correctness, the landing is
@@ -2009,9 +2059,6 @@ export function createProjection<T extends object>(
   // the same line, and hydration claims against the plain seed).
   const seedLoading = !!options?.seedLoadingValue;
   const frozenSeed = seedLoading ? (JSON.parse(JSON.stringify(state)) as T) : undefined;
-  const seedLock = (markReady: (frozen?: T) => void) => {
-    if (seedLoading) markReady(frozenSeed);
-  };
 
   const runProjection = () => {
     resetOwnerForRerun(owner);
@@ -2024,11 +2071,11 @@ export function createProjection<T extends object>(
     if (!(error instanceof NotReadyError)) throw error;
 
     const deferred = createDeferredPromise<T>();
-    const [pending, markReady] = createPendingProxy(state, deferred.promise);
-    seedLock(markReady);
+    const [pending, markReady, markError] = createPendingProxy(state, deferred.promise);
+    if (seedLoading) markReady(frozenSeed);
     settleServerAsync<void | T, T>(
       Promise.reject(error),
-      () => runProjection() as void | T | PromiseLike<void | T>,
+      () => normalizeAsync(runProjection()),
       deferred,
       (value: void | T) => {
         if (value !== undefined && value !== state && value !== draft) {
@@ -2037,9 +2084,7 @@ export function createProjection<T extends object>(
         markReady();
         return state as T;
       },
-      (_error: any) => {
-        markReady();
-      },
+      markError,
       () => disposed
     );
     registerSettledTrace(pending, deferred.promise, state);
@@ -2051,39 +2096,28 @@ export function createProjection<T extends object>(
   // Async iterable (generator)
   const iteratorFn = (result as any)?.[Symbol.asyncIterator];
   if (typeof iteratorFn === "function") {
-    if (ssrSource === "hybrid") {
+    if (usesHybrid(result as AsyncIterable<void | T>)) {
       let currentResult = result;
-      let iter: AsyncIterator<void | T>;
       const deferred = createDeferredPromise<T>();
-      const [pending, markReady] = createPendingProxy(state, deferred.promise);
-      seedLock(markReady);
+      const [pending, markReady, markError] = createPendingProxy(state, deferred.promise);
+      if (seedLoading) markReady(frozenSeed);
       const runFirst = () => {
         const source = currentResult ?? runProjection();
         currentResult = undefined;
-        const nextIterator = (source as any)?.[Symbol.asyncIterator];
-        if (typeof nextIterator !== "function") {
-          throw new Error("Expected async iterator while retrying server createProjection");
-        }
-        iter = nextIterator.call(source);
-        return iter.next().then((r: IteratorResult<void | T>) => {
-          if (!r.done) closeAsyncIterator(iter);
-          return r.value as T;
-        });
+        return takeFirst(source as AsyncIterable<void | T>);
       };
       settleServerAsync(
         runFirst(),
         runFirst,
         deferred,
         (value: void | T) => {
-          if (value !== undefined && value !== state) {
+          if (value !== undefined && value !== state && value !== draft) {
             replaceState(state, value as T);
           }
           markReady();
           return state as T;
         },
-        (error: any) => {
-          markReady();
-        },
+        markError,
         () => disposed
       );
       registerSettledTrace(pending, deferred.promise, state);
@@ -2097,8 +2131,8 @@ export function createProjection<T extends object>(
       let iter: AsyncIterator<void | T>;
       let firstResult: IteratorResult<void | T> | undefined;
       const deferred = createDeferredPromise<void>();
-      const [pending, markReady] = createPendingProxy(state, deferred.promise);
-      seedLock(markReady);
+      const [pending, markReady, markError] = createPendingProxy(state, deferred.promise);
+      if (seedLoading) markReady(frozenSeed);
       const runFirst = () => {
         const source = currentResult ?? runProjection();
         currentResult = undefined;
@@ -2135,9 +2169,7 @@ export function createProjection<T extends object>(
           markReady(seedLoading ? undefined : (JSON.parse(JSON.stringify(state)) as T));
           return undefined;
         },
-        (error: any) => {
-          markReady();
-        },
+        markError,
         () => disposed
       );
 
@@ -2221,22 +2253,20 @@ export function createProjection<T extends object>(
 
   if (isThenable<T>(result)) {
     const deferred = createDeferredPromise<T>();
-    const [pending, markReady] = createPendingProxy(state, deferred.promise);
-    seedLock(markReady);
+    const [pending, markReady, markError] = createPendingProxy(state, deferred.promise);
+    if (seedLoading) markReady(frozenSeed);
     settleServerAsync(
-      result,
-      () => runProjection() as void | T | PromiseLike<void | T>,
+      normalizeAsync(result),
+      () => normalizeAsync(runProjection()),
       deferred,
       (value: void | T) => {
-        if (value !== undefined && value !== state) {
+        if (value !== undefined && value !== state && value !== draft) {
           replaceState(state, value as T);
         }
         markReady();
         return state as T;
       },
-      (error: any) => {
-        markReady();
-      },
+      markError,
       () => disposed
     );
     registerSettledTrace(pending, deferred.promise, state);
@@ -2766,6 +2796,13 @@ export function resolve<T>(fn: () => T): Promise<T> {
   throw new Error("resolve is not implemented on the server");
 }
 
+export function until<T>(
+  fn: () => T,
+  options?: { timeout?: number; signal?: AbortSignal }
+): Promise<T> {
+  throw new Error("until is not implemented on the server");
+}
+
 export function isPending(fn: () => any): boolean {
   try {
     fn();
@@ -2780,8 +2817,20 @@ export function latest<T>(fn: () => T): T {
   return fn();
 }
 
-export function refresh<T>(_target: Refreshable<T>): void {
-  return undefined;
+export function refresh<T>(
+  target: Refreshable<T>
+): Promise<T extends (...args: any) => infer V ? V : T> {
+  // No re-ask happens on the server — the target is already quiescent, so
+  // the promise resolves immediately with the current state (the accessor's
+  // value, or the store node itself), matching the client's early-return
+  // paths. An unready read resolves undefined rather than throwing from a
+  // write-like call.
+  if (typeof target !== "function") return Promise.resolve(target as any);
+  try {
+    return Promise.resolve((target as any)());
+  } catch {
+    return Promise.resolve(undefined as any);
+  }
 }
 
 export function affects(_target: unknown, _key?: PropertyKey): void {
@@ -2801,3 +2850,13 @@ export function onSettled(callback: () => void | (() => void)): void {
 
 // NoInfer utility type (also re-exported from signals, but define for local use)
 type NoInfer<T extends any> = [T][T extends any ? 0 : never];
+
+export function storeIsShallow(_proxy: any): boolean {
+  return false;
+}
+export function storeHasFamily(_proxy: any): boolean {
+  return false;
+}
+export function storeHasOptimisticFamily(_proxy: any): boolean {
+  return false;
+}

@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::shared::classify::check_length;
 use crate::shared::utils::{
     child_slot_allocates_ids, element_name, escape_html_text, escape_html_text_expression,
-    is_component_name, static_jsx_expression, trim_jsx_text,
+    is_component_name, jsx_child_is_function_hole, static_jsx_expression, trim_jsx_text,
 };
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::Expression;
@@ -112,10 +112,15 @@ impl<'a> AstDomTransform<'a, '_> {
                             // (`detectExpressions`), even if nothing ends up
                             // referencing it. Nodes without ids don't consume
                             // a walk position (Babel's `i` counts ids only).
-                            if filtered_index(child).is_some_and(|position| {
-                                self.detect_expressions(&filtered, position)
-                            }) {
-                                let name = self.next_element_id();
+                            // A preceding dynamic slot may have already
+                            // claimed this node's id as its insert marker.
+                            let claimed = self.pending_child_walk.take();
+                            if claimed.is_some()
+                                || filtered_index(child).is_some_and(|position| {
+                                    self.detect_expressions(&filtered, position)
+                                })
+                            {
+                                let name = claimed.unwrap_or_else(|| self.next_element_id());
                                 let lookup = self.child_walk_expression(
                                     element.span,
                                     element_id,
@@ -181,11 +186,14 @@ impl<'a> AstDomTransform<'a, '_> {
                         // position; the walk is emitted even though unused.
                         // In dev hydratable mode the walk validates the tag
                         // (`getFirstChild`/`getNextSibling`).
-                        if filtered_index(&element.children[index])
-                            .is_some_and(|position| self.detect_expressions(&filtered, position))
+                        let claimed = self.pending_child_walk.take();
+                        if claimed.is_some()
+                            || filtered_index(&element.children[index]).is_some_and(|position| {
+                                self.detect_expressions(&filtered, position)
+                            })
                         {
                             let child_tag = element_name(&child.opening_element.name)?;
-                            let name = self.next_element_id();
+                            let name = claimed.unwrap_or_else(|| self.next_element_id());
                             let lookup = self.child_element_expression(
                                 child.span,
                                 element_id,
@@ -238,10 +246,13 @@ impl<'a> AstDomTransform<'a, '_> {
                         );
                         template.push_both(&escape_html_text_expression(&value));
                         if !in_text_run {
-                            if filtered_index(child).is_some_and(|position| {
-                                self.detect_expressions(&filtered, position)
-                            }) {
-                                let name = self.next_element_id();
+                            let claimed = self.pending_child_walk.take();
+                            if claimed.is_some()
+                                || filtered_index(child).is_some_and(|position| {
+                                    self.detect_expressions(&filtered, position)
+                                })
+                            {
+                                let name = claimed.unwrap_or_else(|| self.next_element_id());
                                 let lookup = self.child_walk_expression(
                                     element.span,
                                     element_id,
@@ -328,8 +339,10 @@ impl<'a> AstDomTransform<'a, '_> {
                         // Mirror of the ssr generate's `scope()` wrap: deferred
                         // holes that can allocate hydration ids get their own
                         // owner scope. Both flags come from shared predicates
-                        // so the generates can't desync.
-                        let value = if dynamic
+                        // so the generates can't desync. Function children
+                        // never classify as dynamic but are deferred holes all
+                        // the same, so they take the scope too.
+                        let value = if (dynamic || jsx_child_is_function_hole(dynamic_child))
                             && self.hydratable
                             && child_slot_allocates_ids(dynamic_child)
                         {
@@ -655,9 +668,11 @@ impl<'a> AstDomTransform<'a, '_> {
                 initial: None,
             });
         }
-        if has_following_static_content(&children[following_start..]) {
+        // Babel's `nextChild(childNodes, index)`: the marker is the first
+        // following sibling's positional id when one will exist.
+        if let Some(marker) = self.claim_following_walk(children, following_start, span) {
             return Some(InsertMarker {
-                marker: self.child_walk_expression(span, element_id, *child_node_index),
+                marker,
                 initial: None,
             });
         }
@@ -731,10 +746,12 @@ impl<'a> AstDomTransform<'a, '_> {
         template: &mut crate::dom::template::TemplateHtml,
         declarations: &mut std::vec::Vec<Statement<'a>>,
     ) -> Expression<'a> {
+        // Babel: `exprId = childNodes[index + 1].id` — ride the immediately
+        // following sibling's positional id when it will exist.
         if !self.slot_boxed_by_text(children, index)
-            && self.next_child_is_template_node(children, index)
+            && let Some(marker) = self.claim_following_walk(children, index + 1, span)
         {
-            return self.child_walk_expression(span, element_id, *child_node_index);
+            return marker;
         }
         self.dedicated_slot_placeholder(span, element_id, child_node_index, template, declarations)
     }
@@ -799,12 +816,23 @@ impl<'a> AstDomTransform<'a, '_> {
         false
     }
 
-    /// Whether the immediately following retained child contributes a template
-    /// node (non-empty text, static expression, or native element) that can
-    /// serve as this slot's marker.
-    fn next_child_is_template_node(&self, children: &[JSXChild<'a>], index: usize) -> bool {
-        for child in &children[index + 1..] {
-            return match child {
+    /// Babel rides the immediately following sibling's positional id as the
+    /// slot's marker (`childNodes[index + 1].id` per-slot, `nextChild` in the
+    /// multi branch) — the id its own transform declares. When the first
+    /// retained child at/after `start` is a template node (non-empty text,
+    /// static expression, native element) that will receive a positional id
+    /// (its lowering guard mirrors `detectExpressions`), allocate that name
+    /// now, park it in `pending_child_walk` for the child's lowering to
+    /// declare, and return a reference to it.
+    fn claim_following_walk(
+        &mut self,
+        children: &[JSXChild<'a>],
+        start: usize,
+        span: oxc_span::Span,
+    ) -> Option<Expression<'a>> {
+        let mut following: Option<&JSXChild<'a>> = None;
+        for child in &children[start..] {
+            let is_template_node = match child {
                 JSXChild::Text(text) => {
                     if trim_jsx_text(&text.value).is_empty() {
                         continue;
@@ -821,8 +849,35 @@ impl<'a> AstDomTransform<'a, '_> {
                 JSXChild::Element(child) => !is_component_name(&child.opening_element.name),
                 _ => false,
             };
+            if is_template_node {
+                following = Some(child);
+            }
+            break;
         }
-        false
+        let following = following?;
+        // The sibling's walk declaration is guarded by `detectExpressions`
+        // over the filtered child list; only claim an id the sibling will
+        // actually declare. (Dynamic native elements always declare, but a
+        // dynamic slot immediately before them makes the detect true anyway.)
+        let filtered: std::vec::Vec<&JSXChild<'a>> = children
+            .iter()
+            .filter(|child| match child {
+                JSXChild::Text(text) => !trim_jsx_text(&text.value).is_empty(),
+                JSXChild::ExpressionContainer(container) => {
+                    !matches!(container.expression, JSXExpression::EmptyExpression(_))
+                }
+                _ => true,
+            })
+            .collect();
+        let position = filtered
+            .iter()
+            .position(|candidate| std::ptr::eq(*candidate, following))?;
+        if !self.detect_expressions(&filtered, position) {
+            return None;
+        }
+        let name = self.next_element_id();
+        self.pending_child_walk = Some(name.clone());
+        Some(self.identifier_expression(span, &name))
     }
 
     /// `getNextMatch(<previous>.nextSibling | <parent>.firstChild, "<tag>")`
@@ -921,7 +976,12 @@ impl<'a> AstDomTransform<'a, '_> {
             child
         };
         let mut child_template = crate::dom::template::TemplateHtml::open_tag(&tag_name);
-        let child_id = self.next_element_id();
+        // A preceding dynamic slot may have claimed this element's id as its
+        // insert marker (Babel's `childNodes[index + 1].id`).
+        let child_id = self
+            .pending_child_walk
+            .take()
+            .unwrap_or_else(|| self.next_element_id());
         let mut child_declarations = std::vec::Vec::new();
         let mut child_operations = std::vec::Vec::new();
 
@@ -1071,18 +1131,6 @@ fn spread_child_expression<'a>(
     } else {
         cloned
     }
-}
-
-fn has_following_static_content(children: &[JSXChild<'_>]) -> bool {
-    children.iter().any(|child| match child {
-        JSXChild::Text(text) => !trim_jsx_text(&text.value).is_empty(),
-        JSXChild::ExpressionContainer(container) => {
-            !matches!(container.expression, JSXExpression::EmptyExpression(_))
-                && static_jsx_expression(&container.expression, None).is_some()
-        }
-        JSXChild::Element(child) => !is_component_name(&child.opening_element.name),
-        _ => false,
-    })
 }
 
 fn has_previous_static_text(children: &[JSXChild<'_>]) -> bool {

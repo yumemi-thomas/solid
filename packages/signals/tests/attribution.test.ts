@@ -254,7 +254,10 @@ describe("why-did-this-run attribution", () => {
     );
     flush();
 
-    collect({ hotRuns: { count: 3, windowMs: 60_000 }, wideDeps: false });
+    // hotTime disabled: its default 8ms budget is real wall-clock time, and
+    // instrumented CI runs (coverage) can exceed it, adding a HOT_SCOPE_TIME
+    // warn that breaks the exact console counts below.
+    collect({ hotRuns: { count: 3, windowMs: 60_000 }, wideDeps: false, hotTime: false });
     const capture = DEV!.diagnostics.capture();
     for (let i = 1; i <= 5; i++) {
       setN(i);
@@ -267,6 +270,43 @@ describe("why-did-this-run attribution", () => {
     expect(hot[0].data).toMatchObject({ runs: 3, windowMs: 60_000 });
     expect(hot[0].message).toContain('"n" (write)');
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("aggregates hot scopes sharing a root cause into HOT_SCOPE_FANOUT", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const [n, setN] = createSignal(0, { name: "n" });
+    createRoot(() => {
+      for (let i = 0; i < 6; i++) {
+        createEffect(
+          () => n(),
+          () => {},
+          { name: `watcher-${i}` }
+        );
+      }
+    });
+    flush();
+
+    // hotTime disabled — see the hot-scopes test above.
+    collect({
+      hotRuns: { count: 3, windowMs: 60_000 },
+      wideDeps: false,
+      wideWrites: false,
+      hotTime: false
+    });
+    const capture = DEV!.diagnostics.capture();
+    for (let i = 1; i <= 4; i++) {
+      setN(i);
+      flush();
+    }
+
+    const events = capture.stop();
+    // First hot scope warns per-node; the other five fold into the cause key.
+    const perScope = events.filter(e => e.code === "HOT_SCOPE_RERUNS");
+    expect(perScope).toHaveLength(1);
+    const fanout = events.filter(e => e.code === "HOT_SCOPE_FANOUT");
+    expect(fanout).toHaveLength(1); // milestone at 5 scopes; 6th is silent
+    expect(fanout[0].data).toMatchObject({ cause: "n", scopes: 5 });
+    expect(warn).toHaveBeenCalledTimes(2); // one victim warning + one aggregate
   });
 
   it("warns on wide scopes and re-warns only on 50% growth", () => {
@@ -285,7 +325,8 @@ describe("why-did-this-run attribution", () => {
     );
     flush();
 
-    collect({ wideDeps: 4, hotRuns: false });
+    // hotTime disabled — see the hot-scopes test above.
+    collect({ wideDeps: 4, hotRuns: false, hotTime: false });
     const capture = DEV!.diagnostics.capture();
     setBump(1);
     flush();
@@ -304,7 +345,8 @@ describe("why-did-this-run attribution", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const signals = Array.from({ length: 5 }, (_, i) => createSignal(i, { name: `c${i}` }));
 
-    collect({ wideDeps: 4, hotRuns: false });
+    // hotTime disabled — see the hot-scopes test above.
+    collect({ wideDeps: 4, hotRuns: false, hotTime: false });
     const capture = DEV!.diagnostics.capture();
     const wide = createMemo(() => signals.reduce((sum, [get]) => sum + get(), 0), {
       name: "born-wide"
@@ -416,6 +458,62 @@ describe("why-did-this-run attribution", () => {
     const wasteful = scopes.find(s => s.name === "wasteful")!;
     expect(wasteful.wastedMs).toBeGreaterThanOrEqual(4);
     expect(wasteful.wastedMs).toBe(wasteful.selfMs);
+  });
+
+  it("derives honest changed for effects: identical compute output is waste", () => {
+    // Core runs effects with `_equals: false` (the effect phase re-fires on
+    // every recompute), so its changed flag is unconditionally true for
+    // effects — the engine must re-derive the fact or effect waste (the
+    // compiled-JSX fan-out signature, e.g. every row recomputing an
+    // identical class string on selection) is invisible to costs().
+    const [selected, setSelected] = createSignal(-1, { name: "selected" });
+    createRoot(() =>
+      createEffect(
+        () => (selected() === 99 ? "danger" : ""),
+        () => {},
+        { name: "row-class" }
+      )
+    );
+    flush();
+
+    const events = collect();
+    setSelected(1); // output stays "" — pure waste
+    flush();
+    setSelected(99); // output flips to "danger" — a real change
+    flush();
+
+    const [wasted, real] = events.filter(e => e.nodeName === "row-class");
+    expect(wasted.changed).toBe(false);
+    expect(real.changed).toBe(true);
+    const { scopes } = DEV!.attribution.costs();
+    const scope = scopes.find(s => s.name === "row-class")!;
+    expect(scope.wastedMs).toBeGreaterThanOrEqual(0);
+    expect(scope.wastedMs).toBe(wasted.selfMs);
+  });
+
+  it("exempts undefined-output effects from the waste derivation", () => {
+    // A side-effect-only compute returns undefined every run; identity of
+    // undefined proves nothing about the work, so these stay changed: true.
+    const [n, setN] = createSignal(0, { name: "n" });
+    createRoot(() =>
+      createEffect(
+        () => {
+          n();
+        },
+        () => {},
+        { name: "void-effect" }
+      )
+    );
+    flush();
+
+    const events = collect();
+    setN(1);
+    flush();
+
+    const run = events.find(e => e.nodeName === "void-effect")!;
+    expect(run.changed).toBe(true);
+    const { scopes } = DEV!.attribution.costs();
+    expect(scopes.find(s => s.name === "void-effect")!.wastedMs).toBe(0);
   });
 
   it("warns when a scope exceeds its time budget in one window", () => {

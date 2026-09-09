@@ -8,14 +8,25 @@ import {
   STATUS_ERROR,
   STATUS_PENDING
 } from "./constants.js";
-import { computed, createEffectNode, recompute, setStrictRead, staleValues, ext } from "./core.js";
-import { emitDiagnostic } from "./dev.js";
+import {
+  computed,
+  createEffectNode,
+  recompute,
+  setStrictRead,
+  staleValues,
+  ext,
+  setEffectStatusNotify
+} from "./core.js";
+import { attrHooks } from "./attribution-hooks.js";
+import { emitDiagnostic, reportDiagnostic } from "./dev.js";
 import { StatusError, unwrapStatusError } from "./error.js";
+import { enqueueSub } from "./heap.js";
 import {
   _hitUnhandledAsync,
   GlobalQueue,
   haltReactivity,
   resetUnhandledAsync,
+  schedule,
   setTrackedQueueCallback,
   setEffectCallback
 } from "./scheduler.js";
@@ -47,7 +58,6 @@ export function effect<T>(
     effect,
     error,
     isUser ? EFFECT_USER : EFFECT_RENDER,
-    notifyEffectStatus,
     options
   ) as Effect<T>;
   recompute(node, true);
@@ -58,16 +68,20 @@ export function effect<T>(
   if (__DEV__ && !node._parent) {
     const message =
       "[NO_OWNER_EFFECT] Effects created outside a reactive context will never be disposed";
-    emitDiagnostic({
-      code: "NO_OWNER_EFFECT",
-      kind: "lifecycle",
-      severity: "warn",
-      message,
-      ownerId: node.id,
-      ownerName: node._name,
-      data: { effectType: "effect" }
-    });
-    console.warn(message);
+    reportDiagnostic(
+      emitDiagnostic(
+        {
+          code: "NO_OWNER_EFFECT",
+          kind: "lifecycle",
+          severity: "warn",
+          message,
+          ownerId: node.id,
+          ownerName: node._name,
+          data: { effectType: "effect" }
+        },
+        node
+      )
+    );
   }
 }
 
@@ -99,24 +113,29 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
     }
   } else if (this._type === EFFECT_RENDER) {
     this._queue.notify(this, STATUS_PENDING | STATUS_ERROR, actualStatus, actualError);
-    if (__DEV__ && _hitUnhandledAsync) {
+    if (__DEV__ && _hitUnhandledAsync && resetUnhandledAsync()) {
       // Async without a `Loading` ancestor is legal (the mount defers), so this
       // is a consistent FYI — an `Errored` above must not swallow it. The old
       // STATUS_ERROR re-notify here dated from when enforcement routed the
       // pending to the error boundary; that both suppressed the warning and
-      // showed the error fallback in dev only (#2822).
-      resetUnhandledAsync();
+      // showed the error fallback in dev only (#2822). Reported once per
+      // mount (resetUnhandledAsync gates), located at the first pending
+      // effect's owner path.
       const message =
         "[ASYNC_OUTSIDE_LOADING_BOUNDARY] An async value was read outside a Loading boundary. The root mount will be deferred until all pending async settles.";
-      emitDiagnostic({
-        code: "ASYNC_OUTSIDE_LOADING_BOUNDARY",
-        kind: "async",
-        severity: "warn",
-        message,
-        ownerId: this.id,
-        ownerName: this._name
-      });
-      console.warn(message);
+      reportDiagnostic(
+        emitDiagnostic(
+          {
+            code: "ASYNC_OUTSIDE_LOADING_BOUNDARY",
+            kind: "async",
+            severity: "warn",
+            message,
+            ownerId: this.id,
+            ownerName: this._name
+          },
+          this
+        )
+      );
     }
   }
 }
@@ -157,6 +176,7 @@ function runEffect(node: Effect<any>): void {
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
     setEffectCallback(true);
+    if (attrHooks !== null) attrHooks.effectRunStart(node);
   }
   const prevCleanup = node._cleanup;
   node._cleanup = undefined;
@@ -185,6 +205,9 @@ function runEffect(node: Effect<any>): void {
     node._prevValue = node._value;
     node._modified = false;
   }
+  // Outside the try (see the rule in attribution-hooks.ts). Reached whether or
+  // not the callback threw — a throw that escapes the catch above halts.
+  if (__DEV__ && attrHooks !== null) attrHooks.effectRunEnd(node);
 }
 
 GlobalQueue._runEffect = runEffect as (el: Computed<unknown>) => void;
@@ -202,6 +225,9 @@ export interface TrackedEffect extends Computed<void> {
  */
 export function trackedEffect(fn: () => void | (() => void), options?: NodeOptions<any>): void {
   const run = () => {
+    // `_modified` is NOT redundant with the heap: the heap dedups within a
+    // pass, but a held transition's passes each enqueue `_run` into the same
+    // user queue, and this gate is what collapses them into one run at commit.
     if (!node._modified || node._flags & REACTIVE_DISPOSED) return;
     if (__DEV__) setTrackedQueueCallback(true);
     try {
@@ -232,32 +258,37 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
   node._config = (node._config & ~CONFIG_AUTO_DISPOSE) | CONFIG_CHILDREN_FORBIDDEN;
   node._modified = true;
   node._type = EFFECT_TRACKED;
-  ext(node)._notifyStatus = (status?: number, error?: any) => {
-    const actualStatus = status !== undefined ? status : node._statusFlags;
-    if (actualStatus & STATUS_ERROR) {
-      node._queue.notify(node, STATUS_PENDING, 0);
-      const err = error !== undefined ? error : node._x?._error;
-      if (!node._queue.notify(node, STATUS_ERROR, STATUS_ERROR)) {
-        haltReactivity(unwrapStatusError(err));
-        throw err;
-      }
-    }
-  };
+  // Status dispatch rides the SHARED notifier (statusNotifierOf keys off
+  // _type): its error arm is behavior-identical to the closure that used to
+  // live here, without the per-node NodeExtension allocation.
   node._run = run;
-  node._queue.enqueue(EFFECT_USER, run);
+  // The first run rides the heap like every wake (GlobalQueue._update), so a
+  // tracked effect created inside a render-effect callback runs after that
+  // pass's staged writes commit, not before.
+  enqueueSub(node);
+  schedule();
 
   if (__DEV__ && !node._parent) {
     const message =
       "[NO_OWNER_EFFECT] Effects created outside a reactive context will never be disposed";
-    emitDiagnostic({
-      code: "NO_OWNER_EFFECT",
-      kind: "lifecycle",
-      severity: "warn",
-      message,
-      ownerId: node.id,
-      ownerName: node._name,
-      data: { effectType: "trackedEffect" }
-    });
-    console.warn(message);
+    reportDiagnostic(
+      emitDiagnostic(
+        {
+          code: "NO_OWNER_EFFECT",
+          kind: "lifecycle",
+          severity: "warn",
+          message,
+          ownerId: node.id,
+          ownerName: node._name,
+          data: { effectType: "trackedEffect" }
+        },
+        node
+      )
+    );
   }
 }
+
+// Install the shared effect status notifier (statusNotifierOf serves it to
+// every effect node) — module-scope: any bundle that creates effects
+// evaluates this module.
+setEffectStatusNotify(notifyEffectStatus);

@@ -26,23 +26,36 @@ import {
   STATUS_PENDING,
   STATUS_UNINITIALIZED,
   unwrapOverride,
+  CONFIG_AUTHORITATIVE_READ,
+  CONFIG_HELD_TRUTH,
   CONFIG_OPTIMISTIC
 } from "../../core/constants.js";
 import {
+  context,
   devGuardStoreSetterWrite,
   isEqual,
+  latestReadActive,
+  prepareComputed,
   read as readNode,
   READ_SLOW,
   readNodeFast,
+  setLatestReadActive,
   setSignal,
+  setSlotUnobserved,
   signal,
+  slotSignal,
   untrack,
   ext
 } from "../../core/core.js";
-import { activeTransition, globalQueue, insertSubs } from "../../core/scheduler.js";
+import {
+  activeTransition,
+  currentTransition,
+  globalQueue,
+  insertSubs,
+  type Transition
+} from "../../core/scheduler.js";
 import { getObserver, getOwner } from "../../core/owner.js";
 import {
-  GlobalQueue,
   projectionWriteActive,
   schedule,
   setProjectionWriteActive,
@@ -76,6 +89,7 @@ import {
 import {
   devAssertNeverUserMutation,
   ingestedRaw,
+  markDescendants,
   ownedRaw,
   storeNextLookup,
   type StoreNextFamily,
@@ -94,8 +108,13 @@ import {
  * headroom for future fields. The prototype is reset to `Object.prototype`
  * so proxy-forwarded semantics (getPrototypeOf, constructor) are exactly a
  * plain object's. Array targets keep the bare-`[]` path — they must carry
- * the array exotic class for `Array.isArray(proxy)`, and arrays store named
- * fields off-object where this cliff does not apply. */
+ * the array exotic class for `Array.isArray(proxy)`.
+ *
+ * ARRAY SHAPE RULE: arrays normalize their named properties to dictionary
+ * mode as the count grows (V8 13.x: counts ≡ 0 mod 3 from 18 up), so the
+ * target's named field count is capped at 20 — any future write-side state
+ * beyond `wk` must ride an extension object (see target.ts), never new
+ * named fields here. */
 function TargetShape(this: any) {
   this.v = undefined;
   this.ch = undefined;
@@ -111,12 +130,14 @@ function TargetShape(this: any) {
   this.a = undefined;
   this.sc = undefined;
   this.nc = undefined;
-  this.adopted = undefined;
+  this.ab = undefined;
   this.fam = undefined;
   this.s = undefined;
   this.ovl = undefined;
   this.del = undefined;
   this.wk = undefined;
+  this.hv = undefined;
+  this.ht = undefined;
 }
 TargetShape.prototype = Object.prototype;
 
@@ -141,6 +162,7 @@ function createTarget(
   t.h = null;
   t.k = null;
   t.dk = null;
+  t.wk = null;
   t.u = parent;
   t.pk = parentKey;
   t.px = null;
@@ -148,12 +170,13 @@ function createTarget(
   t.a = false;
   t.sc = false;
   t.nc = 0;
-  t.adopted = false;
+  t.ab = null;
   t.fam = fam;
   t.s = false;
   t.ovl = false;
   t.del = null;
-  t.wk = null;
+  t.hv = null;
+  t.ht = null;
   t.px = new Proxy(t, traps);
   // Legacy interop: shared machinery (affects walks, wrap dedupe) reads the
   // proxy off looked-up targets as a field.
@@ -201,50 +224,70 @@ export function unwrapValue(v: any): any {
 // ---------------------------------------------------------------------------
 // nodes: pure subscription points (values used only for equality gating)
 
-export function getNode(target: StoreNextTarget, key: PropertyKey, current: any): Signal<any> {
+// Shared slot-node equality (create-floor diet): ONE function for every
+// store node — `this` is the node (method-call convention at every _equals
+// site), `_host` is the baked-in target backref. Logical-slot equality:
+// values resolving to the same child target are the same slot
+// (privatization/adoption swap raw identity without changing the logical
+// value — only changed leaves notify, R9).
+const slotNodeEquals = function (this: any, a: any, b: any): boolean {
+  return isEqual(a, b) || sameLogicalSlot(this._host, a, b);
+};
+
+// Shared slot-node unobserved handler (create-floor diet): registered once;
+// the core sweep dispatches CONFIG_SLOT_NODE nodes here instead of holding a
+// per-node closure in a per-node NodeExtension.
+setSlotUnobserved((node: any): void => {
+  // A live affects() mark keeps the node addressable (sweep parity).
+  if (node._x?._affectsCount) return;
+  const t: StoreNextTarget = node._host;
+  const key: PropertyKey = node._key;
+  if (t.n && t.n[key as any] === node) {
+    delete t.n[key as any];
+    t.nc--;
+  }
+});
+
+export function getNode(
+  target: StoreNextTarget,
+  key: PropertyKey,
+  current: any,
+  // First-read dedupe (create-floor slice 2): the get trap probes
+  // accessor-ness right before creating the node — pass the verdict through
+  // so creation skips the second descriptor scan. -1 = unknown (other
+  // callers), 0/1 = probed.
+  accKnown: -1 | 0 | 1 = -1
+): Signal<any> {
   const nodes = (target.n ??= Object.create(null));
   let node: Signal<any> | undefined = nodes[key];
   if (node === undefined) {
-    const created: Signal<any> = (node = signal(
+    // Create-floor diet: slotSignal bakes the whole node into one literal —
+    // no options object, no equals/unobserved closures, no NodeExtension,
+    // no post-construction expandos (acc + the wrap cache px/pxv are
+    // pre-shaped fields: the proxy last served for this key and the raw it
+    // wrapped — one pointer compare replaces the per-read WeakMap lookup in
+    // wrapNext). ownedWrite rides the literal's config: the setter carries
+    // the owned-scope write guard; node-level setSignals are internal
+    // notification machinery. Projection nodes carry the projection
+    // computed as their firewall: reads through them link the derive's
+    // status/lifecycle (§7b).
+    const created: Signal<any> = (node = slotSignal(
       current,
-      {
-        // Attribution-only: name store property nodes by path segment so
-        // attribution chains and wide-scope warnings read "store.todos", not
-        // "signal". Gated on the engine being installed — node creation is
-        // the hottest store path, and the disabled cost must stay one null
-        // check (nodes created before enable() stay generically named).
-        name: __DEV__ && attrHooks !== null ? "store." + String(key) : undefined,
-        // Logical-slot equality: values resolving to the same child target
-        // are the same slot (privatization/adoption swap raw identity without
-        // changing the logical value — only changed leaves notify, R9).
-        equals: (a: any, b: any) => isEqual(a, b) || sameLogicalSlot(target, a, b),
-        unobserved() {
-          // A live affects() mark keeps the node addressable (sweep parity).
-          if ((created as any)._x?._affectsCount) return;
-          if (target.n && target.n[key] === created) {
-            delete target.n[key];
-            target.nc--;
-          }
-        }
-      },
-      // Projection nodes carry the projection computed as their firewall:
-      // reads through them link the derive's status/lifecycle (§7b).
+      slotNodeEquals,
+      target,
+      key,
+      // Accessor-ness resolved ONCE per node (no per-object descriptor
+      // scan on reads): accessor keys serve through Reflect.get with the
+      // proxy receiver.
+      accKnown === -1 ? isOwnAccessor(target.pb ?? target.v, key) : accKnown === 1,
       (target.fam?.node as any) ?? undefined
     ));
-    // Store nodes are ownedWrite: the setter carries the owned-scope write
-    // guard; node-level setSignals are internal notification machinery.
-    created._config |= CONFIG_OWNED_WRITE;
-    // Accessor-ness resolved ONCE per node (no per-object descriptor scan):
-    // accessor keys serve through Reflect.get with the proxy receiver.
-    (created as any).acc = isOwnAccessor(target.pb ?? target.v, key);
-    // Wrap cache: the proxy last served for this key and the raw it wrapped.
-    // Raw-as-truth stores raw in nodes, so every object read needs a wrapper;
-    // one pointer compare (pxv === value) replaces the per-read WeakMap
-    // lookup in wrapNext — the dominant read-path cost vs legacy, whose
-    // nodes stored pre-wrapped values. A replaced child fails the compare
-    // and re-wraps; at most one stale proxy is pinned until the next read.
-    (created as any).px = undefined;
-    (created as any).pxv = undefined;
+    // Attribution-only: name store property nodes by path segment so
+    // attribution chains and wide-scope warnings read "store.todos", not
+    // "signal". Gated on the engine being installed — node creation is
+    // the hottest store path, and the disabled cost must stay one null
+    // check (nodes created before enable() stay generically named).
+    if (__DEV__ && attrHooks !== null) (created as any)._name = "store." + String(key);
     // Optimistic families: arm the override slot — setSignal routes armed
     // nodes through the core engine (lanes, ownership, reverts all native).
     if (target.fam?.opt) {
@@ -354,14 +397,6 @@ export function bumpDeep(t: StoreNextTarget): void {
   if (t.dk !== null) setSignal(t.dk, 1 as any);
 }
 
-function markDescendants(target: StoreNextTarget): void {
-  let t: StoreNextTarget | null = target;
-  while (t && !t.d) {
-    t.d = true;
-    t = t.u;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // pending backing + fold (the single mutation point)
 
@@ -389,6 +424,17 @@ function cloneRaw(source: Record<PropertyKey, any>, t?: StoreNextTarget): Record
     : Object.create(Object.getPrototypeOf(source), descs);
 }
 
+/** Copy own `key` from `from` onto `to`. A plain data slot (enumerable,
+ * writable, configurable, no accessor) is a bare assignment — the common case
+ * and the cheap one; anything else goes through defineProperty so accessors
+ * and attribute flags survive the copy. */
+function copyOwn(to: object, from: object, key: PropertyKey): void {
+  const d = Object.getOwnPropertyDescriptor(from, key)!;
+  if (d.get || d.set || !d.enumerable || !d.writable || !d.configurable)
+    Object.defineProperty(to, key, d);
+  else (to as any)[key] = d.value;
+}
+
 /** One-time own-accessor scan (Annex-B probes, no descriptor allocation);
  * returns true when the container is plain data (overlay-safe). */
 function scanAccessorsOnce(target: StoreNextTarget): boolean {
@@ -413,12 +459,7 @@ export function materializePB(target: StoreNextTarget): void {
   if (!target.ovl) return;
   const proto = target.pb!;
   const clone = cloneRaw(target.v, target);
-  for (const key of Reflect.ownKeys(proto)) {
-    const d = Object.getOwnPropertyDescriptor(proto, key)!;
-    if (d.get || d.set || !d.enumerable || !d.writable || !d.configurable)
-      Object.defineProperty(clone, key, d);
-    else (clone as any)[key] = d.value;
-  }
+  for (const key of Reflect.ownKeys(proto)) copyOwn(clone, proto, key);
   if (target.del !== null) {
     for (const key of target.del) delete (clone as any)[key];
     target.del = null;
@@ -433,6 +474,28 @@ export function materializePB(target: StoreNextTarget): void {
 
 function ensurePB(target: StoreNextTarget): Record<PropertyKey, any> {
   let pb = target.pb;
+  // Truth-staged backing hand-off (#3164 fold): a TENTATIVE draft opening on
+  // a target whose pending backing is truth-staged (a landing folded into a
+  // retaining transaction — it carries a foldBatches stamp) must not share
+  // the container. Tentative writes would pollute staged truth, and the
+  // tentative discard (notifyOptimisticWrites nulls pb) would destroy the
+  // landing. Park the staged backing and open a fresh draft seeded from the
+  // optimistic view below; the tentative discard restores it. The
+  // tentativePBs guard scopes this to draft OPEN: the draft's own backing
+  // (foldBatches-stamped by its first write when an action's transition is
+  // ambient) must not be parked by its own later writes.
+  if (
+    pb !== null &&
+    !tentativePBs.has(pb) &&
+    target.fam?.opt === true &&
+    !projectionWriteActive &&
+    !getWriteOverride() &&
+    foldBatches.has(target)
+  ) {
+    stagedTruthPB.set(target, pb);
+    pb = target.pb = null;
+  }
+  if (activeTransition !== null) foldBatches.set(target, activeTransition);
   if (pb === null) {
     // Prototype-chain overlay (#3044): plain-data non-array containers
     // outside projection/optimistic families open drafts in O(1) — own keys
@@ -454,6 +517,7 @@ function ensurePB(target: StoreNextTarget): Record<PropertyKey, any> {
     // seed from committed truth — seeding overrides there would fold a lane
     // value into the committed home ("authority wins at reveal" would break).
     if (target.fam?.opt && !projectionWriteActive && !getWriteOverride()) {
+      tentativePBs.add(pb);
       const nodes = target.n;
       if (nodes !== null) {
         for (const key of Reflect.ownKeys(nodes)) {
@@ -477,6 +541,28 @@ function ensurePB(target: StoreNextTarget): Record<PropertyKey, any> {
   return pb;
 }
 
+/** Sentinel holder for `t.ht`: a latest()-pull staged this adoption outside
+ * any transition — the hold lasts until the fold commit (drainFolds). */
+const PLAIN_HOLD: unique symbol = Symbol("plainHold");
+
+/** True while a latest() read is pulling the projection computed up to date
+ * (see the get trap): adoptions landing during the pull are speculative
+ * against the un-flushed batch and stage a held view. (Not injectable — the
+ * derived createStore overload retains projection machinery in every store
+ * bundle, see treeshake.test.ts.) */
+let latestPullActive = false;
+
+/** Resolve the held committed view (#3074): answers the masked old backing
+ * while the hold is live, and lazily clears a hold whose transition has
+ * committed (transitions merge — resolve through currentTransition, same as
+ * foldHeld's node stamps). */
+function heldMaskView(t: StoreNextTarget): Record<PropertyKey, any> | null {
+  const ht = t.ht;
+  if (ht === null) return null;
+  if (ht !== PLAIN_HOLD && currentTransition(ht)?._done === true) return (t.ht = t.hv = null);
+  return t.hv;
+}
+
 /**
  * Adoption (2026-08-16c): the incoming object becomes the committed backing
  * IMMEDIATELY — reconcile is eagerly visible to every reader (shipped
@@ -495,7 +581,32 @@ export function adoptPB(
   // fold diff; ~half of dbmon tick time was this duplication).
   if (!eager) {
     queueFold(target); // records the pre-batch old before we swap
-    target.adopted = true;
+    // Diff base = the view the nodes were last told (#3296). A draft's
+    // setter-exit notifications already moved them to its pending backing,
+    // so a later adoption diffs against THAT — against committed, a key the
+    // draft changed and the adoption restores would never re-notify. An
+    // adoption with no draft leaves nodes where they were: keep an existing
+    // base, else the pre-batch committed (foldOlds' entry itself stays the
+    // committed identity for the path-copy CAS). Eager callers read t.pb
+    // directly; this hand-off exists because pb is gone by drain time.
+    if (target.pb !== null) {
+      if (target.ovl) materializePB(target);
+      target.ab = target.pb;
+    } else target.ab ??= foldOlds.get(target)!;
+    // #3074/#3075: a projection recompute deriving from uncommitted inputs
+    // swaps the backing SPECULATIVELY — committed-visibility readers must
+    // keep the pre-hold view until the hold resolves (a source held by a
+    // live transition, or a latest()-pull ahead of the flush). Post-await
+    // landings (write-override) stay immediately visible — landed truth —
+    // and clear any hold; optimistic families ride the lane machinery.
+    if (target.fam?.opt !== true) {
+      if (getWriteOverride()) {
+        target.ht = target.hv = null;
+      } else if (activeTransition !== null || latestPullActive) {
+        if (heldMaskView(target) === null) target.hv = target.v;
+        target.ht = activeTransition ?? PLAIN_HOLD;
+      }
+    }
   }
   target.pb = null;
   // Overlay and accessor-scan state describe the OUTGOING backing — a
@@ -507,40 +618,113 @@ export function adoptPB(
   // draft rescans once (#3044 audit follow-up).
   target.ovl = false;
   target.del = null;
-  target.wk = null; // adoption supersedes any staged trap writes
   target.sc = false;
   target.a = false;
+  target.wk = null; // adoption supersedes staged trap writes
   target.v = incoming;
   target.ch = (incoming as any)[$TARGET] !== undefined;
   (target.fam?.map ?? storeNextLookup).set(incoming, target);
   if (__TEST__ && ingestedRaw && !ownedRaw.has(incoming)) ingestedRaw.add(incoming);
 }
 
+/** Sentinel for `t.wk`: the written-keys bound is unusable this batch (an
+ * array length write implicitly deleted indices) — consumers full-scan. */
+const WK_ALL: Set<PropertyKey> = new Set();
+
+const plainProto = (o: object): boolean => {
+  const p = Object.getPrototypeOf(o);
+  return p === Object.prototype || p === Array.prototype || p === null;
+};
+
 function queueFold(target: StoreNextTarget): void {
   if (foldOlds.has(target)) return;
-  if (foldOlds.size === 0) {
-    if (!hookInstalled) {
-      hookInstalled = true;
-      setStoreCommitHook(drainFolds);
-    }
-    schedule(); // once per batch — drain clears the map
+  if (!hookInstalled) {
+    hookInstalled = true;
+    setStoreCommitHook(drainFolds);
   }
+  // Always arm — "map non-empty ⇒ drain scheduled" is NOT an invariant: a
+  // held re-queue, or an incomplete-transition flush (which skips
+  // commitPendingNodes entirely), leaves entries behind after `scheduled`
+  // was consumed. A size-gated arm then strands every LATER fold — queued
+  // silently, never drained, committed base frozen at stale state while its
+  // nodes commit (#3089). schedule() early-returns when already armed.
+  schedule();
   foldOlds.set(target, target.v);
+}
+
+/** Fold write-attribution (#3089): a draft written while a transition is
+ * active belongs to that transition — its fold must not commit before the
+ * transition settles. Observed keys already defer through the held check in
+ * drainFolds (their nodes carry _pendingValue); this write-time stamp is the
+ * equivalent hold for UNOBSERVED keys, which have no node to consult.
+ * Refreshed on every write; resolved through currentTransition at drain
+ * (transitions merge — same rule as heldMaskView). */
+const foldBatches = new WeakMap<StoreNextTarget, Transition>();
+
+/** Parked truth-staged pending backings (#3164 fold): a tentative draft that
+ * opens while a folded landing's backing is live moves the staged container
+ * here (see ensurePB); the tentative discard in notifyOptimisticWrites
+ * restores it in place of the usual null. */
+export const stagedTruthPB = new WeakMap<StoreNextTarget, Record<PropertyKey, any>>();
+
+/** Backings opened by TENTATIVE drafts (optimistic user setters): ensurePB's
+ * truth-park must not fire against the draft's own container on its second
+ * and later writes (the first write stamps foldBatches whenever an action's
+ * transition is ambient). Entries die with their draft — tentative backings
+ * are consumed at setter exit. */
+const tentativePBs = new WeakSet<object>();
+
+/** A draft read composes the live optimistic view until the draft has opened
+ * its OWN view-seeded backing (ensurePB seeds that clone from the view and
+ * registers it in tentativePBs; from then on reads must see the draft's
+ * writes, not the overrides they superseded). A pending backing that exists
+ * for any other reason is not that clone — a truth landing staged into a
+ * retaining transaction (#3164 fold) is authoritative truth WITHOUT the
+ * live overrides. ensurePB parks such a backing on the draft's first WRITE
+ * and reseeds from the view, but the reads that precede that write went to
+ * the staged truth: `votes++` read base, wrote base+1, and the override it
+ * emitted landed on the value already displayed — a second in-flight
+ * increment made after a sibling's landing was invisible (#2951's compose
+ * half, one landing later). */
+function draftSeesOverrides(target: StoreNextTarget): boolean {
+  return target.pb === null || !tentativePBs.has(target.pb);
 }
 
 /** Committed-time privatization for parent-chain slot updates (path copying). */
 function privatizeCommitted(target: StoreNextTarget): void {
   if (ownedRaw.has(target.v)) return;
-  const clone = cloneRaw(target.v, target);
+  const before = target.v;
+  const clone = cloneRaw(before, target);
   ownedRaw.add(clone);
-  storeNextLookup.set(clone, target);
+  // Register in the target's OWN registration map (#3284): family targets
+  // (derived stores, projections, optimistic) resolve children through
+  // fam.map — a clone parked only in the global lookup makes the next parent
+  // read miss, wrap a fresh target, and orphan every node (subscribers) on
+  // this one.
+  (target.fam?.map ?? storeNextLookup).set(clone, target);
   target.v = clone;
   target.ch = false;
   if (target.u) {
     privatizeCommitted(target.u);
     devAssertNeverUserMutation(target.u.v);
-    target.u.v[target.pk!] = target.v;
+    target.u.v[parentSlotKey(target, before)] = target.v;
   }
+}
+
+/** Resolve the slot this child currently occupies in its parent's committed
+ * backing (#3282). `pk` is stamped at wrap time and arrays MOVE: a reverse/
+ * unshift/splice relocates the raw, and a fold that re-points the wrap-time
+ * slot writes the clone over whichever row lives there now. Objects never
+ * move keys, so the stamp is authoritative; for arrays, verify and re-locate
+ * by identity when stale (fold-time only — never on a read path). */
+function parentSlotKey(target: StoreNextTarget, expected: unknown): PropertyKey {
+  const pk = target.pk!;
+  const pv = target.u!.v;
+  if (pv[pk] === expected || !Array.isArray(pv)) return pk;
+  const at = (pv as unknown[]).indexOf(expected);
+  if (at === -1) return pk;
+  target.pk = at;
+  return at;
 }
 
 function drainFolds(): void {
@@ -548,7 +732,22 @@ function drainFolds(): void {
   const entries = [...foldOlds];
   foldOlds.clear();
   for (const [t, old] of entries) {
+    // A latest()-pull staging holds only until the fold commit: this flush
+    // is committing the batch the pull ran ahead of. Transition holds stay —
+    // they clear when their transition is done (heldMaskView).
+    if (t.ht === PLAIN_HOLD) t.ht = t.hv = null;
     if (t.pb !== null) {
+      // #3089: a fold written under a still-running transition defers to
+      // that transition's settle (the write-time stamp covers unobserved
+      // keys; observed keys also hit the pending-node held check below).
+      const fb = foldBatches.get(t);
+      if (fb !== undefined) {
+        if (currentTransition(fb)._done === false) {
+          foldOlds.set(t, old);
+          continue;
+        }
+        foldBatches.delete(t);
+      }
       // Setter path: nodes were setSignal'd at setter exit (write-time
       // notification — transitions/holds ride core machinery). Commit the
       // backing only for keys whose nodes have committed; a still-pending
@@ -565,6 +764,8 @@ function drainFolds(): void {
           wkh === null ||
           wkh === WK_ALL ||
           t.a === true ||
+          // Overlay pbs chain to the COMMITTED object (#3044) — plainness is
+          // the committed container's prototype, not the overlay's.
           !plainProto(t.ovl ? (t.v as object) : pb)
             ? Reflect.ownKeys(nodes)
             : wkh;
@@ -590,12 +791,7 @@ function drainFolds(): void {
         // — the never-mutate-user-data contract holds.
         privatizeCommitted(t);
         const v = t.v;
-        for (const key of Reflect.ownKeys(pb)) {
-          const d = Object.getOwnPropertyDescriptor(pb, key)!;
-          if (d.get || d.set || !d.enumerable || !d.writable || !d.configurable)
-            Object.defineProperty(v, key, d);
-          else (v as any)[key] = d.value;
-        }
+        for (const key of Reflect.ownKeys(pb)) copyOwn(v, pb, key);
         if (t.del !== null) {
           for (const key of t.del) delete (v as any)[key];
           t.del = null;
@@ -604,6 +800,48 @@ function drainFolds(): void {
         t.pb = null;
         t.ovl = false;
         t.wk = null; // written-keys window closes with the fold commit
+      } else if (t.v !== old) {
+        // Privatized mid-batch (#3271): an earlier fold in this drain
+        // path-copied THROUGH this target — privatizeCommitted cloned the
+        // committed backing, re-pointed the parent slot at the clone, and
+        // stitched the descendant's fold into it. The draft's pb predates
+        // that: swapping it in would clobber the descendant's fold, and the
+        // parent CAS below (still comparing against `old`) would fail and
+        // orphan this fold entirely — a projection draft writing descendant-
+        // then-ancestor silently lost the ancestor write. Merge the batch's
+        // writes onto the current container instead (the parent slot already
+        // points at it). privatize first: an adopt-then-write batch can land
+        // here with an unowned adoptee as t.v.
+        privatizeCommitted(t);
+        const v = t.v;
+        const wk = t.wk;
+        if (wk !== null && wk !== WK_ALL) {
+          // The trap records every write/delete key — apply exactly those.
+          for (const key of wk) {
+            if (hasOwn.call(pb, key)) copyOwn(v, pb, key);
+            else delete (v as any)[key];
+          }
+        } else {
+          // Array length write poisoned the bound (WK_ALL) — value-diff
+          // against the pre-batch old. Slots the draft never touched hold
+          // the same raw reference in both, so descendant folds stay put.
+          // Not copyOwn: the plain-value write is GATED on "the draft changed
+          // this slot" — an untouched slot in pb holds the pre-batch reference,
+          // and writing it back would clobber a descendant fold stitched into v.
+          for (const key of Reflect.ownKeys(pb)) {
+            const d = Object.getOwnPropertyDescriptor(pb, key)!;
+            if (d.get || d.set || !d.enumerable || !d.writable || !d.configurable)
+              Object.defineProperty(v, key, d);
+            else if (d.value !== (old as any)[key] || !hasOwn.call(old, key))
+              (v as any)[key] = d.value;
+          }
+          for (const key of Reflect.ownKeys(old)) {
+            if (!hasOwn.call(pb, key)) delete (v as any)[key];
+          }
+        }
+        (t.fam?.map ?? storeNextLookup).delete(pb);
+        t.pb = null;
+        t.wk = null; // written-keys window closes with the fold commit
       } else {
         t.v = pb;
         t.ch = false; // pb is always a plain clone
@@ -611,18 +849,98 @@ function drainFolds(): void {
         t.wk = null; // written-keys window closes with the fold commit
       }
     }
-    if (t.v === old) continue; // adopted then re-adopted back, or no-op
-    // Path copying (CAS: see the eager-fold twin above).
-    if (t.u && t.u.v[t.pk!] === old) {
-      privatizeCommitted(t.u);
-      devAssertNeverUserMutation(t.u.v);
-      t.u.v[t.pk!] = t.v;
+    const base = t.ab;
+    t.ab = null;
+    if (t.v !== old) {
+      // Path copying (CAS: see the eager-fold twin above). Slot resolved by
+      // identity (#3282): an array move relocated the raw, so the wrap-time
+      // pk may point at a sibling — a raw-slot CAS there both failed to
+      // re-point AND (via privatizeCommitted's unguarded write) clobbered
+      // the sibling.
+      if (t.u) {
+        const slot = parentSlotKey(t, old);
+        if (t.u.v[slot] === old) {
+          privatizeCommitted(t.u);
+          devAssertNeverUserMutation(t.u.v);
+          t.u.v[slot] = t.v;
+        }
+      }
     }
-    if (t.adopted) {
-      t.adopted = false;
-      notifyFold(t, old, t.v);
-    }
+    // Adoption notify against the base the nodes were last told (#3296). A
+    // no-op adoption (A -> B -> A before flush, no draft) has base === v and
+    // nothing to say; a draft superseded by an adoption back to the SAME raw
+    // still has (base = pending backing) !== v and must notify.
+    if (base !== null && base !== t.v) notifyFold(t, base, t.v);
   }
+}
+
+/** Dev: dotted path of a target from its store root (`store.user.address`). */
+function storePath(t: StoreNextTarget): string {
+  let path = "";
+  for (let cur: StoreNextTarget | null = t; cur !== null; cur = cur.u)
+    path = cur.pk === null ? "store" + path : "." + String(cur.pk) + path;
+  return path;
+}
+
+/**
+ * Dev (attribution engine installed): announce written keys whose old and new
+ * values are both containers but different logical slots — the raw material
+ * for the spread-copy diagnostic. The engine owns the verdict.
+ */
+function reportReplacedContainers(
+  t: StoreNextTarget,
+  old: Record<PropertyKey, any>,
+  pb: Record<PropertyKey, any>,
+  writtenKeys: Iterable<PropertyKey> | null
+): void {
+  const keys = writtenKeys ?? Reflect.ownKeys(pb);
+  const isArray = Array.isArray(pb);
+  for (const key of keys) {
+    if (isArray && key === "length") continue;
+    if (t.del !== null && t.del.has(key)) continue;
+    const ov = unwrapValue(old[key as any]);
+    const nv = unwrapValue(pb[key as any]);
+    if (
+      ov === null ||
+      nv === null ||
+      typeof ov !== "object" ||
+      typeof nv !== "object" ||
+      ov === nv ||
+      targetsEqual(ov, nv)
+    )
+      continue;
+    // Leaf census on the store side: leaves read through a draft are proxies
+    // of the committed raws, so identity must be judged on unwrapped values.
+    const isArr = Array.isArray(nv);
+    if (isArr !== Array.isArray(ov)) continue;
+    let total: number;
+    let unchanged = 0;
+    if (isArr) {
+      total = (nv as unknown[]).length;
+      if (total > REPLACED_CENSUS_MAX) continue;
+      const oldItems = new Set<unknown>();
+      for (const item of ov as unknown[]) oldItems.add(unwrapValue(item));
+      for (const item of nv as unknown[]) if (oldItems.has(unwrapValue(item))) unchanged++;
+    } else {
+      const nkeys = Object.keys(nv);
+      total = nkeys.length;
+      if (total > REPLACED_CENSUS_MAX) continue;
+      for (const k of nkeys) if (sameLeaf((ov as any)[k], (nv as any)[k])) unchanged++;
+    }
+    attrHooks!.storeReplaced(
+      storePath(t) + "." + String(key),
+      isArr,
+      total,
+      unchanged,
+      isArr ? (ov as unknown[]).length : Object.keys(ov).length
+    );
+  }
+}
+const REPLACED_CENSUS_MAX = 64;
+function sameLeaf(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  return unwrapValue(a) === unwrapValue(b) || targetsEqual(a, b);
 }
 
 /**
@@ -633,19 +951,6 @@ function drainFolds(): void {
  * "pending home = the node when a node exists"). Unobserved keys stay in the
  * pending backing and fold directly at commit.
  */
-/** Sentinel for `t.wk`: the written-keys bound is unusable this batch (an
- * array length write implicitly deleted indices) — consumers full-scan. */
-const WK_ALL: Set<PropertyKey> = new Set();
-
-/** Plain-prototype check for the written-keys bound: prototype getters on
- * class instances can derive from ANY field, so only plain-data containers
- * may bound the notify to written keys. Overlay pbs chain to the COMMITTED
- * object (#3044), so overlay plainness is judged on the committed proto. */
-const plainProto = (o: object): boolean => {
-  const p = Object.getPrototypeOf(o);
-  return p === Object.prototype || p === Array.prototype || p === null;
-};
-
 function notifyWrites(t: StoreNextTarget): void {
   let pb = t.pb;
   if (pb === null) return;
@@ -700,10 +1005,18 @@ function notifyWrites(t: StoreNextTarget): void {
   // not a full scan). Falls back to the full node scan when the bound can't
   // hold: no trap granularity (wk null), an array length write (WK_ALL —
   // implicit index deletes), accessors on the record (t.a — a getter node's
-  // value can change when ANY key is written), or a non-plain prototype.
+  // value can change when ANY key is written), or a non-plain prototype
+  // (class instances: prototype getters derive from arbitrary fields).
   const wk0 = t.wk;
+  // Overlay pbs chain to the COMMITTED object (#3044): a prototype-overlay
+  // draft is plain data on its own layer, but its getPrototypeOf is the
+  // committed container — judge plainness by the COMMITTED prototype or the
+  // bound never engages for overlay writes (every plain-object setter batch
+  // would full-scan: the exact selection-map workload wk exists for; jf
+  // `select` regressed 2x on this).
   const writtenKeys =
     wk0 === WK_ALL || t.a === true || !plainProto(t.ovl ? (t.v as object) : pb) ? null : wk0;
+  if (__DEV__ && attrHooks !== null) reportReplacedContainers(t, old, pb, writtenKeys);
   if (nodes !== null) {
     const keys: Iterable<PropertyKey> = writtenKeys ?? Reflect.ownKeys(nodes);
     for (const key of keys) {
@@ -738,15 +1051,18 @@ function notifyWrites(t: StoreNextTarget): void {
   }
   const has = t.h;
   if (has !== null) {
-    for (const key of Reflect.ownKeys(has))
-      setSignal(has[key as any], key in pb && !(t.del !== null && t.del.has(key)));
+    const keys: Iterable<PropertyKey> = writtenKeys ?? Reflect.ownKeys(has);
+    for (const key of keys) {
+      const node = has[key as any];
+      if (node !== undefined) setSignal(node, key in pb && !(t.del !== null && t.del.has(key)));
+    }
   }
   // Deep-witness (dk): setter writes must notify a deep() subscriber even on
-  // keys with no node. O(pb keys) equality only when a witness exists.
+  // keys with no node. O(written/pb keys) equality only when a witness exists.
   if (t.dk !== null) {
     if (t.del !== null && t.del.size !== 0) bumpDeep(t);
     else
-      for (const key of Reflect.ownKeys(pb)) {
+      for (const key of writtenKeys ?? Reflect.ownKeys(pb)) {
         const nv = pb[key as any];
         const ov = old[key as any];
         if (nv !== null && typeof nv === "object" ? !targetsEqual(ov, nv) : !isEqual(ov, nv)) {
@@ -786,16 +1102,28 @@ function notifyWrites(t: StoreNextTarget): void {
   //   IMMEDIATE — landed truth shows to untracked readers even while a
   //   downstream consumer's own async still holds the effect-level reveal
   //   (spec-async "verdicts never inherit consumers' in-flight state").
-  if (t.fam !== null && t.pb !== null && getWriteOverride()) {
+  //   EXCEPT under an active transaction (#3164 fold): a landing riding a
+  //   retaining transaction (the optimistic module's aroundWrite binds it)
+  //   stages instead — ensurePB stamped foldBatches, so the backing commits
+  //   with the transaction and the reveal is atomic at settle. The pinned
+  //   immediate-commit contract is stated over the no-transaction microtask
+  //   posture, which `activeTransition === null` is exactly.
+  if (t.fam !== null && t.pb !== null && getWriteOverride() && activeTransition === null) {
+    // Landed truth (post-await write-override): immediately visible to every
+    // reader — any staged held view is superseded.
+    if (t.ht !== null) t.ht = t.hv = null;
     const oldBacking = t.v;
     t.pb = null;
-    t.wk = null; // written-keys window closes with the eager fold
     t.v = pb;
     t.ch = false;
-    if (t.u && t.u.v[t.pk!] === oldBacking) {
-      privatizeCommitted(t.u);
-      devAssertNeverUserMutation(t.u.v);
-      t.u.v[t.pk!] = pb;
+    if (t.u) {
+      // Identity-resolved slot (#3282) — see drainFolds' path-copy twin.
+      const slot = parentSlotKey(t, oldBacking);
+      if (t.u.v[slot] === oldBacking) {
+        privatizeCommitted(t.u);
+        devAssertNeverUserMutation(t.u.v);
+        t.u.v[slot] = pb;
+      }
     }
   }
 }
@@ -810,7 +1138,7 @@ export function targetsEqual(ov: any, nv: any): boolean {
   return ot !== undefined && ot === storeNextLookup.get(nv);
 }
 
-function arrayStructureChanged(old: any[], neu: any[]): boolean {
+export function arrayStructureChanged(old: any[], neu: any[]): boolean {
   if (old.length !== neu.length) return true;
   for (let i = 0; i < neu.length; i++) {
     const ov = old[i];
@@ -820,7 +1148,10 @@ function arrayStructureChanged(old: any[], neu: any[]): boolean {
   return false;
 }
 
-function membershipChanged(old: Record<PropertyKey, any>, neu: Record<PropertyKey, any>): boolean {
+export function membershipChanged(
+  old: Record<PropertyKey, any>,
+  neu: Record<PropertyKey, any>
+): boolean {
   const nk = Reflect.ownKeys(neu);
   if (Reflect.ownKeys(old).length !== nk.length) return true;
   for (const key of nk) if (!(key in old)) return true;
@@ -1029,6 +1360,18 @@ function inOwnerContext(): boolean {
   return eff != null && !(eff._config & CONFIG_CHILDREN_FORBIDDEN);
 }
 
+/** CHILDREN_FORBIDDEN execution scope (createTrackedEffect / onSettled
+ * callbacks). Distinct from context-free: these scopes get committed
+ * visibility even against a projection's authoritative-elect pending
+ * backing (#3082) — parity with signals, where core read() serves
+ * committed to them regardless of staged writes. */
+function inForbiddenScope(): boolean {
+  const c: any = getOwner();
+  if (c === null) return false;
+  const eff = c._root ? c._parentComputed : c;
+  return eff != null && !!(eff._config & CONFIG_CHILDREN_FORBIDDEN);
+}
+
 /** A pending fold is transition-held when any written node's parked value is
  * stamped by a live transition (a plain batch parking — the lazy-recompute
  * read case — has no transition stamp and serves fresh). */
@@ -1048,24 +1391,72 @@ function foldHeld(target: StoreNextTarget): boolean {
 }
 
 function readSource(target: StoreNextTarget): Record<PropertyKey, any> {
-  // Signal-parity visibility (core read(): owner-context reads serve
-  // _pendingValue, context-free reads serve committed — effects recompute
-  // BEFORE commitPendingNodes in the flush, so the pending view must be
-  // servable). Drafts (setter window OR projection write-override) and
-  // owner-context reads see the pending backing; context-free reads see
-  // committed. Node reads apply the same rule, so both homes agree.
+  // Held view first (#3074): an adoption staged under a live hold serves the
+  // pre-hold committed backing to committed-visibility readers. Speculative
+  // readers — drafts, write-override, owner-context computeds recomputing
+  // inside the transaction, and latest() reads — see the adopted backing.
   if (
+    target.ht !== null &&
+    !latestReadActive &&
+    !inDraft(target) &&
+    !getWriteOverride() &&
+    !inOwnerContext()
+  ) {
+    const hv = heldMaskView(target);
+    if (hv !== null) return hv;
+  }
+  return pendingBackingVisible(target, false) ? target.pb! : target.v;
+}
+
+/** The single pb-vs-committed visibility decision (#3147), shared by per-key
+ * backing reads (readSource) and deep()/snapshot composition (snapshotWalk)
+ * so the two reader families can never disagree about a HELD landing.
+ *
+ * Signal-parity visibility (core read(): owner-context reads serve
+ * _pendingValue, context-free reads serve committed — effects recompute
+ * BEFORE commitPendingNodes in the flush, so the pending view must be
+ * servable). Drafts (setter window OR projection write-override) and
+ * owner-context reads see the pending backing; context-free reads see
+ * committed. Node reads apply the same rule, so all homes agree.
+ *
+ * `speculative` is deep()/snapshot's posture: an untrack/deep PEEK that sees
+ * ordinary pending staging regardless of owner context (the documented
+ * divergence from context-free per-key reads) — but never through a hold:
+ * held truth stays masked exactly as it is for per-key readers. */
+function pendingBackingVisible(target: StoreNextTarget, speculative: boolean): boolean {
+  return (
     target.pb !== null &&
     (inDraft(target) ||
       getWriteOverride() ||
-      inOwnerContext() ||
+      // Owner-context (and speculative-peek) readers see the pending
+      // backing — EXCEPT held truth on an optimistic family (#3164 fold):
+      // a live pb on an opt family outside the draft/write-override windows
+      // is a staged landing (tentative drafts never outlive their setter),
+      // and only the authoritative postures and latest() see it (the
+      // backing-level twin of core read()'s A17-for-held-truth arm;
+      // ordinary readers keep committed until the transaction's reveal).
+      ((speculative || inOwnerContext()) && !heldTruthMasked(target)) ||
       // A projection's pending backing is authoritative-elect: serve it to
       // context-free readers too UNLESS a transition is holding the node
-      // commits (downstream async hold — stale committed is the contract).
-      (target.fam !== null && !foldHeld(target)))
-  )
-    return target.pb;
-  return target.v;
+      // commits (downstream async hold — stale committed is the contract)
+      // or the reader is a CHILDREN_FORBIDDEN scope, which never observes
+      // its own unsettled write (#3082, signal parity per #3006).
+      (target.fam !== null && !heldTruthMasked(target) && !foldHeld(target) && !inForbiddenScope()))
+  );
+}
+
+/** #3164 fold: HELD truth on an optimistic family — a pending backing
+ * stamped by a live transition that retains optimism — is masked from
+ * ordinary readers (they keep committed until the transaction's reveal);
+ * the authoritative postures and latest() tunnel through. Un-stamped
+ * backings and optimism-free transitions keep ordinary mid-batch/
+ * speculation visibility. */
+function heldTruthMasked(target: StoreNextTarget): boolean {
+  if (target.fam?.opt !== true || latestReadActive || authoritativeServe()) return false;
+  const fb = foldBatches.get(target);
+  // opt families are only created by createOptimisticStore, whose module
+  // install populates optHooks — the assertion holds by construction.
+  return fb !== undefined && optHooks!.retainsOptimism(fb);
 }
 
 const hasOwn = Object.prototype.hasOwnProperty;
@@ -1102,6 +1493,28 @@ export function hasActiveOverride(node: Signal<any>): boolean {
   return node._x?._overrideValue !== undefined && node._x?._overrideValue !== NOT_PENDING;
 }
 
+/** The reading computation is until()'s authoritative-view predicate — same
+ * source of truth as core read()'s A17 carve-out (`context`, which persists
+ * under untrack). optimisticView()'s composition gate consults exactly this:
+ * write-side machinery (patch emission, tentative re-application) must keep
+ * composing even when it runs inside an authoritative-write bracket. */
+export function authoritativeRead(): boolean {
+  const c = context as any;
+  return c !== null && (c._config & CONFIG_AUTHORITATIVE_READ) !== 0;
+}
+
+/** Serve-side authoritative gate: until()'s predicate PLUS truth authors —
+ * the projection derive's draft (wrapDraft trap brackets, runAuthoritative;
+ * the same posture pair ensurePB classifies drafts by). A source computing
+ * the next truth must never read its callers' tentative overlays: a derive
+ * continuation's `store.push` computing its index from an action's
+ * optimistic row landed truth in the wrong slot and corrupted committed
+ * state (#3108). Trap-level overlay serves gate on this so values, length,
+ * membership, and keys leave the authoritative view together. */
+export function authoritativeServe(): boolean {
+  return projectionWriteActive || getWriteOverride() || authoritativeRead();
+}
+
 /** Context-aware node view for reads outside tracking: active override >
  * held pending (owner context) > the BACKING value. Committed truth lives in
  * the backing (single-home rule, O6) — node `_value` is never served here,
@@ -1110,11 +1523,26 @@ export function hasActiveOverride(node: Signal<any>): boolean {
  * FORCE sentinels never surface (they only bump subscribers of accessor
  * keys, which are served by the trap, not the node). */
 function nodeValue(node: Signal<any>, backing: any): any {
-  const v = hasActiveOverride(node)
-    ? unwrapOverride(node._x?._overrideValue)
-    : node._pendingValue !== NOT_PENDING && inOwnerContext()
-      ? node._pendingValue
-      : backing;
+  // latest() sees the in-flight parked value like an owner-context reader
+  // does (#3075) — signal/memo parity for store-node-backed keys.
+  // Authoritative-view reads (until()'s predicate) skip the override arm
+  // only: staged pending values are authoritative, overrides are the
+  // caller's optimism.
+  const v =
+    !authoritativeServe() && hasActiveOverride(node)
+      ? unwrapOverride(node._x?._overrideValue)
+      : node._pendingValue !== NOT_PENDING &&
+          (latestReadActive ||
+            // Owner-context pending visibility — except HELD truth (#3164,
+            // see CONFIG_HELD_TRUTH: fold-staged or entangle-stolen
+            // confirming truth), which only authoritative/latest readers
+            // see (core read()'s A17-for-held-truth twin; ordinary readers
+            // keep committed until the transaction's reveal — latest() is
+            // exempted by the leading arm above).
+            ((inOwnerContext() || authoritativeServe()) &&
+              !(node._config & CONFIG_HELD_TRUTH && !authoritativeServe())))
+        ? node._pendingValue
+        : backing;
   return v === (FORCE as any) ? backing : v;
 }
 
@@ -1128,7 +1556,8 @@ function serveDataKey(
   key: PropertyKey,
   backingValue: any,
   src: Record<PropertyKey, any>,
-  node?: Signal<any>
+  node?: Signal<any>,
+  accKnown: -1 | 0 | 1 = -1
 ): any {
   const chained = target.ch && src === target.v;
   let v = backingValue;
@@ -1146,13 +1575,18 @@ function serveDataKey(
         readNode(getNode(target, key, backingValue));
       }
     }
-    return (optHooks!.optimisticView(target, src) as any[]).length;
+    // Truth authors read the backing's own length — an optimistic row from
+    // the caller's transaction must not shift where the author's next write
+    // lands (#3108).
+    return ((authoritativeServe() ? src : optHooks!.optimisticView(target, src)) as any[]).length;
   }
   if (inDraft(target)) {
     // Optimistic drafts before their first write have no pending backing yet;
     // reads must still see the live optimistic view (compose, not clobber —
     // #2951). Once ensurePB runs, the seeded clone carries the view.
-    if (target.fam?.opt && target.pb === null) {
+    // AUTHORITATIVE drafts (projection derive) never overlay — ensurePB's
+    // seeding rule, applied to the read side (#3108).
+    if (target.fam?.opt && draftSeesOverrides(target) && !authoritativeServe()) {
       const node = target.n?.[key as any];
       if (node !== undefined && hasActiveOverride(node))
         v = unwrapOverride(node._x?._overrideValue);
@@ -1172,7 +1606,9 @@ function serveDataKey(
         v = nodeValue(node, backingValue);
       }
     } else if (getObserver() !== null) {
-      readNode(getNode(target, key, backingValue));
+      // First tracked read: create + link, and let the wrap-cache branch
+      // below populate px/pxv so read #2 skips wrapNext (slice 2).
+      readNode((node = getNode(target, key, backingValue, accKnown)));
     }
   }
   // Shallow stores serve data raw; store-proxy slots get boundary wrappers.
@@ -1212,6 +1648,28 @@ function firewallGate(target: StoreNextTarget): void {
   if (fw != null && fw._statusFlags & (STATUS_UNINITIALIZED | STATUS_ERROR)) readNode(fw);
 }
 
+/** latest() pull (#3075): bring the projection computed up to date so the
+ * read serves the IN-FLIGHT derivation — signal/memo parity, where core
+ * read() routes latest() through a companion that recomputes speculatively.
+ * The latest flag is suspended for the recompute (the derive's own reads
+ * are normal reads), and latestPullActive marks any adoption it commits as
+ * staged (see adoptPB) — the speculative swap must not leak to
+ * committed-visibility readers before the flush. */
+function pullProjectionForLatest(target: StoreNextTarget): void {
+  const fw = target.fam!.node;
+  if (fw == null) return;
+  const prevLatest = latestReadActive;
+  setLatestReadActive(false);
+  const prevPull = latestPullActive;
+  latestPullActive = true;
+  try {
+    prepareComputed(fw as any, true);
+  } finally {
+    latestPullActive = prevPull;
+    setLatestReadActive(prevLatest);
+  }
+}
+
 const traps: ProxyHandler<StoreNextTarget> = {
   get(target, key, receiver) {
     // One typeof gates every brand-symbol compare off the hot string path
@@ -1239,6 +1697,11 @@ const traps: ProxyHandler<StoreNextTarget> = {
     }
     if (pendingCheckActive) witnessAffectsMark(target as any, key);
     if (target.fam !== null && getObserver() === null && !inDraft(target)) firewallGate(target);
+    // latest() pull (#3075): store traps never reach core read() without an
+    // observer, so bring the projection computed up to date here — signal/
+    // memo parity for latest() reads through a projection.
+    if (target.fam !== null && latestReadActive && !inDraft(target) && !getWriteOverride())
+      pullProjectionForLatest(target);
     const src = readSource(target);
     // Overlay delete (#3044): a prototype overlay cannot shadow a delete, so
     // deleted keys are tracked aside and read as absent in the pending view.
@@ -1250,8 +1713,11 @@ const traps: ProxyHandler<StoreNextTarget> = {
     // tracked read of a present data key — the dbmon/uibench effect re-read
     // shape. Skips serveDataKey's frame, the FORCE compare (only accessor
     // keys ever hold the sentinel), and isWrappable for primitives.
+    // ONE node-map lookup serves this block and the accessor probe below
+    // (nothing between them creates nodes).
+    const node0 = target.n?.[key as any];
     if (target.ch === false && writeScopes === null) {
-      const nodeH = target.n?.[key as any];
+      const nodeH = node0;
       if (nodeH !== undefined && (nodeH as any).acc !== true && getObserver() !== null) {
         let nv = readNodeFast(nodeH);
         if (nv === READ_SLOW) nv = readNode(nodeH);
@@ -1269,11 +1735,18 @@ const traps: ProxyHandler<StoreNextTarget> = {
     }
     // Dev strictRead: untracked store reads in labeled scopes (component
     // bodies, effect callbacks) warn — the value can never update the reader.
+    // `then` is exempt: resolving a promise with a store proxy (refresh()'s
+    // waiter delivers the store, `Promise.resolve(store)`, `return store`
+    // from an async function) makes the engine probe `.then` for
+    // thenable-ness synchronously in the caller's scope. That is not a read
+    // the user wrote, and it must neither warn nor escalate to the pending
+    // throw — a throw out of promise resolution rejects the promise.
     if (
       __DEV__ &&
       strictRead &&
       !inDraft(target) &&
       typeof key === "string" &&
+      key !== "then" &&
       getObserver() === null
     ) {
       // Safeguard parity with core read() (#2897): a component-body read of
@@ -1298,15 +1771,21 @@ const traps: ProxyHandler<StoreNextTarget> = {
     // absent-key/accessor subscriptions for every store read during any
     // derive, leaving nested projections permanently dependency-less when
     // their sources hadn't materialized yet (#3037).
-    const node0 = target.n?.[key as any];
+    // First-read dedupe (create-floor slice 2): remember the probe verdict —
+    // node creation downstream reuses it instead of re-scanning the
+    // descriptor, but only when the probed object IS the one getNode would
+    // scan (pb ?? v).
+    let accProbe: -1 | 0 | 1 = -1;
     {
-      const acc =
-        node0 !== undefined
-          ? (node0 as any).acc === true
-          : !inDraft(target) && getObserver() !== null && isOwnAccessor(src, key);
+      let acc: boolean;
+      if (node0 !== undefined) acc = (node0 as any).acc === true;
+      else if (!inDraft(target) && getObserver() !== null) {
+        acc = isOwnAccessor(src, key);
+        if (src === (target.pb ?? target.v)) accProbe = acc ? 1 : 0;
+      } else acc = false;
       if (acc) {
         if (!inDraft(target) && getObserver() !== null)
-          readNode(node0 ?? getNode(target, key, undefined));
+          readNode(node0 ?? getNode(target, key, undefined, accProbe));
         const v = Reflect.get(src, key, receiver);
         if (target.s) return serveShallow(target, key, v);
         return isWrappable(v) ? draftServe(target, wrapNext(v, target, key)) : v;
@@ -1336,14 +1815,22 @@ const traps: ProxyHandler<StoreNextTarget> = {
       // Reading a currently-absent own key subscribes to it (R12) — for any
       // target OUTSIDE its own draft scope, even mid-setter (#3037, above).
       if (v === undefined && !inDraft(target)) {
-        if (getObserver() !== null) readNode(getNode(target, key, undefined));
+        if (getObserver() !== null) readNode(getNode(target, key, undefined, accProbe));
         const node = target.n?.[key];
         if (node) {
           const nv = nodeValue(node, undefined);
           if (target.s) return serveShallow(target, key, nv);
           return isWrappable(nv) ? draftServe(target, wrapNext(nv, target, key)) : nv;
         }
-      } else if (v === undefined && inDraft(target) && target.fam?.opt && target.pb === null) {
+      } else if (
+        v === undefined &&
+        inDraft(target) &&
+        target.fam?.opt &&
+        draftSeesOverrides(target) &&
+        // AUTHORITATIVE drafts (landing folds) never seed from overrides —
+        // the caller's optimism is not truth (has-trap twin below).
+        !authoritativeServe()
+      ) {
         const node = target.n?.[key];
         if (node !== undefined && hasActiveOverride(node))
           v = unwrapOverride(node._x?._overrideValue);
@@ -1357,7 +1844,7 @@ const traps: ProxyHandler<StoreNextTarget> = {
       !(viewOvl && hasOwn.call(target.v, key))
     )
       return v; // proto method
-    return serveDataKey(target, key, v, src, node0);
+    return serveDataKey(target, key, v, src, node0, accProbe);
   },
 
   has(target, key) {
@@ -1371,14 +1858,16 @@ const traps: ProxyHandler<StoreNextTarget> = {
     if (!inDraft(target)) {
       if (getObserver() !== null) {
         const node = getHasNode(target, key, present);
+        // Authoritative-view readers get the right answer for free: core read()
+        // skips the override arm for them, so nv is authoritative presence.
         const nv = readNode(node);
         if (hasActiveOverride(node)) present = !!nv;
-      } else {
+      } else if (!authoritativeServe()) {
         const node = target.h?.[key as any];
         if (node !== undefined && hasActiveOverride(node))
           present = !!unwrapOverride(node._x?._overrideValue);
       }
-    } else if (target.fam?.opt && target.pb === null) {
+    } else if (target.fam?.opt && draftSeesOverrides(target) && !authoritativeServe()) {
       const node = target.h?.[key as any];
       if (node !== undefined && hasActiveOverride(node))
         present = !!unwrapOverride(node._x?._overrideValue);
@@ -1405,8 +1894,14 @@ const traps: ProxyHandler<StoreNextTarget> = {
     // Optimistic membership overlay: presence-node overrides add/remove keys
     // (per-transaction lifecycle rides the nodes — §6, FINDING-2's fix).
     // Draft reads before the first write overlay too (pb, once created, is
-    // seeded with the view).
-    if (target.fam?.opt && target.h !== null && (!inDraft(target) || target.pb === null)) {
+    // seeded with the view). Authoritative-view reads (until()'s predicate,
+    // truth-author drafts) skip the overlay.
+    if (
+      !authoritativeServe() &&
+      target.fam?.opt &&
+      target.h !== null &&
+      (!inDraft(target) || draftSeesOverrides(target))
+    ) {
       let set: Set<PropertyKey> | null = null;
       for (const key of Reflect.ownKeys(target.h)) {
         const node = target.h[key as any];
@@ -1429,7 +1924,7 @@ const traps: ProxyHandler<StoreNextTarget> = {
       if (target.del !== null && target.del.has(key)) return undefined;
       if (desc === undefined) desc = Object.getOwnPropertyDescriptor(target.v, key);
     }
-    if (target.fam?.opt && !inDraft(target)) {
+    if (!authoritativeServe() && target.fam?.opt && !inDraft(target)) {
       const node = target.h?.[key as any];
       if (node !== undefined && hasActiveOverride(node)) {
         if (!unwrapOverride(node._x?._overrideValue)) return undefined; // opt delete
@@ -1602,22 +2097,22 @@ setNextAffectsNodeResolver((t: StoreNextTarget, key: PropertyKey) =>
 );
 
 export function createStoreNext<T extends Record<PropertyKey, any>>(
-  init: T,
+  initialValue: T,
   shallow = false
 ): [T, SetStoreNextFunction<T>] {
   if (shallow && __DEV__) {
     // Never both deep-wrapped and raw (R41/R44): a value already tracked as
     // a DEEP store cannot be ingested shallow.
-    const existing = storeNextLookup.get(init);
+    const existing = storeNextLookup.get(initialValue);
     if (existing !== undefined && !(existing as any).s)
       throw new Error("createStore({ shallow }): value is already tracked as a deep store");
-    if ((init as any)[$TARGET])
+    if ((initialValue as any)[$TARGET])
       throw new Error("createStore({ shallow }): value is already a store proxy");
   }
-  const proxy = wrapNext(init);
+  const proxy = wrapNext(initialValue);
   if (shallow) {
     ((proxy as any)[$TARGET] as StoreNextTarget).s = true;
-    markRawIngest(init);
+    markRawIngest(initialValue);
   }
   if (__DEV__) registerGraph(proxy, getOwner());
   const setter: SetStoreNextFunction<T> = fn => storeSetterNext(proxy, fn);
@@ -1629,17 +2124,42 @@ export function createStoreNext<T extends Record<PropertyKey, any>>(
 // Sees pending (R27) by reading pb. Chained/owned-copy caching lands with the
 // utilities increment; this covers the createStore-suite contract.
 
-function isNextProxy(value: any): boolean {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    (value as any)[$TARGET] !== undefined &&
-    ((value as any)[$TARGET] as StoreNextTarget).px === value
-  );
+/** True when `proxy` is a SHALLOW store (children served verbatim, slots
+ * replaced by reference — #2932). The list driver uses this to choose the
+ * slot-patch channel (collected row bodies) over per-record registration. */
+export function storeIsShallow(proxy: any): boolean {
+  const t: StoreNextTarget | undefined = proxy?.[$TARGET];
+  return t !== undefined && t.s === true;
+}
+
+/** True when `proxy` belongs to a projection/optimistic FAMILY. The list
+ * driver must DECLINE family arrays (external audit finding): family
+ * structural changes never emit row/slot ops (the setter channel is
+ * fam-gated; optimistic writes ride node overrides), and the proxy identity
+ * is stable so the each-watch cannot catch the change either — an engaged
+ * list would freeze on optimistic/projection structural updates. Record-
+ * level family patches are unaffected (they have their own emission). */
+export function storeHasFamily(proxy: any): boolean {
+  const t: StoreNextTarget | undefined = proxy?.[$TARGET];
+  return t !== undefined && t.fam !== null;
+}
+
+/** True when `proxy` belongs to an OPTIMISTIC family specifically. The list
+ * driver declines these (audit finding, narrowed): optimistic user writes
+ * ride node-level overrides — they never enter the reconcile walk, so no
+ * row/slot ops are emitted and an engaged list would freeze on optimistic
+ * structural changes. PROJECTION (non-optimistic) families are drivable:
+ * their recomputes go through the reconcile walk, whose emissions are
+ * transition-stamped in the apply queue like any other (equivalence-matrix
+ * gated). Re-admitting optimistic families requires a lane-timed structural
+ * emission mirroring emitPatchOptimistic, plus revert resync. */
+export function storeHasOptimisticFamily(proxy: any): boolean {
+  const t: StoreNextTarget | undefined = proxy?.[$TARGET];
+  return t !== undefined && t.fam?.opt === true;
 }
 
 /** Tracking deep snapshot (`deep()` for next targets): subscribes to the
- * key-set and every property node at every reachable level, then returns the
+ * key-set and deep-witness node at every reachable level, then returns the
  * plain view. Shared references and cycles handled via the visited set. */
 export function deepNext<T>(value: T): T {
   const t0: StoreNextTarget | undefined = (value as any)?.[$TARGET];
@@ -1657,8 +2177,26 @@ export function deepNext<T>(value: T): T {
     readNode(getKeySetNode(t));
     readNode(getDeepNode(t));
     const map = t.fam?.map ?? storeNextLookup;
-    for (const key of Reflect.ownKeys(src)) {
-      const desc = Object.getOwnPropertyDescriptor(src, key);
+    // Overlay pending backings chain to the committed object (#3044): their
+    // OWN keys are only this batch's writes. A bare ownKeys walk mid-flush
+    // (effects recompute before the fold commits) missed every untouched
+    // child, so the re-subscribing effect dropped those records from its
+    // dependency set — later child edits never notified it (#3283). Merge
+    // committed keys, minus deletes, exactly as the ownKeys trap does.
+    let keys = Reflect.ownKeys(src);
+    if (t.ovl && src === t.pb) {
+      const merged = Reflect.ownKeys(t.v);
+      const del = t.del;
+      const filtered =
+        del !== null && del.size !== 0 ? merged.filter(key => !del.has(key)) : merged;
+      for (const key of keys) {
+        if (!hasOwn.call(t.v, key)) filtered.push(key);
+      }
+      keys = filtered;
+    }
+    for (const key of keys) {
+      const desc =
+        Object.getOwnPropertyDescriptor(src, key) ?? Object.getOwnPropertyDescriptor(t.v, key);
       if (desc === undefined) continue;
       if (desc.get || desc.set) {
         t.a = true;
@@ -1713,10 +2251,15 @@ function snapshotWalk(value: any, seen: Map<object, any>, fam: StoreNextFamily |
     if (t === undefined) break;
     if (t.fam !== null) fam = t.fam;
     if (t.fam?.opt === true) (optOwners ??= []).push(t);
+    // The shared visibility decision (#3147): the speculative peek serves
+    // pending staging, but a HELD landing is masked to committed exactly as
+    // it is for per-key readers — the two families must answer alike while
+    // a transaction holds store landings.
+    const usePB = pendingBackingVisible(t, true);
     // Snapshot runs mid-flush (tracked memos execute before commit), so a
     // pending prototype overlay must present as a REAL merged container.
-    if (t.ovl) materializePB(t);
-    const backing = t.pb ?? t.v;
+    if (usePB && t.ovl) materializePB(t);
+    const backing = usePB ? t.pb! : t.v;
     if (backing === src) break;
     src = backing;
   }

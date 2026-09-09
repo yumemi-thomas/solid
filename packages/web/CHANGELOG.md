@@ -1,5 +1,448 @@
 # @solidjs/web
 
+## 2.0.0-rc.7
+
+### Patch Changes
+
+- 7c14e23: Attribution: write provenance — who performed a change.
+
+  Every root `ChangeRecord` now carries `origin`: the imperative frame that made the write. `interaction` (a user event — type, described target such as `button#next "Next →"`, and dispatch time), `effect` (the callback's name), `action` (the generator's name), `async` (the landing's node), or `external` (timers, sockets, promise callbacks — including writes after an `await` rather than a `yield` inside an action, the documented transaction escape). Frames nested under an interaction carry it: an action a click started (every step, including post-`yield` resumptions), an effect whose run a click's write caused, an async flight a click's write launched. Why-chains print the origin after the write; `RerunEvent.interaction` and `HoldEvent.interaction` expose the interaction a run or hold traces back to, and `SILENT_HOLD` now opens with what the user did and measures the wait from the event, not from the first parked flush.
+
+  `@solidjs/web` declares the interaction around its two dispatch sites — delegated events (`onClick`, `onInput`, `onKeyDown`, pointer events: every INP-relevant type) and runtime-attached direct handlers (spreads, non-literal handler expressions) — via the new `DEV.attribution.withInteraction(ref, fn)`, which custom renderers and test harnesses can call themselves. New core dev hooks `effectRunStart`/`effectRunEnd` (replacing `effectRun`) and `actionStepStart`/`actionStepEnd`; all sites fold out of prod, verified byte-identical against the size scenarios.
+
+- 1226381: Bind `GET()` grants to the function identity they were declared about (#3237). The grant — GET/HEAD dispatch plus the CSRF origin-gate exemption — was keyed by id alone, so `register -> register -> GET(oldReference)` handed the NEW function cross-site GET execution on the strength of a declaration the old one signed. The grant now records the declared function, and a single `declaresRead(id)` check governs both dispatch and the 405 `Allow` advertisement; a stale or unverifiable declaration fails closed (GET refused, POST + origin gate required). A declaration or `withMeta({ method })` write that would change an existing grant's binding throws in dev and fails closed in prod, never silently rebinds.
+- 7009adf: Bound the request body cap by the bytes actually received: a conforming Content-Length under the limit no longer skips the counting read, so an under-declared body cannot stream past `bodySizeLimit` into the decoder, and the abort/teardown coupling for abandoned uploads now covers declared-length POSTs too (#3236).
+- ef2b02c: Internal cleanup with no behavior change: inline four single-use helpers (`hasContext`/`isUndefined`, `markCovered`, `shallowWithSymbols`), delete two dead ones (`isNextProxy`, `ownEnumerableKeysPlain`), and collapse `spread()`'s nullish-source handling into one accessor closure. A few dozen bytes off the app scenarios.
+- a14c138: Dedupe the requested single-flight source ids to a first-seen-order set at entry, so a repeated id runs its collector once and echoes once in the response header instead of multiplying work by the caller-controlled list length (#3251)
+- bd22ac8: Rename the three legacy client dev artifacts to the `<entry>.dev.{js,cjs}` convention every other dev build already uses: `solid-js/dist/dev.*` → `dist/solid.dev.*`, `@solidjs/web/dist/dev.*` → `dist/web.dev.*`, `@solidjs/universal/dist/dev.*` → `dist/universal.dev.*`. With server dev builds now shipping as `dist/server.dev.*`, a bare `dev.js` no longer says which entry it is the dev build of. The `exports` maps are updated; only code deep-importing `dist/dev.js` directly (bypassing `exports`) is affected.
+- 6c8c956: Diagnostics console addressability: compiled JSX binding effects (attribute, class, style, property, spread, insert) are tagged in dev with the element they write, and a console diagnostic about such an effect prints that element as a second argument — hover highlights it on the page, click jumps to it in the Elements panel. Why-chains (`DEV.attribution.enable()` logging) print as collapsed console groups, one headline per run with the causes inside. The once-per-code footer now pairs the installed skill path with the file's stable GitHub URL, anchored to the code's section.
+- c08e974: Document the per-handler `wrapInvocation` option as entry-only (#3240). Ruled: entry-only semantics are kept — the option wraps exactly the invocation the request addressed, and nested direct server-function calls made by the dispatched body are not re-wrapped by it; hop-by-hop policy belongs to the configured (ambient) hook, which wraps every direct call. TSDoc only, no runtime behavior change; the boundary is now pinned by a regression test.
+- fbe5bef: Encrypt the no-JS flash cookie (#3239). The flash carries the submitted form input — whatever the user typed — so its payload is now AES-GCM encrypted under a key derived (domain-separated) from the deployment secret: `configureServerFunctionsServer({ secret })`, falling back to the `globalThis.__SOLID_SECRET__` value the Solid bundler plugin injects into server builds. With no secret configured the outcome is withheld rather than sent in the clear (the post still redirects; dev builds warn once). Decryption failure — a tampered cookie, a rotated secret — reads as "no flash". The cookie now also carries `SameSite=Lax` and `Max-Age=60`, and `encodeFlashCookie`/`decodeFlashCookie` are async.
+- 292bdc5: Enforce provideEvent's exactly-once contract on direct SSR calls too: the invocation count #3172 added to HTTP dispatch now guards both legs through a shared `provideEventOnce` seam, so a hook that double-invokes or skips the callback fails loudly during a render instead of silently double-committing a mutation or answering `undefined`, while synchronous direct calls keep returning their value synchronously (#3246).
+- 285a717: Defuse the promise the decoder's abort sweep is about to reject (#3267). A `PromiseConstructor` node whose ref id collides with an already-assigned id (or is malformed) throws mid-registration, leaving a `{p, s, f}` deferred in the decoder's refs whose promise `ownDecodedPromises` never claimed — the deferred is not itself a Promise. The end-of-stream sweep then rejected that promise with no owner, and under Node's default policy one unauthenticated POST with a crafted argument body ended the process after the request was already refused 400. The sweep now takes ownership of `.p` before rejecting it, covering every promise it touches regardless of how the entry reached refs.
+- 8f11ea7: Guard failure channels under an Error carrier's non-enumerable own data slots (#3268). The #3235 guard walked Error carriers with `Object.keys`, but seroval encodes an Error's own properties through `getOwnPropertyNames` — so a rejected promise or erroring stream parked on a non-enumerable slot (`cause` is non-enumerable by spec since ES2022, and the ordinary place a wrapped driver error carries its context) was encoded without ever being walked: its failure reason rode the wire verbatim on a committed 200, and the rejection had no owner. The guard now descends an Error's own string-keyed data slots, enumerable or not. Hidden accessors remain the codec's read (47995412's pinned ruling): the walk still does not invoke what the author hid.
+- d0ca3a4: The no-JS flash cookie now records the UNBOUND function base as the submission's `url` — the request's pathname (`<endpoint>/<id>`), never the query. A `.with()`-bound form's action url carries its bound arguments in `?args=…`, and integrations match submissions against the action's unbound base (the router's `s.url === fn.base`): a flash url wearing the binding stored, decoded, and then matched nothing on the post-redirect render. The seed now matches the scripted submission shape exactly — the base as `url`, bound arguments prepended to `input` (which the argument parser's `?args` prepend already provided).
+- b6a90f9: Fix `deferStream` being a silent no-op inside a code-split `lazy()` component (#3299). A module load is code, not data: the shell's "no new async discovered during the sync render" rule cannot be evaluated for a segment whose code has not run, so the shell now waits for the chunk even under a `<Loading>` (the boundary still owns the data the loaded code discovers — plain async streams behind the fallback as before, and a `deferStream` read inside the chunk holds the shell exactly like one in an eagerly imported component). Only the first render that reaches an un-preloaded chunk pays; a lazy mounted by a post-shell fragment streams as before.
+
+  Also closes a gap in the flush loop where a shell blocker registered while a boundary resumed during the drain — after the awaited set had settled but before the flush attempt snapshotted it — was never re-awaited.
+
+  `dynamic()` keeps streaming its source by default (a source is data of unknown cost) and gains a `deferStream` option to opt into holding the shell on it, with the same meaning as `createMemo`'s.
+
+- 6164667: Fix a lone reactive spread crashing when its source is `null` or `undefined` (#3297). `<input {...props()} />` compiles to `spread(el, props)` with the accessor passed through, so an absent optional props object threw inside `spread()` (and `ssrElement` on the server) and halted the app's updates. A nullish source is now an empty spread: attributes applied by the previous value are removed and reactivity continues.
+- b64071c: Render textarea values supplied through SSR spreads as text content rather than invalid HTML attributes.
+- b3586e8: Validate document-shell templates in the document context (#3259). The `validate` pass round-trips templates through a body-context fragment parse, which strips `<html>`/`<head>`/`<body>` wrappers no matter how well-formed the markup — so once #3099 made validate failures compile errors, a root component owning the document shell failed to compile in plain client mode, and merely importing it (the jsdom component-test configuration) was fatal. Shell-rooted templates now parse as a document and the shell element is compared back — the analogue of the synthetic `<table>` wrap for table partials, in both the Babel plugin and the native compiler. Genuine restructuring (an implied `<head>`, flow content in `<head>`, a `<p>` split in `<body>`) still errors. Since `<template>` parsing flattens shells, actually client-creating one now throws a descriptive dev-mode error from `template()` pointing at `hydrate()` — the failure moved from every import to the one broken act.
+- f21e060: Flash falsy no-JS outcomes (`0`, `false`, `""`, `null`) instead of silently dropping them: the flash decode and the no-JS handler now decide structurally (result presence, `Response` shape) rather than by truthiness, and dispatch no longer erodes a returned `null` to `undefined` on its way to the handler; an `undefined` outcome keeps its current no-cookie behavior pending ruling (#3248)
+- ecdfc3a: An awaited `renderToStream(...)` result now freezes the request's response head at completion — the render commits `event.response` right before its final dispose — so `httpStatus`/`httpHeader` declarations survive into `createSSRResponse(html, event)`, which sees the already-committed stub and passes it through. Previously the thenable disposed the render owner before resolving, while the head was still open, so every scope-tied declaration's cleanup retracted it: a page calling `httpStatus(404)` rendered through `await renderToStream(...)` came back as a 200 and its `httpHeader` writes vanished. The piped forms are unchanged (they already froze at shell flush), and so are the retraction semantics themselves — a scope disposed mid-render, such as an errored boundary that recovered, still retracts its declarations. Integrations no longer need to commit the stub from `onCompleteAll` to work around this.
+- 5cee0f7: Guard enumerable failure channels carried on Error results: the result-encoding guard walk now descends Error-prototyped carriers (which seroval encodes with their own properties) so a rejecting promise, erroring stream, or throwing iterable assigned onto a returned Error is sanitized and torn down like any other channel, while the carrier keeps its prototype, message, and own data (#3235).
+- 6bb51c9: Keep `-0` off the server-function JSON fast path. `JSON.stringify(-0)` is `"0"`, so a signed zero admitted by `isJSONSafe` rode the fast path and arrived as `+0` — a silent sign flip on the exact guard that already refuses `NaN` and the infinities for the same reason. `-0` now answers "not JSON-safe" and rides the codec, which spells it exactly, on both legs (argument lists and results).
+- ff2ecf1: Own every promise the server-function decoder mints. A rejected promise decoded out of a peer's payload — a rejection frame arriving mid-stream, or an atomic rejected-promise node settling synchronously during decode — had no owner when the consumer never read (or abandoned) the slot, and escaped as an unhandled rejection that ends a Node consumer under its default policy. The decoder now attaches a noop rejection handler at mint time, mirroring the encode side's `guardedPromise` ownership (#3216); real consumers still observe the rejection unchanged.
+- c0bc9ba: Adopt a `transformFlightResult` Response via the ownership seam (`ownResponse`) before stamping the mutation's cookies and accumulated headers onto it, so a Response the integration retains (a memoized shell) never accumulates one caller's session cookies and serves them to the next (#3234, completing #3155)
+- ace227e: Canonicalize resource identity qualifiers instead of comparing raw prop values, so two declarations of one request dedupe to one `<link>` on both sides of hydration.
+
+  `false` now means absent, matching both attribute writers: `crossorigin={cond && "anonymous"}` no longer emits a second, byte-identical link when the condition is false.
+
+  `crossorigin` is compared by its CORS state rather than its spelling. It is a CORS settings attribute with three states — absent is No CORS, `use-credentials` (ASCII case-insensitive) is Use Credentials, and every other present value including `""`, a bare attribute and an invalid one is Anonymous — so the same font is no longer preloaded once per spelling, and the client adopts the server's link instead of mounting a second one for a request the browser already has.
+
+  Qualifier values are length-prefixed, so a value containing the identity delimiters can no longer collide with a different qualifier set and silently suppress another resource (`type: "a:media=b"` and `type: "a", media: "b"` were one identity).
+
+  Client-side adoption of a mount-once head resource now matches a server-emitted element on the full request identity rather than the href alone: two preloads sharing an href still differ if their destination, CORS mode, type, media or source set differ. The document client, the standalone frame client and the server all apply the same rules.
+
+- b7b17ab: Make `extractBody` own the stream it decodes: the body is read where it lies, never from an internal clone. An unread tee branch queues the whole payload in memory for the life of the read and defeats backpressure and cancellation — the same ownership defect fixed for the upload leg in `bufferBodyWithin` (#3217–#3219). `decodeResponse` keeps its documented contract (an integration's response stays readable) by cloning at its own entry — a branch that is then read in full; the client transport decodes the response it owns directly, and the server's argument road reuses its one deliberate clone (kept so `event.request` stays readable) for the empty-body inspection instead of teeing again. This is the clone half of #3244 only; connection teardown on completion is deliberately not included.
+- ed6b605: Throw a clear configuration error for invalid `wrapInvocation` values (#3238). A value other than a function or `undefined` — `null`, `false`, an options bag in the wrong slot — used to fail in the quietest available direction: falsy values silently took per-invocation policy (auth, logging) off the call, truthy non-functions threw a bare "not a function" mid-dispatch. The hook is now validated at the point it is resolved for an invocation, on both roads (HTTP dispatch and direct SSR calls), with an error naming `wrapInvocation` and the received type; `undefined` stays the one spelling of absence.
+- 6c9f8f4: Refuse an unrecognized `X-Server-Function-Format` tag before the decode switch runs. The content-type sniffing branches (there for untagged form posts) matched regardless of the tag, so a body tagged with a format this build has no case for — version skew from a newer peer, or a duplicated header that `Headers.get` joins into one unknown value — was silently reinterpreted as a form and the function ran on an argument it was never sent. Such bodies now answer 400 before dispatch, with a development message naming version skew; untagged bodies keep the sniffing, and an untagged empty body stays a zero-argument call (#3214).
+- 3393fb6: Refuse to flash when no storable cookie exists for a no-JS outcome (#3249). The degrade ladder (#3137) bounds the input echo and the result but never looked at `url` — pathname + search of a request the caller chose — so a long enough form action pushed the fully-degraded payload past the ~4 KB cookie ceiling and the encoder emitted a cookie the browser discards whole, with `truncated: true` inside asserting a degradation that never stored. `encodeFlashCookie` now returns `null` when even the degraded payload cannot fit, and the no-JS handler falls back to the plain redirect — never an oversized cookie, never a url truncated to a prefix that would attach the outcome to a submission it does not identify. Cookie naming, attributes, and refusal/redirect statuses are untouched (#3239, #3250 pending).
+- d601119: Remove the experimental patch channel and patch-mode list driver (always opt-in, never default). Graph-native regions own value delivery and the unified-For design owns list structure, so the channel's parallel delivery machinery is retired: `patch.ts`/`patch-driver.ts` deleted, the compiler-contract exports (`registerPatch`/`registerRowOps`/`registerSlotPatch`/`patchableRaw`, `patchDriver`/`rowProof`/`driveList`) removed, the `patchDriver` compiler option dropped from both compilers, the insert `$ll` seam stripped, and the write-side channel struct dieted to the single written-keys bound (`t.wk`) the core fold/notify paths actually use. Store-family app bundles reclaim up to ~900 B brotli; every measured tier shrinks.
+- ace227e: Support `imagesrcset` and `imagesizes` in typed image preloads, including the standard form without `href`. Candidate URLs inside `imagesrcset` must already be resolved by the integration.
+
+  The responsive pair is image-only. On any other destination the attribute is dropped and the link still ships — an integration that computes `imagesrcset` for every asset keeps its script and style preloads. An empty or non-string value counts as absent for the same reason, so a source set is never emitted as garbage the browser cannot parse. A descriptor whose only source was such a filtered attribute is dropped entirely rather than emitted as a `<link rel="preload">` with nothing to fetch.
+
+  `mountHeadResource` can adopt a source-set link: it has no href, so it matches a server-emitted link on a null href plus the identity qualifiers — the rule the frame client already applied.
+
+  Development builds warn when `imagesrcset` uses a width descriptor without `imagesizes` (the source size falls back to `100vw`, so the preload can miss the image the `<img>` selects), and when a manifest source set carries a relative candidate — candidates are not joined with `_base`, so they resolve against the document URL whichever base the manifest declares. That check walks the source set the way the spec's parser does, so commas inside a candidate URL are not mistaken for candidate separators.
+
+- d2b50e9: Revert #3187's deferred element creation in `Dynamic`. String-component `Dynamic` is once again an element at component creation on the client — `spread` and `ref` callbacks run then, matching the hydration path — instead of a thunk materialized by the consuming `insert()`. The deferral moved ref writes into the render phase of the flush for `<Dynamic>` inside `<Portal>`, where `createTrackedEffect` readers never observed them (#3291: every Kobalte popper rendered unpositioned). The namespace of ambiguous tags (`a`, `script`, `style`, `title`) rendered through `Dynamic` inside SVG content is an accepted limitation, as in 1.x; use a static element for those.
+- 84a94bc: Scope deferred work nested inside plain-object and array carriers to the producing call's request event (#3241, completing #3222). The HTTP road already applied the wrapping in the encoded representation (the guard walk's rebuilt shells); the direct SSR road only looked at the returned value itself, so `return { rows: cursor() }` ran its generator under the render's ambient event — two concurrent direct calls read and wrote each other's `locals`, and the render's own. The direct road now descends plain-object/array carriers and hands the caller a shallow-rebuilt carrier with the bound wrappers in the deferred slots; the user's returned containers are never written into, and results with nothing deferred keep their identity. Set/Map members, class instances, and frozen/non-writable slots are deliberately out of the carrier set (pinned by test): bodies reached through them stay bound to nothing, as before.
+- 80ff52e: Add development server builds — `dist/server.dev.*` for `solid-js` and `@solidjs/web`, and `frames/dist/server.dev.*` — selected by the `development` export condition nested under `node`/`worker`/`deno` (nesting is required: those conditions precede the top-level `development` key, so a top-level entry never matched on a server). Until now SSR had no dev build: the only server artifact was built with `_SOLID_DEV_` stripped, so the server runtime's dev checks (head/preload descriptor validation, `useHead` warnings, the committed-response header guard) never ran outside the test suite.
+
+  The server entries now gate their public dev flags on the same `_SOLID_DEV_` replace as their internals instead of hard-coding them: `solid-js`'s server `DEV` is `@solidjs/signals`' `DEV` object in the dev artifact (so `DEV.diagnostics.subscribe`/`capture` work server-side) and `undefined` in prod; `@solidjs/web`'s server `isDev` is `true` in the dev artifact and `false` in prod.
+
+  Behavior change for dev SSR hosts that pass the `development` condition (Vite dev does by default): a header write after the response has committed now **throws** with the offending header named, where the production artifact continues to `console.error` and drop the write.
+
+  Also runs `replaceDev(false)` on `solid-js`'s production server build so a future `_SOLID_DEV_` gate in `src/server/` cannot constant-fold into the dev branch in production.
+
+- a1ff286: Run `transformResult` for plain thrown errors as its documentation already promises: the hook now runs once at the thrown path's entry (`context.thrown` set) for every thrown value — not only thrown Response/envelope shapes — and the response tail is selected from its output, while the wire stays sanitized and a hook that itself throws is contained as a sanitized 500 (#3247).
+- Updated dependencies [215de3b]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [7c14e23]
+- Updated dependencies [c6c415b]
+- Updated dependencies [bd22ac8]
+- Updated dependencies [6c8c956]
+- Updated dependencies [d5aba4b]
+- Updated dependencies [3ae0ca0]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [6c8c956]
+- Updated dependencies [1a1e2f2]
+- Updated dependencies [b6a90f9]
+- Updated dependencies [3424f9a]
+- Updated dependencies [6c8c956]
+- Updated dependencies [f4d3c87]
+- Updated dependencies [d601119]
+- Updated dependencies [ac5159a]
+- Updated dependencies [de1c8b5]
+- Updated dependencies [80ff52e]
+- Updated dependencies [01e3a57]
+- Updated dependencies [6c8c956]
+  - solid-js@2.0.0-rc.7
+
+## 2.0.0-rc.6
+
+### Patch Changes
+
+- ee73e05: Treat adapter-provided empty POST streams as zero-argument server function calls while continuing to refuse non-empty or invalidly tagged bodies.
+- c7c0ffb: `provideEvent`'s invocation contract is enforced at HTTP dispatch (#3172). A hook that invoked the callback twice double-committed a mutation under a 200, and one that never invoked it answered a void success without running the function. A second invocation is now refused before the function body runs again, and both violations fail the request with a sanitized 500 (the hook is named in development), re-checked after the hook returns so a swallowed refusal cannot answer 200.
+- a964f03: A 2xx the client transport cannot recognize now fails the call instead of resolving as `undefined` (#3173, revisiting #3087). A captive portal, WAF interstitial, or misrouted SPA index answering 200 with HTML was indistinguishable from a void result; the transport now requires a success response to carry the runtime's body-format tag (stamped on every encoded response, void included) or the verbatim-passthrough marker, and rejects anything else with the status and content-type named. Genuine void results and raw passthroughs are unaffected; the header alone is judge, never the body.
+- 67bf03d: Handle primitive class values consistently between static, dynamic, and array forms (#3189). Dynamic numeric class values now stringify like the compiler's static template output on both client and server, and standalone booleans inside class arrays are ignored per clsx-style composition instead of emitting a literal "true" class.
+- 7d559bf: Eager JSX evaluated during hydration whose template claim misses (e.g. stored in a variable behind an initially false `<Show>` — the server allocated its hydration ids but never rendered it) now materializes its dynamic inserts like a client render, so revealing the detached subtree later produces fully initialized DOM (#3163). Text-node adoption during hydration is restricted to nodes actually being claimed (connected or under a claim root).
+- 8f26066: Preserve statically selected options when a dynamic `multiple` expression on `<select>` is initially truthy (#3179). The template parses under single-select rules before the binding effect runs, so the first truthy `multiple` write now restores selectedness from the options' defaults, matching the static attribute. Later toggles keep the live selection state, exactly like toggling the attribute on static markup.
+- 3c357fb: Create ambiguous SVG tags (`a`, `script`, `style`, `title`) in the SVG namespace when Dynamic renders them inside SVG content during client rendering (#3187). Dynamic intrinsic elements now materialize lazily inside the insert() that renders them, where the live insertion parent provides the namespace hint — matching how the parser resolves these tags in static templates and server-rendered markup (children of `foreignObject` stay HTML).
+- e220cfa: Stop buffering aborted or refused server-function uploads and answer broken request bodies cleanly.
+- a1a68a7: Default server-function error-stack serialization from the compiled development variant
+- bbff5e0: Direct `value`/`checked` (and other stateful DOM property) bindings no longer overwrite pre-hydration user input during the hydration claim pass (#3182). Hydratable compiled output now routes locked DOM properties through `setProperty`, which skips writes on hydrating nodes and carries the `<select value>` microtask and input/textarea nullish special cases.
+- c21b0a4: Reactive style bindings (`style()` and `setStyleProperty()`) no longer overwrite server-rendered inline styles during the initial hydration pass, consistent with class and attribute bindings (#3180). The first subsequent reactive update applies the client value.
+- d5fbfa3: Ignore inherited properties in client-side style objects and JSX spreads, including special children and ref positions, to match SSR output.
+- 57e3178: Prevent an abandoned sanitized promise in a server-function result from causing an unhandled rejection when another value fails to encode.
+- b73635b: Keep bound handler tuples reusable across non-delegated events by leaving the user-provided tuple unchanged when installing a listener.
+- 74a11e3: Reduce collision-safe client event listener bookkeeping while preserving handler identity and removal options
+- f22d6e7: Remove replaced non-delegated event listener objects with their original capture option.
+- 0a2fcf0: Keep generator bodies, stream pulls, and encoded result getters inside their server-function request event for HTTP dispatch and direct SSR calls.
+- f4e490b: Judge decoded arguments, guarded results and navigation targets by what they
+  are rather than by how they are spelled, and never forward a `Content-Length`
+  that describes a body the transport replaced.
+
+  Seven defects, five of them introduced by the guards added in #3168, #3170,
+  #3175 and #3176. Each fix removes a special case rather than adding one: the
+  argument walk stops for no prototype, the guard shell keeps only the flag that
+  reaches the wire, the scheme floor asks the URL parser instead of a regex, and
+  the event is awaited only when it is genuinely a promise.
+
+  Runtime-composed SSR responses now discard stale body-framing headers, and
+  late streaming redirects emit a client script only for relative or HTTP(S)
+  targets.
+
+- c42fc3f: Decoded server-function arguments no longer carry `__proto__` as an own key (#3168). Both decode roads (plain JSON and the codec) preserved the key faithfully, so an ordinary `Object.assign` merge in a handler re-prototyped its result with attacker-supplied data. The key is now stripped recursively at the argument-decode seam, covering plain objects, arrays, and revived Map/Set entries, with cycle protection.
+- ca13ed1: Dispatch delegated events to EventListenerObject handlers through their handleEvent method, including after replacing a bound tuple.
+- 2a6567d: Update object-valued class bindings after in-place mutations by tracking a separate snapshot of the classes applied to each element.
+- 70a6180: `prepareRequest`'s return is validated instead of replacing the request init wholesale (#3174). A hook returning a fresh object — the natural way to write "add an auth header" — silently dropped the argument payload, the abort signal, and every protocol header, and the call still dispatched. A returned init that lost the transport headers (or is not an object) now fails the call at the call site naming the hook; deliberate body/signal replacement over a spread init remains in contract.
+- Updated dependencies [a7c6b8e]
+- Updated dependencies [8d1ba82]
+- Updated dependencies [3e48a75]
+- Updated dependencies [04b5b7f]
+- Updated dependencies [da1f7bf]
+  - solid-js@2.0.0-rc.6
+
+## 2.0.0-rc.5
+
+### Patch Changes
+
+- 5ab6c61: Add the `selectedcontent` HTML element to the JSX intrinsic element types.
+- bacfb34: Add `serializeErrorStacks` to the serialization codec options (and `createSerializer`): error-stack disclosure defaulted to `NODE_ENV === "development"`, which describes the process rather than the artifact — a production build run with `NODE_ENV=development` shipped stacks to the wire, including application-code stacks for errors marked with `markSafeError`. Deployments can now pin `codec: { serializeErrorStacks: false }` regardless of the ambient variable (#3152)
+- 51392f3: Bound what a server-function call may send (#3115). The argument payload is buffered and decoded before dispatch, so its cost was paid before application code could decline it: a 32 MB body was accepted and decoded, and a modest argument list forced a range error out of any function when spread into the call. `bodySizeLimit` (default 1 MiB, matching the neighbours' server-action ceilings) now refuses an oversized POST body or `?args=` encoding with 413 before any decoding — a declared Content-Length is checked up front, a chunked body is buffered under the cap — and `maxArguments` (default 1000) refuses an oversized argument list with 400. Both are configurable through `configureServerFunctionsServer` and per-handler options; `Infinity` removes a bound. The decode depth cap also now holds whichever body format the caller selects (#3119): the plain-JSON format walked into a bare `JSON.parse` with no ceiling, where the framed codec enforced 64 levels — the same ceiling now applies to both, and a non-array argument encoding in either body format answers 400 instead of surfacing as the function's own failure.
+- 02e0ebf: Enforce the `Location`/`X-Revalidate` bounds at the transport edge (#3158). `redirect()` and the revalidate helpers refuse over-long values, but a hand-built `Response` reached the wire unchecked — a ~1 MB `Location` became a ~1 MB redirect header, to die at the proxy after the mutation committed. The bound is now a property of the transport, one check where the composed headers leave for every producer; the helpers' authoring-time throws remain the legible fast path. Refused, never trimmed: a cut target is a different address, a dropped revalidate key is a silently stale cache.
+- ec52360: Contain flight-data collector errors per source: a throwing collector no longer fails the mutation response (the client received an error for a mutation that succeeded) or drop the other sources' slices — the failing source is simply omitted and logged.
+- da50a36: Warn in dev when a scripted server function call is answered with 304 Not Modified (#3101). The scripted transport sends no conditional headers, so a hand-rolled 304 resolves the call to `undefined` rather than "unchanged" — the warning points at GET-declared reads with ETag/Cache-Control, where the browser owns the conditional exchange and replays its cached answer.
+- 2f18c56: Deliver a server-function encode failure as a failure, not an empty success (#3117). When the codec could not encode a result, the head was already committed — status spent, no error tag possible — and the body simply stopped; a truncated body decodes to `undefined`, the same answer a void function gives, so a mutation that ran and committed its side effects was indistinguishable from one that returned nothing, and a data layer might retry it. The failure now travels in band: a terminal error-trailer frame (a `!`-prefixed payload on the existing chunk framing, unambiguous because codec frames always open with `{`) that the decoder throws — as the call's failure when it is the first frame, and into every still-pending async value when a later value's encoding fails mid-stream, with the delivered head keeping its data. The trailer is sanitized like any thrown error (generic in production, cause preserved in dev via `Server function result could not be encoded: …`). Version skew degrades safely: an old client reading a trailer fails the call with a decode error rather than resolving `undefined`.
+- 0932c89: Amortize ChunkReader buffer growth: the framed-stream reader reallocated and copied everything received so far on every network read, making one frame O(reads²) — ~200× the CPU for a payload delivered at slow-client read sizes, on both the server (argument decode) and client (response decode) legs. Growth now appends in place, compacts drained frames, and reallocates at ≥2× only when outgrown (#3154)
+- 817b4d1: Bound the composed redirect and revalidate response headers (#3131, the
+  #3093 class). A 20K-character redirect target or a few hundred
+  revalidation keys produced a header past receivers' limits — undici's
+  16 KiB default, nginx's one-page proxy buffer for the whole header block —
+  so the response died at the socket (HPE_HEADER_OVERFLOW) after the
+  mutation committed. Truncation is not an option for these values the way
+  it was for #3093's error label: a trimmed target is a different address
+  and a trimmed key list is a silently stale cache. So `redirect()` and the
+  `revalidate` option now refuse past 4096 characters with a legible error
+  naming the remedy (carry the state server-side; split the invalidation or
+  use coarser keys). The bound sits in the producing helpers, which run
+  inside the function body, so both the returned and thrown spellings land
+  on the ordinary error path — what leaves dispatch is the error shape,
+  attributable and parseable. A raw `Response` built by hand with an
+  oversized `Location` remains the author's own; only the helpers are
+  bounded.
+- 929642b: Trust only a conforming (digit-string) Content-Length in the bodySizeLimit guard: a negative declaration (`-1`) satisfied neither the over-limit check nor the undeclared-body buffer path and streamed the body into the decoder uncapped; non-conforming declarations now route through the bounded buffer (#3153)
+- ecfee20: Two cookie fixes. The no-JS flash cookie now degrades instead of vanishing
+  when an outcome exceeds the browser's 4 KB cookie ceiling (#3137): past it
+  the whole Set-Cookie was silently discarded — no error anywhere, and the
+  page after the redirect looked like nothing was submitted, inviting the
+  retry that writes twice. The encoder drops the input echo first, then
+  bounds the value itself (a string keeps the longest prefix that fits,
+  structured results reduce to the outcome flag), and the submission arrives
+  with `truncated` set so integrations can say "succeeded, result too large
+  to display". And `serializeCookie` now refuses in dev the shapes every
+  browser silently rejects on arrival (#3138): `__Host-`/`__Secure-` prefix
+  requirements and `SameSite=None`/`Partitioned` without `Secure` — each one
+  attribute away from a cookie that never comes back, with login-shaped
+  consequences. The validation compiles out of production builds. CHIPS
+  `partitioned` is also supported now, so partitioned third-party cookies no
+  longer require hand-building the header string.
+- 30f9387: Direct (SSR-time) server-function calls now run under a per-call shallow copy of the render's `locals` instead of sharing the object: concurrent calls no longer overwrite each other's (and the render's) per-request context. Reads still inherit everything middleware set, and nested objects stay shared by reference; `event.response` remains deliberately shared (#3156)
+- af4cfc8: Two server-function grant fixes (#3129, #3128). A `GET()` declaration now
+  dies with the binding it was made about: `registerServerFunction` revokes
+  the id's declared method when it rebinds the id to a different function,
+  so a mutation registered onto a once-declared id (an id collision, a
+  module re-evaluated in a live process after an edit dropped the wrapper)
+  no longer inherits GET dispatch and the origin-gate exemption — a function
+  that still declares GET re-runs `GET()` right after re-registering, which
+  re-arms the grant exactly when it is still meant. And the single-flight
+  request header is now honored on POST only, the server half of the
+  client's own rule: folding on a GET would put a second body — an envelope
+  carrying data computed from that caller's request — at a cacheable url
+  under whatever public Cache-Control the author wrote, with nothing naming
+  the variance, one curl away from a shared-cache poisoning.
+- be7bcd2: The bare server-function address no longer decides its answer shape by the
+  absence of a header (#3139). The no-JS redirect convention (303, outcome
+  in the flash cookie) engaged on shape alone — form content type, no format
+  tag — which a page script's `fetch(url, { body: new URLSearchParams(...) })`
+  also matches: the script followed the 303 to the referrer's HTML, read
+  `response.ok === true`, and its answer disappeared into a cookie it would
+  never look at. Dispatch now reads the browser's own word for the caller
+  kind: `Sec-Fetch-Mode: navigate` (or no fetch metadata, for older
+  browsers) keeps the convention, while a script's form-shaped post is
+  refused 400 before dispatch — before the mutation runs — pointing at the
+  data address and the format tag, the two spellings that work. Tagged
+  direct-HTTP callers keep the plain response as documented.
+- 08b4d1c: Never mutate an application-held Response: the server-function handler takes ownership of the dispatched Response with a copy before any transport stamp lands, and `commitEventResponse` folds cookies/gap-fill headers onto a rebuilt Response instead of writing in place — a module-level cached Response no longer accumulates every caller's Set-Cookie (one user's session cookie served to the next) (#3155)
+- 93adc02: Three transport-correctness fixes on the server-function HTTP surface. A
+  POST whose body-format tag names no decoding this runtime has — an unknown
+  tag, a duplicated format header comma-joined by `Headers`, an untagged
+  non-form body — is refused 400 before dispatch instead of calling the
+  function with a substituted `undefined` argument that let the mutation
+  commit and answer 200 (#3130). The transport's defaulted
+  `Cache-Control: no-store` is no longer written onto a 304, which is a
+  cache UPDATE rather than a stored response — the default was instructing
+  caches to evict the very entry the conditional request had just confirmed
+  (#3134). And `redirect()` percent-encodes non-ASCII code points in its
+  target before the value touches the latin1 `Location` header: targets
+  above U+00FF used to throw (masked as a sanitized 500) and latin1-range
+  characters rode as raw bytes a client decoded to U+FFFD, redirecting
+  `/café` to `/caf%EF%BF%BD` (#3135). ASCII passes through untouched, so
+  already-encoded targets are not double-encoded.
+- 19fa8b0: Fix two server-function transport encoding issues:
+  - Bound the error response header value (#3093). The header is a classification label — the structured error travels in the body — so long thrown messages (nine-fold inflated by percent-encoding for non-latin1 text) no longer blow past receiver header limits and turn the application error into an unreadable response.
+  - Support null-body statuses (204, 205, 304) (#3095). `respond(undefined, { status: 204 })` and raw null-body `Response`s now answer with a real bodiless response at the declared status instead of a `TypeError` from the `Response` constructor that dispatch sanitized into a phantom generic error at 200. A value-carrying result on a null-body status is reported as a legible authoring error naming the status, in every build.
+
+- 1a95943: Server-function failure is now signaled by the protocol's error tag alone, and thrown errors answer a real 500 (#3097). The client no longer treats `status >= 500` as failure on responses the runtime encoded — `respond(value, { status: 500 })` resolves with its value like any other returned value, and only a thrown outcome rejects. A peer's own 5xx (proxy, load balancer) carries no body-format header and is still refused before decoding. On the server, a plain thrown error now answers 500 instead of 200-with-tag, so intermediaries — CDN metrics, load-balancer health, log alerts — see what the tag tells the client; thrown envelopes keep the author's status as before.
+- 5be07a8: Forward an author's 3xx status consistently (#3096). The scripted redirect mask now covers exactly the statuses fetch follows (301, 302, 303, 307, 308) — a 304, the natural answer for a conditional read, forwards untouched for every caller. Returned envelopes keep their status for unscripted callers (the returned path used to hardcode 200 where the thrown path forwarded it), and the no-JS form convention honors a returned redirect envelope's Location the way it already honored a thrown one.
+- 8963843: Fix SSR stream never closing when a fragment rejects terminally while async work in its subtree is still pending (#3165). Pending promises written to the hydration serializer now join an abandonment ledger keyed by hydration id; a fragment settling with an error releases everything under its key — descendant registry fragments settle so `flushEnd` can drain, and abandoned serialized deferreds resolve so seroval's completion fires. Independent live boundaries keep gating the response as before.
+- 8d34af1: Answer the labelled version-skew 404 before the CSRF origin gate (#3136).
+  A removed id is no longer in METHODS, so it could not be recognised as a
+  declared read and the gate fired on it: every caller without origin proof
+  — a CDN revalidating a GET-declared read, an uptime monitor, a
+  server-to-server client (Node's fetch sends none of the headers the gate
+  reads) — got a bare 403 instead of the `X-Server-Function-Unknown` 404,
+  so a deploy that removed a function read as an auth/WAF failure in the
+  edge logs and the #3110 recovery signal was invisible. Nothing is
+  registered at an unknown id, so the gate had nothing there to protect,
+  and the ids were never secret — the compiler ships them in the client
+  bundle. The hoisted lookup is a side-effect-free Map read, the labelled
+  404 no longer carries the CSRF `Vary` (its answer does not depend on
+  origin proof, so it must not fragment shared-cache entries on it), and
+  the meaningless-path 404 stays bare and stays gated. Diagnosed, measured,
+  and drafted by @frenzzy.
+- fc5d079: Name the contract a `GET()` declaration signs, and add the opt-out of its trade (#3114). The origin gate is skipped for GET-declared reads by design — same-origin policy already keeps a cross-site caller from reading the response, and the gate's `Vary` fragments the shared-cache entries the helper exists to enable — which makes declaring GET a safety assertion, not only a transport choice: the function becomes executable from any origin, with caller-chosen arguments, carrying the user's ambient cookies. That contract is now stated on `GET()`'s documentation on both entries (declare GET only for reads that are safe in the RFC 9110 §9.2.1 sense), and `csrf: { protectDeclaredReads: true }` lets a deployment that does not rely on shared caches apply the origin gate to its reads as well. Both halves are pinned by tests: the default skip, and the opt-in gate.
+- 1d2d1e5: Fix a deep-but-legal server function result being reported as a failed call (#3160). `guardFailures` walked the result recursively, so ~10k+ nesting overflowed the stack and the `RangeError` escaped into dispatch's catch as a phantom function error — a successful, committed call answered with a generic 500. The container walk now carries an explicit stack (the `isJSONSafe` precedent), and any residual synchronous throw on the codec road is renamed to an encode error before rethrow so misattribution cannot recur from another cause.
+- 2320bc9: Channels behind a plain-object getter or used as a Map key are now guarded (#3176). The failure-guard walk previously skipped both while the codec pumped them anyway, so a rejecting promise behind either rode the wire with its raw message, streams reached that way were never torn down at disconnect, and the getter shape could take the whole process down as an unhandled rejection (the fast-JSON probe minted an extra, unobserved promise per read). Getters are now invoked exactly once and materialized as data properties, Map keys are walked like values, the JSON-safe probe reads through descriptors so it never invokes an accessor, and a throwing getter fails the call as a sanitized 500 instead of an encode-time in-band failure.
+- 2f6d8cc: Label the unknown-id 404 so version skew is recoverable (#3110). A call whose well-formed address is not registered in the answering deployment — a tab holding the previous build's ids across a deploy, or a genuinely removed function — now answers with an `X-Server-Function-Unknown` header, and the client stamps `unknownFunction: true` (plus a directed message) on the rejection. Integrations can act on it — typically by reloading the document onto the current build — instead of surfacing a generic failed call. A 404 for a path the address scheme gives no meaning to stays unlabelled.
+- fe4bfa0: Type the client `live()` reference truthfully: calling it returns the reconnecting iterable itself, synchronously — not a `Promise` of one. The declaration previously routed through `ServerFunction`, whose call signature promises `Promise<T>`; the mismatch was masked by the dangling declaration references this release also fixes. Isomorphic consumers are unaffected: they `await` the call, and awaiting the client's plain iterable is identity.
+- 02f87fe: live() reconnects through the 4xx statuses that say "retry" and honors Retry-After (#3100). The reconnect loop treated the whole 4xx band as a definite rejection, so a rate limiter's 429 — or a gateway's 408 — permanently closed a healthy stream. 408 (RFC 9110 §15.5.9), 425 (RFC 8470) and 429 (RFC 6585 §4) now reconnect like a 5xx, as does any failure whose response carries Retry-After — the peer inviting the retry in as many words. A named Retry-After wait (seconds or HTTP-date, stamped on the error as `retryAfter` in seconds for policy layers) replaces the exponential backoff guess for that attempt, capped at 60s so a misconfigured header cannot end the stream in all but name.
+- 5230666: Fix hydration ids drifting after a reactive lone spread (#3105). A lone spread now passes its accessor straight to `spread()` on the client — no `mergeProps`, no memo, no hydration id — matching the server's existing pass-through fast path. The runtime resolves a function props source inside its own tracking scopes.
+- 653dd41: Multi-source single-flight: named flight-data sources alongside the unnamed hook
+
+  The single-flight channel assumed exactly one data-owning integration — one
+  `collectFlightData` hook on the server, one `subscribeFlightData` consumer on
+  the client, later registrations displacing earlier ones. An app running two
+  caches (a router's route data and a query library's client) had no way to
+  refresh both from one mutation response: whichever library registered last
+  silently won.
+
+  The channel now multiplexes named sources over the same round trip:
+  - `registerFlightDataSource(id, hook)` (server) registers a collector
+    additively next to the unnamed `collectFlightData` slot, which remains the
+    data-owning integration's (a router's).
+  - `subscribeFlightData(id, consumer)` (client) subscribes a consumer to its
+    source's slice; the bare legacy signature keeps meaning the unnamed source.
+  - The request-leg `X-Single-Flight` header now carries the subscribed source
+    ids, so the server only runs collectors the client can consume; the
+    response leg echoes the ids actually folded, making the payload shape
+    self-describing. With named sources in play, `data` is the keyed envelope
+    `{ [source]: slice, ... }` and each slice is delivered to its consumer,
+    awaited, before the mutation's promise resolves.
+
+  Fully wire-compatible in every cross-version pairing: a lone unnamed
+  registration still sends and echoes the literal `true` with the raw payload
+  shape, byte-identical to the previous protocol, and unrecognized opt-in
+  values from hand-tagged requests still reach the unnamed hook. Existing
+  integrations (Solid Router, TanStack Solid Start) keep working unchanged; the
+  keyed envelope only materializes when a named source registers on both ends.
+
+- 8d17083: Server function response streaming now demand-gates and tears down every async-iterable or ReadableStream source in the result graph, not just a top-level one (#3125). A stream nested inside the result (`{ items: rows(), total }`) no longer produces unbounded ahead of a slow consumer, and a cancelled or aborted request closes it — `iterator.return()` runs, so generator `finally` blocks release their resources instead of leaking per abandoned request. The demand gate is shared across concurrently pumped sources (a consumer read wakes all parked pulls; each steps once and re-parks).
+- 006a115: Carry masked redirects in a dedicated header and retire the RC transition shims. Scripted callers now receive redirects as `X-Server-Function-Redirect: <status> <url>` with the target resolved server-side against the request URL (#3102) — `Location` never rides a masked 200, so an authored `Location` on a forwarding status (a 201's created-at) stays data, and integrations compare origins on a real URL instead of guessing navigation strategy from the author's spelling (#3107). `decodeRedirectHeaderValue` is exported for readers. Removed the transitional instance-header scripted fallback at the bare address and its forced no-store (#3094): the answer shape is now a function of the URL alone, with the data address as the only scripted path.
+- e637272: Navigation targets now carry an http(s) scheme floor on both legs of the redirect header (#3175). `maskRedirect` resolves targets with `new URL(target, requestUrl)` where an absolute scheme wins over the base, so `throw redirect(next)` with user data emitted `javascript:alert(document.cookie)` as the header's "resolved absolute target" — same-origin script execution in any integration that navigates to the decoded value. The transport now refuses non-http(s) schemes on `X-Server-Function-Redirect` and `Location` with a sanitized 500 (relative targets and cross-origin http(s) still flow — the same-origin-vs-allowlist policy is a separate, pending decision), and `decodeRedirectHeaderValue` enforces the resolved-absolute-http(s) contract it documents, so a hostile peer cannot re-open the class against `location.href = decoded.url` integrations.
+- 0b9d69a: Fix post-`createEvent` refusals silently dropping the event's response stub (#3159). The scripted-form 400, malformed-arguments 400, and maxArguments 400 returned directly instead of through `commitEventResponse`, so a `Set-Cookie` an integration wrote in `createEvent` (a rotated session, a fresh CSRF token) never reached the browser on exactly the requests where something already went wrong. Every exit past `createEvent` now folds and commits the stub, which also arms the stub's late-write instrumentation on refusals.
+- f739ec3: Sanitize a failure that escapes through a server function's result graph.
+  `sanitizeServerError` guarded the one road a thrown error takes out of
+  dispatch; a rejected promise, an async iterable that throws, or a stream
+  that errors reaches the codec as a value to encode instead, and shipped
+  its `message` and every own-property to the client verbatim — a driver
+  error's failing query, connection string and bound params included —
+  under a 200 carrying no error tag, because the head was already
+  committed. Those channels are now wrapped before either serializer sees
+  them: the response encoder and the frames flight sink, which encodes its
+  outcome with a serializer of its own.
+
+  The walk covers plain objects, arrays, `Map` and `Set`. A channel held by
+  a class instance or behind an accessor is left alone — rebuilding one and
+  invoking the other are not the runtime's to do. `markSafeError` remains
+  the escape hatch, an `Error` that is a returned value is untouched, and
+  the wire format is unchanged, cycles and shared references included.
+
+- 9522945: Scripted server-function calls now go to their own data address, `<endpoint>/data/<id>`, leaving the bare `<endpoint>/<id>` address to plain HTTP (#3094). The two caller kinds get differently shaped answers — codec encodings for the client transport, verbatim responses / form-convention handling for everyone else — and shared caches key on the URL, so a header-driven shape meant one caller kind's cached answer could be replayed to the other (a `GET`-declared function returning a raw `Response` with a public cache policy could serve its codec encoding to a browser navigation, or its raw body to the app's own transport). The answer's shape is now a function of the URL alone. A reference's `.url` and rendered action urls stay on the bare address; reconstructed callables splice the `data` segment in ahead of the id for their own calls. Transitional: the instance header still summons the scripted shape at the bare address so already-loaded tabs survive a server deploy, with those answers forced `no-store`.
+- 45f6b5f: Three server-function transport guards: the CSRF origin matcher's verdict is now checked strictly (`=== true`) so truthy non-booleans fail closed instead of open (#3169); an async `createEvent` is awaited instead of flowing downstream as a pending Promise that dropped every header the integration wrote while answering 200 (#3170); and a throwing `transformResult` on the thrown path is contained to the same sanitized 500 it produces on the return path instead of escaping the handler (#3171).
+- fe4bfa0: Fix server function references typing as `any`: the emitted `server-functions` declarations referenced `ServerFunction`/`ServerFunctionMetadata` without importing them (the `export type` blocks only re-export the names), so under `skipLibCheck` every `GET`/`live`/`createServerReference` return type silently collapsed to `any` for consumers.
+- 21a5122: Single-flight always folds the keyed envelope — the raw legacy payload shape is gone with the other RC shims. The unnamed registration's slice rides under its reserved id "true" like any named source, so `{ value, data }` has one shape, not two; the client always delivers `data[source]` to each consumer. The unrecognized-opt-in courtesy (arbitrary truthy header values reaching the unnamed hook) is also removed: only exact source ids run collection.
+- f06f7b1: Pull a streamed server-function result behind a demand gate (#3118). The
+  response stream was built with no `pull` and no queuing strategy, and
+  every codec node is enqueued the moment it is parsed, so the producer ran
+  as fast as it could resolve whether or not anyone was reading: one slow
+  consumer buffered the whole result in server memory, unbounded and
+  invisible to application code. The consumer's reads now drive `pull`,
+  which releases one source pull at a time, so an unread stream stays near
+  the queue size instead of running away.
+
+  Scope: the gate sits on the source the runtime wraps, which is the
+  result itself. An async iterable nested inside the result — `{ items:
+rows() }` — is pumped by the codec directly and is not yet gated. Ending
+  the stream releases a parked pull, so an aborted, cancelled or failed
+  stream still closes its source; a consumer that abandons a stream without
+  cancelling it now leaves the producer parked rather than running it to
+  completion.
+
+- 07471da: Add typed preload links to the server asset pipeline.
+
+  Static manifests can attach `preloads: PreloadLink[]`, resolver results can carry the same shape for framework integrations, and any integration can register a link with `registerAsset("preload", link)`. The runtime preserves `as`, MIME type, CORS mode, integrity, referrer policy, fetch priority, and media attributes across string, streaming, embedded-head, custom-sink, and frame renders.
+
+  `lazy()` and `clientOnly()` forward resolver-provided preload links alongside their JS and CSS.
+
+  `JSX.HTMLPreloadAs` and `JSX.HTMLFetchPriority` are now exported for reuse.
+
+  Preload links are explicit: manifest `assets` are not preloaded automatically. Existing stylesheet and modulepreload APIs are unchanged.
+
+  Development builds warn when font or fetch preloads omit `crossorigin`, because a different eventual request mode cannot reuse that preload.
+
+  Frame clients also retain and consume every late root asset record instead of dropping earlier records that reuse the same transport key.
+
+- Updated dependencies [51ffcb9]
+- Updated dependencies [91e300a]
+- Updated dependencies [00d1d5d]
+- Updated dependencies [07471da]
+- Updated dependencies [0c02d42]
+  - solid-js@2.0.0-rc.5
+
+## 2.0.0-rc.4
+
+### Minor Changes
+
+- 475744c: Add `invoke(fn, options, ...args)` — the per-call server function invocator (#3057). Applies one call with invocation-scoped options: `signal` (aborting rejects the call and cancels the request; ends a live source's iteration across reconnects), `keepalive`, and `priority`. Longer-lived concerns are refused with a redirect to their home (`prepareRequest`, `withMeta`/`GET`, the data layer via `signal`) — never a `RequestInit` passthrough. Dispatch rides a registered-symbol invocation channel (`SERVER_FUNCTION_INVOKE`) that wrappers forward like declaration metadata, so `invoke` composes through `GET`, `live`, and integration wrappers that adapt it. On the server the call runs in-process: `signal` rejects the caller, transport hints are no-ops.
+- 8d249c7: Patch-mode list hydration: claim + register only. The list driver claims each
+  server row positionally through the row's own `_hk` key (a row-scoped
+  explicit-id owner makes the compiled template's getNextElement resolve it),
+  and patchDriver skips the initial force-apply while hydrating — server HTML
+  stays the truth until the first transition. All driver-side `each` reads and
+  the probe are id-isolated (throwaway/private explicit-id owners), so lazily
+  minted prop-getter memos can no longer shift the ambient hydration id chain
+  on either the engage or decline path.
+- 8d249c7: Patch-mode list driver: keyed `<For>` over a store array is offered to the
+  runtime's row-ops driver (create/bind at op-apply, LIS moves, node removal —
+  no mapArray, no per-row owners, no DOM-side reconcile). `For` carries `$ll`
+  metadata on a lazy classic accessor so unaware renderers and declined lists
+  (non-store subject, impure rows proven by a bind-time owner probe, fallback
+  or index usage) fall through to today's mapArray path unchanged. Array
+  identity swaps keep keyed semantics by raw-identity matching. Adds
+  `ownerIsBlank` (signals) for the purity probe and `driveList` (web, rxcore
+  seam) for the runtime.
+- 8d249c7: Close two list-driver coverage gaps found by the JFB store scenario: setter-
+  channel structural mutation (push/splice/index assignment/permutation) now
+  emits identity-keyed row ops at the fold — a driven list stays DOM-correct
+  for stores mutated without reconcile — and empty-initial lists engage
+  TENTATIVELY, deferring the purity probe to the first created row, with a
+  late decline handing the region to the classic mapArray path through the
+  runtime's re-entry thunk
+- 8d249c7: Shallow store lists through the compiled driver: slot patches graduate from
+  prototype to channel semantics (key-aligned value-replaced slots only —
+  structure rides row ops — queued at effect phase under the registration
+  owner), and the list driver collects a shallow row's compiled bodies at bind
+  (rows are raw; nothing to register on) and dispatches them from the array's
+  slot channel, rebasing indices with structural ops. Adds storeIsShallow;
+  kind-changing subject swaps (shallow <-> deep) hand off to classic.
+
+### Patch Changes
+
+- 8d249c7: External-audit fixes on the patch-list driver surface: family (projection/optimistic) arrays now decline the driver — their structural changes emit no row/slot ops and the proxy identity is stable, so an engaged list would freeze on optimistic or projection structure (classic mapArray handles them correctly, including on identity-swap handoff). Shallow slot-patch registration is now multi-consumer — two driven lists over one shallow array previously overwrote each other's channel. Adds `storeHasFamily` (with server stub) and regression tests for both.
+- 54506e0: Clarify invoke's wrapper contract: declaration wrappers (GET, live) forward the invocation channel mechanically (1:1 call mapping); wrappers that share calls (deduping caches, multicast channels) opt in deliberately or decline, and invoke's error now directs callers to the underlying reference or the wrapper's own idioms.
+- 0043643: Document two boundaries of the client `fetch` option's contract: a retrying wrapper may re-send a request that got no response but must never replay one whose response ended (mid-body death may have executed a mutation; live-source reconnection is the runtime's job), and the call-to-request mapping is delivery detail, not contract.
+- c9b4f2a: SSR `<select value>` resolution now handles empty-string bound values (#3013 follow-up). Empty attribute values serialize as bare attributes (`<select value>`, `<option value>`), which the flush-time pass didn't recognize — a bound `''` never marked the `value=""` placeholder option `selected`, so the pre-hydration page showed the first option while app state said `''`. The pass now reads the bare form as the empty string on both the select and its options, matching React's SSR output for the single-select placeholder pattern.
+- 8c48a2e: Fix whole-document hydration dying when `useHead` coexists with shell-authored `<head>` children (#3081). A charset/base registration is spliced as a prelude immediately after the `<head>` open tag — a deliberate byte-placement constraint — landing it ahead of every head child the shell authored itself. The compiled head traversal is positional (raw `firstChild`/`nextSibling` chains in production), so the prepended tag shifted every read by one and hydration for the whole document died on a null read. `hydrate()` now moves the registry-inserted leading run (`data-dh` without the `data-dhf` in-place-rewrite stash) to the end of head before any claiming: the parser already consumed the byte-placement guarantees, the moved metas are inert in an unrendered element, and the walk sees exactly the shell's authored children. The in-place rewritten static `<title>` keeps its stash, its position, and its claim.
+- 8d249c7: The list driver's identity matching unwraps store proxies on both sides — draft-authored permutations store row proxies verbatim, and matching them against raw records rebuilt every surviving row (caught by the JFB keyed-reorder identity gate).
+- 2f01f23: Module-level "use server" exports now register by value: the server build registers each export's evaluated terminal initializer whole, so server-side wrappers compose onto every call path — `export const getUser = withValidation(schema, fn)` applies the wrapper to HTTP dispatch and in-process SSR calls alike, and patterns like `withDelay(fn, 400)` work for server mocks. The client build always emits bare references, so wrappers, schemas, and helpers stay server-only by construction. The compiler never inspects the initializer's shape; `registerServerReference` now throws at module eval when handed a non-function, turning stray non-function exports into loud boot errors instead of dead references. Anonymous default expressions (`export default withDelay(...)`, `export default async () => ...`) get a synthesized binding and register too — previously they were silently dropped from both builds. Supersedes the unreleased wrapped-export compile error.
+- 8d249c7: Optimistic family arrays are drivable by the patch-mode list driver, completing the family channel: structural optimism (push/splice/reorder/replace in optimistic drafts) emits identity-diffed row ops at lane timing from the override channel — visible in flight, bypassing the transition stash like optimistic record patches — and reverts emit an identity RESYNC the driver resolves against the live post-revert view. The driver binds optimistic lists from the optimistic view (classic reads the same view through the proxy), and the identity-swap matcher is shared between swaps and resyncs. Equivalence matrix extended with async optimistic scenarios (mounted → in-flight → settled, revert and land, element-level and parent-key structural writes).
+- 8d249c7: Patch channel is pay-for-use: the list driver and `patchDriver` moved out of the always-retained web runtime into `patch-driver.ts`, arming the insert seam lazily from `rowProof`/`patchDriver` (which only compiled patch-mode output imports); the store's emitters ride hooks installed at first registration (`patch-hooks.ts`) instead of static imports. Apps without patch-mode output retain only a ~100 B insert hook; the store write-path seams cost ~490 B on the store floor. Before this, every client app carried the full driver (~2.4 KB brotli).
+- 8d249c7: Second re-audit hardening of the patch channel: adoption seams demote accessor-bearing adoptees to tracked effects in development, with a loud diagnostic (production emits directly — per-adoption accessor scans cost ~12% of dbmon's tick, and getter-bearing adoptees on patched records are a development-caught shape); setter-returned root replacements and chained-store swaps emit their patches and row ops at fold commit; the list driver's ops application builds every new row before any destructive step (a throwing row factory leaves DOM and bookkeeping atomically unchanged); patch errors route to the nearest computed ancestor so `Errored.reset()` can recompute it (reset also skips non-computed sources), and unhandled patch errors halt like unhandled effect errors; key equality is SameValueZero and occurrence-aware everywhere keys compare — NaN keys stay retained and duplicate keys adopt per occurrence on both channels; same-batch duplicate patch emissions coalesce (one application per batch, effect parity).
+- 8d249c7: Third re-audit hardening of the patch channel: same-batch coalescing updates the queued entry in place (latest `next` wins — adoption replaces the captured object, so dropping later emissions applied stale state) and the drain clears the channel stamps (no batch retention on quiet records); the adoption remainder window builds from the misalignment point so prefix-consumed rows are never re-offered to duplicate keys; optimistic tentative matching gains SameValueZero + occurrence-aware parity with the plain channel; a failed row-ops application forces an identity resync on the next update (the store committed the failed topology while DOM kept the old one — positional ops would mis-index) and suppresses slot ticks until the baseline is restored; a throwing row factory also severs its own partial registrations.
+- 8d249c7: Fifth-round hardening of the patch channel: no-op adoptions (A→B→A in one batch) clear the adopted flag so later setter row ops never freeze a driven list; transition merges retarget the moved entries' coalescing stamps (post-merge emissions coalesce instead of double-applying at commit); multi-consumer patch dispatch snapshots the registration list (a callback unbinding a sibling no longer skips consumers); the list driver's initial construction severs partial registrations on throw like update-time builds (one failed initial render no longer elevates patchCount globally); a failed apply actively resyncs from the next slot tick instead of waiting for a structural update; and identity swaps register the new subject's channels before applying so a throwing swap stays recoverable.
+- 8d249c7: Patch-channel contract hardening from the stage-2 re-audit: ordinary `patchDriver` registrations unbind with their owner (entries no longer leak past unmount); merged transitions move their held-patch stash so no patch strands; the optimistic drain shares the normal drain's per-entry error isolation and boundary routing; accessor-bearing records are excluded at admission (scan-before-trust) and records that acquire accessors demote their patches to tracked effect fallbacks; writable projection arrays emit setter row ops at their fold-commit visibility moment; row-ops/slot registrations resolve chained backings to the ultimate owner; duplicate keys match occurrence-aware instead of first-wins; the production dev-token typo (`_DX_DEV_`) is fixed; `patchDriver: true` normalizes identically in Babel and the native loader, the option is typed in `TransformOptions`, and a `dom-patch` parity tier ratchets patch-mode output across both compilers (currently byte-identical on all fixtures).
+- 8d249c7: Patch-channel semantics completion: a throwing patch now routes through its
+  registering owner's queue chain to the enclosing error boundary (render-
+  effect parity; sibling isolation preserved, unhandled errors still rethrow),
+  and the dual-driver effect fallback splits phases with the same compiled
+  body — a next===prev read pass tracks in compute, the force apply writes in
+  the effect phase where transitions and batching expect DOM writes
+- 8d249c7: Patch-mode lists now implement the identity semantics the view declares instead of the reconcile key's. Deep lists are unaffected (adoption preserves proxy identity, so key ops and reference semantics coincide). Shallow reference-keyed lists rebuild rows whose records were replaced — matching classic `mapArray` exactly, where the driver previously patched them in place (a default-on compiler mode must never change observable DOM identity). `For` forwards its `keyed` prop on the list metadata; explicit `keyed={fn}` lists decline the driver until the accessor-row binding contract lands.
+- 8d249c7: Patch-channel arming is two-tier so the default-on cost stays proportional: `patchDriver` no longer retains the list driver (only `rowProof` — the compiled marker of a patch-mode list — arms the insert seam), and the store emitters split into value hooks (armed by `registerPatch`) and row hooks (armed by list registrations), so non-list patch templates never retain row binding, LIS, or reconcile's diff builders. Flip-preview size scenarios pin both tiers.
+- 8d249c7: Patch-mode lists retain per-row unbind handles: a record the app keeps beyond its row's life no longer holds a live patch registration updating detached DOM — registrations are severed on row removal, contract-leave handoffs, and list disposal. Dev builds also warn when a stamped row's build attaches computations or cleanups to the shared list owner (owned work in handler/attribute value position is unsupported in patch-mode rows).
+- 8d249c7: Projection (non-optimistic) family arrays are drivable by the patch-mode list driver: their recomputes walk reconcile, whose row/slot emissions were never family-gated and ride the transition-stamped apply queue. The blanket family decline narrows to optimistic families only (`storeHasOptimisticFamily`), whose user writes ride node overrides and emit no structural ops. Fixes chained-backing patch registration: a projection wrapper's backing is another store's proxy, so `registerPatch`/`patchableRaw` now resolve through the chain to the ultimate owner target — patches registered on wrapped projection rows previously never fired (value transitions fold on the source). Equivalence matrix extended with 13 projection scenarios including recompute-driven structure and retention topology.
+- 8d249c7: Patch-mode list admission moves entirely to compile time: driveList engages only for row functions carrying the compiler's `rowProof` stamp (exported from @solidjs/web), and the runtime purity probe is deleted — no speculative execution of user row code, no probeMark/probeGate seams, no ownerIsBlank, no tentative empty-list engagement with late decline. Unstamped rows take the classic mapArray path before any DOM work; `lateClassic` remains only for engaged lists whose subject later leaves the contract (identity swap to a derived array, shallow/deep kind switch).
+- 258c76a: Harden the server function handler's HTTP layer. The method gate is now an allowlist: POST always dispatches, GET and HEAD dispatch only to `GET`-declared functions, and every other verb answers 405 — previously a HEAD (or PUT/DELETE/PATCH) request bypassed the GET gate entirely and executed any registered function with attacker-chosen query arguments (#3069). HEAD runs the function like GET and strips the body per spec. Responses now default to `Cache-Control: no-store` unless the function set its own cache policy, and GET/HEAD requests to `GET`-declared functions skip the CSRF origin gate so their responses no longer carry the `Vary: Sec-Fetch-Site, Origin, Referer` that fragmented shared-cache entries — declared reads are protected by same-origin policy, and caching becomes opt-in on the wire instead of just in prose (#3071).
+- 79b96cf: Address server function calls by path: `<endpoint>/<id>`, with arguments staying in the query.
+
+  The id travelled in `X-Server-Function-Id`, with `?id=` as the fallback for requests the client runtime did not make. Both are gone; it moves into the path — what per-function edge rules, cache policies and `http.route` labels key on — leaving one place in the request that carries it, so a cache in front of the app cannot be made to store one function's response under another's key (#3070). POST addresses move too, and `endpoint` now gates dispatch on both halves: a request whose path does not start with it is not a call.
+
+  `serverFunctionUrl(id, boundArgs?)` and `parseServerFunctionUrl(url)` ship on both entries for integrations composing action urls. A GET call whose url would exceed 2000 characters dispatches over POST instead, marked as a read — a cache miss rather than a 414.
+
+  A read whose query is not an argument encoding hands that query to the function as a lone `URLSearchParams`, the read-side mirror of a no-JS form post decoding to a lone `FormData`, so a `method="get"` submit reaches the function it addresses. Which reading applies is decided by the url alone, never by a header; `args` stays reserved on the query, and a value under it that is not an argument array answers 400.
+
+- 82b4e14: Add `fetch` to `configureServerFunctionsClient`: the function the transport sends every server-function request with, typed and called as `(address, init)` — the address relative to the document, as the global one receives it — so an ordinary fetch wrapper drops in, a hand-written one needs no casts, and `parseServerFunctionUrl` reads the id back out for telemetry. `null` restores the global.
+
+  An app-shaped url is what makes it worth a seam: the handler takes a web `Request`, so a route that rewrites into the canonical address dispatches like any other call, and nothing downstream — the router's action-url interception, the plugin's dev middleware, the generated dispatch gate — has to learn a second address format. A wrapper forwards `init` — the call's `signal` rides on it — keeps the call same-origin, and hands back what the peer answered, unread. The seam is the client transport's exit only: a server-side call runs in process and never reaches a fetch.
+
+  Also tidies the `endpoint` documentation on both entries, which the path-addressing change left saying the same thing twice.
+
+- c07edcb: Fail a server function call on a response the runtime did not write, instead of resolving it to `undefined` (#3087).
+
+  Only the protocol's error header and a 5xx counted as failure, so every other non-2xx was decoded as a result — and decoding a login page, or an empty 405, yields nothing. A response at 400 or above carrying no body format now fails the call with the status on the error, undecoded, and before the passthrough control flow uses: a refusal can carry a `Location` of its own, and the passthrough would have handed it back as control flow. Redirects are left alone — `fetch` follows them, so an interstitial arrives as its page at 200, and a 3xx only reaches the transport where something opted out of following one.
+
+  `BodyFormat.Void` marks the one response the runtime encodes without a format to carry — a function that returned nothing — so `respond(undefined, { status: 400 })` stays a result alongside `new Response(null, { status: 404 })` and `respond(value, { status: 400 })`. A client that predates the tag decodes it the same way; a client that has it, talking to a server that does not, reads an untagged void 4xx as a refusal.
+
+  A 2xx is not judged at all: a login page served at 200 is indistinguishable from a void result by header alone. One runtime-produced shape is caught with the foreign ones — a verbatim `X-Content-Raw` response at a non-2xx status, which an integration's `responseHandler` claims before the check.
+
+- Updated dependencies [8d249c7]
+- Updated dependencies [f0c3692]
+- Updated dependencies [f3da41e]
+- Updated dependencies [a10cf1a]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+- Updated dependencies [8d249c7]
+  - solid-js@2.0.0-rc.4
+
 ## 2.0.0-rc.3
 
 ### Minor Changes

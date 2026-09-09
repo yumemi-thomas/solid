@@ -15,7 +15,7 @@ pub const SEMANTIC_TRACE_VERSION: u32 = 3;
 
 /// Exact upstream revision whose compiler behavior this semantic-only branch
 /// observes. The fork may add facts, but it may not change that behavior.
-pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "a10cf1a147209d8da50697896742d2b1d4afad75";
+pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "91088d2c2b867492c173b0e45f8b40cbe8390b1b";
 
 /// Revision containing the trace-v3 semantic implementation. This is filled
 /// with the first semantic implementation commit before the distribution pin
@@ -1838,7 +1838,10 @@ impl SemanticTraceConfig {
             effect_wrapper: wrapper_identity(&options.effect_wrapper),
             wrap_conditionals: options.wrap_conditionals,
             memo_wrapper: wrapper_identity(&options.memo_wrapper),
-            patch_driver: wrapper_identity(&options.patch_driver),
+            // Upstream removed patch-mode lowering. Keep the trace-v3 field
+            // as an explicit disabled capability, without restoring an option
+            // or any compiler behavior that the upstream base no longer has.
+            patch_driver: "disabled".to_string(),
             static_marker: options.static_marker.clone(),
             require_import_source: options.require_import_source.clone(),
             validate: options.validate,

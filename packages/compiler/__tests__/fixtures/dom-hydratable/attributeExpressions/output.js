@@ -115,9 +115,9 @@ var _el$5 = _el$4.firstChild;
 var _el$6 = _el$5.nextSibling;
 var _el$7 = _el$6.firstChild;
 var _el$8 = _el$6.nextSibling;
-_$spread(_el$4, _$mergeProps(() => {
+_$spread(_el$4, () => {
 	return getProps("test");
-}), true);
+}, true);
 _$setProperty(_el$5, "textContent", rowId);
 _$setProperty(_el$8, "innerHTML", "<div/>");
 _$effect(() => row.label, (_v$) => {
@@ -191,7 +191,7 @@ const template12 = _el$17;
 const template13 = _$getNextElement(_tmpl$8);
 var _el$19 = _$getNextElement(_tmpl$9);
 _$effect(() => state.visible, (_v$) => {
-	_el$19.checked = _v$;
+	_$setProperty(_el$19, "checked", _v$);
 });
 const template14 = _el$19;
 const template15 = _$getNextElement(_tmpl$10);
@@ -201,11 +201,11 @@ _$addEvent(_el$22, "click", increment, true);
 _$runHydrationEvents();
 const template17 = _el$22;
 var _el$23 = _$getNextElement(_tmpl$4);
-_$spread(_el$23, _$mergeProps(() => {
+_$spread(_el$23, () => {
 	return { get [key()]() {
 		return props.value;
 	} };
-}), false);
+}, false);
 _$runHydrationEvents();
 const template18 = _el$23;
 var _el$24 = _$getNextElement(_tmpl$4);
@@ -227,10 +227,10 @@ _$effect(() => {
 		n: max()
 	};
 }, ({ e, t, a, o, i, n }, _p$) => {
-	_el$26.value = e ?? "";
+	_$setProperty(_el$26, "value", e);
 	t !== _p$?.t && _$setAttribute(_el$26, "min", t);
 	a !== _p$?.a && _$setAttribute(_el$26, "max", a);
-	_el$27.checked = o;
+	_$setProperty(_el$27, "checked", o);
 	i !== _p$?.i && _$setAttribute(_el$27, "min", i);
 	n !== _p$?.n && _$setAttribute(_el$27, "max", n);
 });
@@ -284,13 +284,13 @@ var _el$42 = _el$41.nextSibling;
 var [_el$43, _el$44] = _$getNextMarker(_el$42.nextSibling);
 var _el$45 = _el$40.nextSibling;
 var _el$46 = _el$45.nextSibling;
-_$spread(_el$39, _$mergeProps(api), true);
-_$spread(_el$40, _$mergeProps(api), true);
+_$spread(_el$39, api, true);
+_$spread(_el$40, api, true);
 _$insert(_el$40, () => {
 	return api() ? "checked" : "unchecked";
 }, _el$43, _el$44);
-_$spread(_el$45, _$mergeProps(api), false);
-_$spread(_el$46, _$mergeProps(api), false);
+_$spread(_el$45, api, false);
+_$spread(_el$46, api, false);
 _$runHydrationEvents();
 const template28 = _el$39;
 var _el$47 = _$getNextElement(_tmpl$4);
@@ -374,11 +374,9 @@ _$effect(() => {
 		a: Color.Blue
 	};
 }, ({ e, t, a }, _p$) => {
-	queueMicrotask(() => {
-		return _el$61.value = e;
-	}) || (_el$61.value = e);
-	_el$62.value = t;
-	_el$63.value = a;
+	_$setProperty(_el$61, "value", e);
+	_$setProperty(_el$62, "value", t);
+	_$setProperty(_el$63, "value", a);
 });
 const template41 = _el$61;
 const template42 = _$getNextElement(_tmpl$24);

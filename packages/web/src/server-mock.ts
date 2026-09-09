@@ -1,5 +1,6 @@
 //@ts-nocheck
 import type { RequestEvent, RequestEventLocals, ResponseStub } from "./client.js";
+import type { JSX } from "../jsx/jsx.js";
 
 function throwInBrowser(func: Function) {
   const err = new Error(`${func.name} is not supported in the browser, returning undefined`);
@@ -7,10 +8,68 @@ function throwInBrowser(func: Function) {
   console.error(err);
 }
 
-/** Static asset manifest produced by a build (e.g. parsed Vite manifest.json). */
+type PreloadLinkAttributes = {
+  type?: string;
+  crossorigin?: JSX.HTMLCrossorigin;
+  integrity?: string;
+  referrerpolicy?: JSX.HTMLReferrerPolicy;
+  fetchpriority?: JSX.HTMLFetchPriority;
+  media?: string;
+};
+
+/**
+ * An explicit `<link rel="preload">` emitted by the SSR asset pipeline.
+ *
+ * `as` is the HTML Standard's set of preload destinations exactly — anything
+ * else translates to null and the browser does nothing with the link.
+ *
+ * `imagesrcset` candidates must already be resolved by the integration: they
+ * are carried verbatim (a relative candidate resolves against the DOCUMENT
+ * URL, not the manifest base). Pair it with `imagesizes` whenever a candidate
+ * uses a width descriptor, which the spec requires — without it the source
+ * size falls back to `100vw` and the preload can miss the image the `<img>`
+ * selects. Omitting `href` is the spec's own recommendation for the source-set
+ * form: it would only serve browsers without `imagesrcset` support, and there
+ * it would likely preload the wrong candidate.
+ */
+export type PreloadLink = PreloadLinkAttributes &
+  (
+    | {
+        href: string;
+        as: Exclude<JSX.HTMLPreloadAs, "image">;
+        imagesrcset?: never;
+        imagesizes?: never;
+      }
+    | {
+        href: string;
+        as: "image";
+        imagesrcset?: string;
+        imagesizes?: string;
+      }
+    | {
+        href?: never;
+        as: "image";
+        imagesrcset: string;
+        imagesizes?: string;
+      }
+  );
+
+/**
+ * Static asset graph consumed by the SSR pipeline. This is Solid's own
+ * contract — a parsed Vite client manifest satisfies it structurally
+ * (unknown fields pass through untyped), but any bundler integration can
+ * produce it. Only these fields are ever read: `preloads` is Solid's
+ * extension slot for explicit typed links the integration selects.
+ */
 export type AssetManifest = Record<
   string,
-  { file: string; css?: string[]; isEntry?: boolean; imports?: string[] }
+  {
+    file: string;
+    css?: string[];
+    isEntry?: boolean;
+    imports?: string[];
+    preloads?: PreloadLink[];
+  }
 > & { _base?: string };
 
 /** Inline style content, e.g. dev CSS collected from a bundler's module graph. */
@@ -23,6 +82,7 @@ export type InlineStyleAsset = {
 export type ResolvedAssets = {
   js: string[];
   css: (string | InlineStyleAsset)[];
+  preloads?: PreloadLink[];
 };
 
 /**
@@ -31,8 +91,9 @@ export type ResolvedAssets = {
  * normalized into a sync resolver internally). `resolve` may return a
  * promise (async resolvers require streaming rendering); CSS entries may be
  * URL strings (emitted as load-gated `<link>` tags) or inline-style
- * descriptors (emitted as `<style>` tags). A bare `resolve`-shaped function
- * is accepted as shorthand for `{ resolve }`.
+ * descriptors (emitted as `<style>` tags), and `preloads` carries explicit
+ * preload links selected by the integration. A bare `resolve`-shaped
+ * function is accepted as shorthand for `{ resolve }`.
  */
 export type AssetResolver = {
   resolve(
@@ -209,8 +270,9 @@ export function getExpectedRedirectStatus(response: ResponseStub): number {
  * shell flush, a pre-flush `Location` becomes a real redirect
  * (`getExpectedRedirectStatus`), and a post-flush one appends the
  * nonce-aware `<script>window.location=...</script>` fallback. String
- * results return a `Response` synchronously; stream results resolve at
- * shell flush. Server-only.
+ * results return a `Response` synchronously (an awaited `renderToStream`
+ * result arrives already committed — its head froze at completion); stream
+ * results resolve at shell flush. Server-only.
  */
 export function createSSRResponse(
   result: string,

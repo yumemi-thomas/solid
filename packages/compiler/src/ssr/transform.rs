@@ -32,8 +32,9 @@ use crate::shared::constants::{
 };
 use crate::shared::utils::{
     child_slot_allocates_ids, decode_html_entities, element_name, escape_html_attribute,
-    escape_html_text_expression, expression_can_return_hydratable_child, format_number,
-    is_component_name, is_void_element, normalize_static_attribute_value, trim_jsx_text,
+    escape_html_text_expression, expression_can_return_hydratable_child,
+    expression_is_function_shaped, format_number, is_component_name, is_void_element,
+    normalize_static_attribute_value, trim_jsx_text,
 };
 
 use super::template::SsrTemplate;
@@ -91,6 +92,9 @@ pub(crate) struct AstSsrTransform<'a, 'source> {
     /// Spans of JSX elements sitting in statement position (`return <jsx/>`,
     /// `const x = <jsx/>`) for the statement currently being processed.
     statement_jsx_spans: std::vec::Vec<Span>,
+    /// Direct component children are deferred values even when the generated
+    /// getter eventually places them in a return statement.
+    component_child_depth: usize,
     /// Scope stack for bare `var` hoisting, mirroring Babel's `Scope.push`
     /// targeting rules: the nearest block parent normally, the function
     /// parent from switch statements, and the scope *outside* the enclosing
@@ -233,6 +237,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             hoisted_var_names: std::vec::Vec::new(),
             pending_statements: std::vec::Vec::new(),
             statement_jsx_spans: std::vec::Vec::new(),
+            component_child_depth: 0,
             var_scope_stack: std::vec::Vec::new(),
             wont_escape_spans: std::vec::Vec::new(),
             jsx_root_span: None,
@@ -686,7 +691,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             return Ok(ssr_call);
         }
 
-        if self.statement_jsx_spans.contains(&element.span) {
+        if self.component_child_depth == 0 && self.statement_jsx_spans.contains(&element.span) {
             // Statement position: one combined `var _v$ = init1, _v$2 = …;`
             // declaration before the parent statement (Babel's
             // `insertBefore` in `ssr/template.ts`).
@@ -1149,19 +1154,29 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         });
                     }
                 }
-                JSXChild::Element(element) => values.push(ChildValue {
-                    value: self.lower_element(element)?,
-                    dynamic: false,
-                    expression_source: false,
-                }),
-                JSXChild::Fragment(fragment) => values.push(ChildValue {
-                    value: self.lower_fragment_with_kind(
+                JSXChild::Element(element) => {
+                    self.component_child_depth += 1;
+                    let value = self.lower_element(element);
+                    self.component_child_depth -= 1;
+                    values.push(ChildValue {
+                        value: value?,
+                        dynamic: false,
+                        expression_source: false,
+                    });
+                }
+                JSXChild::Fragment(fragment) => {
+                    self.component_child_depth += 1;
+                    let value = self.lower_fragment_with_kind(
                         fragment,
                         crate::semantic_trace::ExecutionSiteKind::ComponentChild,
-                    )?,
-                    dynamic: false,
-                    expression_source: false,
-                }),
+                    );
+                    self.component_child_depth -= 1;
+                    values.push(ChildValue {
+                        value: value?,
+                        dynamic: false,
+                        expression_source: false,
+                    });
+                }
                 JSXChild::ExpressionContainer(container) => {
                     let render_callback = render_callbacks
                         && matches!(
@@ -1393,10 +1408,31 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         attributes: &[JSXAttributeItem<'a>],
         has_children: bool,
     ) -> Result<Expression<'a>> {
-        // A lone spread attribute passes its argument straight through.
-        if attributes.len() == 1
-            && let JSXAttributeItem::SpreadAttribute(spread) = &attributes[0]
+        // The DOM transform handles `ref` outside its spread prop sources.
+        let mut prop_attributes = attributes.iter().filter(|attr| {
+            !matches!(attr, JSXAttributeItem::Attribute(attr)
+                if matches!(&attr.name, oxc_ast::ast::JSXAttributeName::Identifier(name)
+                    if name.name == "ref"))
+        });
+        if let (Some(JSXAttributeItem::SpreadAttribute(spread)), None) =
+            (prop_attributes.next(), prop_attributes.next())
         {
+            // The lone-spread return bypasses spread_prop_property, where
+            // discarded native refs are normally recorded. Observe those
+            // elisions here without evaluating or lowering the ref values.
+            for attr in attributes {
+                if let JSXAttributeItem::Attribute(attr) = attr
+                    && matches!(&attr.name, oxc_ast::ast::JSXAttributeName::Identifier(name)
+                        if name.name == "ref")
+                    && let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
+                {
+                    self.semantic_trace.callback(
+                        container.expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::Ref,
+                        crate::semantic_trace::CallbackDecision::Elided,
+                    );
+                }
+            }
             self.semantic_trace.value(
                 spread.argument.span(),
                 crate::semantic_trace::ExecutionSiteKind::NativeSpread,
@@ -1670,13 +1706,18 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                             .deferred_callback_site(container.expression.span(), element.span);
                     }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
+                    // Function children never classify as dynamic (the literal
+                    // reads nothing at template time), but they are deferred
+                    // holes all the same — without a scope their owner ids
+                    // drift across async retry passes.
+                    let function_hole = expression_is_function_shaped(&expression);
                     let value = self.dynamic_child_value(container.span, expression, dynamic);
                     let value = if do_not_escape {
                         value
                     } else {
                         self.escape_expression_recursive(value, false, false)
                     };
-                    let value = if allocates && dynamic {
+                    let value = if allocates && (dynamic || function_hole) {
                         self.scope_expression(container.span, value)
                     } else {
                         value
@@ -2586,13 +2627,16 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                             .deferred_callback_site(container.expression.span(), element.span);
                     }
                     let allocates = self.hydratable && child_slot_allocates_ids(child);
+                    // Function children are scope-eligible like dynamic ones —
+                    // see the template-children path above.
+                    let function_hole = expression_is_function_shaped(&expression);
                     let value = self.dynamic_child_value(container.span, expression, dynamic);
                     let value = if do_not_escape {
                         value
                     } else {
                         self.escape_expression_recursive(value, false, false)
                     };
-                    let value = if allocates && dynamic {
+                    let value = if allocates && (dynamic || function_hole) {
                         self.scope_expression(container.span, value)
                     } else {
                         value
@@ -2712,13 +2756,16 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         // never allocates, shifting every keyed sibling after it (#3015).
         let allocates =
             self.hydratable && can_allocate_ids && expression_can_return_hydratable_child(&value);
+        // `children={fn}` is a deferred function hole like its child-position
+        // twin; scope it so retry passes can't drift its owner ids.
+        let function_hole = expression_is_function_shaped(&value);
         let value = self.dynamic_child_value(span, value, dynamic);
         let value = if do_not_escape {
             value
         } else {
             self.escape_expression_recursive(value, false, false)
         };
-        let value = if allocates && dynamic {
+        let value = if allocates && (dynamic || function_hole) {
             self.scope_expression(span, value)
         } else {
             value

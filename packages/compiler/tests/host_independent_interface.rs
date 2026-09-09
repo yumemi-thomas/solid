@@ -164,3 +164,24 @@ fn semantic_trace_fails_closed_for_unreconciled_or_bypassed_modes() {
     .unwrap_err();
     assert_eq!(bypassed.kind(), CompileErrorKind::Configuration);
 }
+
+#[test]
+fn semantic_trace_refuses_unmapped_tsrx_authored_sites() {
+    for syntax in [
+        solidjs_compiler::Syntax::Auto,
+        solidjs_compiler::Syntax::Tsrx,
+    ] {
+        let error = compile(
+            "<div />",
+            &CompileOptions {
+                filename: Some("view.tsrx".into()),
+                syntax,
+                semantic_trace: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), CompileErrorKind::Configuration);
+        assert!(error.to_string().contains("authored source sites"));
+    }
+}

@@ -12,7 +12,7 @@
  * entry per read-through object; zero layer slots; nodes, has-nodes, and the
  * key-set node are lazy, materialized only by subscription.
  */
-import type { Computed, Signal } from "../../core/types.js";
+import type { Computed, Owner, Signal } from "../../core/types.js";
 
 /** Projection family (§7b): children wrap into the family's own map (writes
  * land in the projection, never the source family), and every node created
@@ -28,6 +28,27 @@ export interface StoreNextFamily {
   /** Targets currently carrying active node overrides (landing-consumption
    * walk, RUL-2: visible landed truth replaces optimism). */
   overlaid?: Set<any>;
+  /** Retaining transactions (#3164 fold ruling): every transaction that made
+   * an optimistic setter call on this family and may still be open. While
+   * any member is live, truth landings FOLD — they stage into the retaining
+   * transaction and reveal atomically at its settle, exactly like a signal
+   * landing under an active override. Dead members prune lazily at each
+   * landing (retainingTransition). */
+  rt?: Set<any>;
+  /** Flight-owned transaction (#3146): declared when a truth-flight
+   * registers (the ask's transaction — created by the flight's own pending
+   * throw when none was ambient, the causing write's when one was), renewed
+   * per settle event once the previous reveal committed. Bare optimistic
+   * writes and landings route into it BY DECLARATION; the transitionBlocked
+   * store-half checks it for ownership instead of reconstructing it from
+   * `_optimisticStores` membership. null = no flight declared one (sync
+   * derive, or a loading-window flight — the loading rail is
+   * transaction-invisible, #2933). */
+  ft?: any;
+  /** Normalized row-key fn (same resolution as the projection channels:
+   * `options.key`, "id" default, null = unkeyed). The staged-landing walk
+   * reads it: key-matched rows keep their proxy identity across a fold. */
+  key?: ((item: any) => any) | null;
   map: WeakMap<object, StoreNextTarget>;
   /** The projection computed — assigned after creation (accessor pattern). */
   node: Computed<any> | null;
@@ -49,6 +70,19 @@ export interface StoreNextTarget {
   h: Record<PropertyKey, Signal<boolean>> | null;
   /** Lazy key-set node: membership/iteration/$TRACK subscriptions (§6). */
   k: Signal<number> | null;
+  /** Keys written through the traps since the last fold commit. Bounds the
+   * setter notify/hold-check to O(written) instead of O(subscribed nodes) —
+   * a record with thousands of per-key subscriptions (selection maps) would
+   * otherwise pay a full node scan on every write. null = no trap writes
+   * this batch (bulk paths fall back to the full scan); WK_ALL = bound
+   * unusable (array length write). LOAD-BEARING SHAPE RULE: array proxy
+   * targets carry their fields as named properties on a real array, and V8
+   * normalizes an array to dictionary properties as the named count grows
+   * (empirically at counts ≡ 0 mod 3 from 18 up on V8 13.x) — every trap
+   * field read then becomes a hash lookup (~15% uibench, tree suites
+   * worst). Future write-side state MUST ride an extension object, not new
+   * named fields. */
+  wk: Set<PropertyKey> | null;
   /** Lazy deep-witness node: `deep()` subscribes ONE node per record instead
    * of one per path; write paths bump it only when it exists. Separate from
    * `k` so $TRACK/mapArray never rerun on leaf value changes (R9). */
@@ -68,8 +102,12 @@ export interface StoreNextTarget {
   /** Accessor scan performed (scan-once on first trap read; adopted data is
    * not rescanned — legacy-parity behavior). */
   sc: boolean;
-  /** Backing was swapped by adoption this batch (fold diff-notifies it). */
-  adopted: boolean;
+  /** Adoption diff base, non-null when the backing was swapped by adoption
+   * this batch: the view the nodes were LAST TOLD — the pre-batch committed
+   * backing, or the draft's pending backing when a draft preceded the
+   * adoption (its setter-exit notifications already moved the nodes, #3296).
+   * The deferred fold diffs incoming against this, never against committed. */
+  ab: Record<PropertyKey, any> | null;
   /** Pending backing is a prototype-chain OVERLAY of the committed backing
    * (`Object.create(v)` — own keys are this batch's writes, everything else
    * reads through). O(written) per flush instead of O(container) clones
@@ -81,17 +119,21 @@ export interface StoreNextTarget {
   /** Keys deleted in the overlay window (a prototype overlay cannot shadow
    * a delete); null when none. */
   del: Set<PropertyKey> | null;
-  /** Keys written through the traps since the last fold commit. Bounds the
-   * setter notify/hold-check to O(written) instead of O(subscribed nodes) —
-   * a record with thousands of per-key subscriptions (selection maps) would
-   * otherwise pay a full node scan on every write. null = no trap writes
-   * this batch (bulk paths fall back to the full scan); WK_ALL sentinel =
-   * bound unusable this batch (array length write implies index deletes). */
-  wk: Set<PropertyKey> | null;
   /** Projection family, null for plain stores (§7b). */
   fam: StoreNextFamily | null;
   /** Shallow store root (values served raw). */
   s: boolean;
+  /** Held committed view (#3074/#3075): the pre-hold committed backing,
+   * served to committed-visibility readers while `ht` is live. Adoption is
+   * eager by contract, but a projection recompute deriving from uncommitted
+   * inputs (a transition-held source, or a latest()-pull ahead of the flush)
+   * swaps the backing SPECULATIVELY — the old view must stay servable until
+   * the hold resolves. */
+  hv: Record<PropertyKey, any> | null;
+  /** The holder for `hv`: a live transition (cleared lazily when it is done)
+   * or the PLAIN_HOLD sentinel (a latest()-pull staging — cleared by the
+   * fold commit). null = no hold. */
+  ht: any;
 }
 
 /**
@@ -126,8 +168,22 @@ export interface OptStoreHooks {
   notifyOptimisticWrites(t: any, pb: Record<PropertyKey, any>): void;
   optimisticView(t: any, src: Record<PropertyKey, any>): Record<PropertyKey, any>;
   applyTentative(t: any, incoming: any, keyFn: ((item: any) => any) | null): void;
+  /** #3164 fold: does this live transaction still retain optimism (armed
+   * nodes or tracked stores)? Backs the held-truth masks in next/store.ts so
+   * plain-store bundles don't carry the transition-optimism probe. */
+  retainsOptimism(t: any): boolean;
 }
 export let optHooks: OptStoreHooks | null = null;
 export function setOptHooks(h: OptStoreHooks): void {
   optHooks = h;
+}
+
+/** Sticky descendants flag walk (§6d): reconcile's keyed pruning descends
+ * only where subscriptions exist at/below. Nodes AND patches count. */
+export function markDescendants(target: StoreNextTarget): void {
+  let t: StoreNextTarget | null = target;
+  while (t && !t.d) {
+    t.d = true;
+    t = t.u;
+  }
 }

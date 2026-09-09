@@ -14,24 +14,31 @@ export interface TemplateRecord {
   isImportNode?: boolean;
   isWrapped?: boolean;
   renderer: RendererName;
+  /** First registration site, so `validate` failures point at the JSX (#3099). */
+  path?: NodePath;
 }
 
 export interface ProgramScopeData {
   imports?: Map<string, t.Identifier>;
   templates?: TemplateRecord[];
   events?: Set<string>;
-  /** Row functions proven pure at compile time (DESIGN-PATCH-CHANNEL §3c):
-   * single-param functions whose body is exactly one compiled template with
-   * no reactive or owned work — every dynamic landed in one patchDriver on
-   * the param itself. Wrapped with `rowProof` at program exit so the list
-   * driver can engage without the (removed) runtime purity probe. */
-  pureRows?: Set<t.ArrowFunctionExpression | t.FunctionExpression>;
 }
 
+export interface TsrxStyleResult {
+  css: string;
+  cssHash: string | null;
+}
+
+export type TsrxBabelAst = t.File & {
+  tsrxStyle?: TsrxStyleResult;
+};
+
 export type BabelFileWithMetadata = {
-  ast: t.File;
+  ast: TsrxBabelAst;
   metadata: {
     config?: PluginConfig;
+    css?: string;
+    cssHash?: string | null;
   };
 };
 
@@ -143,6 +150,10 @@ export interface TransformInfo {
   fragmentChild?: boolean;
   componentChild?: boolean;
   doNotEscape?: boolean;
+  /** Child of a universal-rendered element: text feeds the host's
+   * createTextNode, so it is never HTML-escaped and JSX entities decode
+   * (#3127). Element-scoped because dynamic mode mixes renderers. */
+  universal?: boolean;
   skipId?: boolean;
   toBeClosed?: Set<string>;
   parentResults?: TransformResult;

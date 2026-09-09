@@ -132,6 +132,98 @@ describe("same-question motion is silent", () => {
     t.dispose();
   });
 
+  it("3.4-held-write: refresh() after a held manual write is still a re-ask — siblings silent, affects() scopes it", async () => {
+    // A plain derived store written manually inside an action, then
+    // refetched after the yield: the refresh lifts the manual-write mask
+    // (#3026). The lift must keep the re-ask classification — dropping it
+    // made the refetch a NEW question that pended every leaf (both rows'
+    // ids, labels, the array length), and the row-scoped affects() could not
+    // narrow it. Verdicts are observed through tracked readers, as JSX reads
+    // them: the subscribed reader is what keeps the action's transaction —
+    // and its mark — alive until the refetch lands.
+    type Row = { id: number; label: string; votes: number };
+    const db: Row[] = [
+      { id: 1, label: "Tacos", votes: 0 },
+      { id: 2, label: "Burritos", votes: 0 }
+    ];
+    const fetcher = deferredFetcher(() => db.map(r => ({ ...r })));
+    let confirm!: () => void;
+    let list!: Row[];
+    let vote!: (id: number) => unknown;
+    let dispose!: () => void;
+    const seen: Record<string, boolean> = {};
+    createRoot(d => {
+      dispose = d;
+      let setList!: (fn: (l: Row[]) => void) => void;
+      [list, setList] = createStore<Row[]>(() => fetcher.fetch(0), []);
+      vote = action(function* (id: number) {
+        affects(list.find(r => r.id === id)!, "id");
+        setList(l => {
+          l.find(r => r.id === id)!.votes++;
+        });
+        yield new Promise<void>(r => (confirm = r));
+        db.find(r => r.id === id)!.votes++;
+        refresh(list as any);
+      });
+      const row = (label: string) => list.find(r => r.label === label);
+      const watch = (name: string, q: () => unknown) =>
+        createRenderEffect(
+          () => isPending(q),
+          p => {
+            seen[name] = p;
+          }
+        );
+      watch("tacos.id", () => row("Tacos")?.id);
+      watch("burritos.id", () => row("Burritos")?.id);
+      watch("burritos.votes", () => row("Burritos")?.votes);
+      watch("burritos.label", () => row("Burritos")?.label);
+      watch("length", () => list.length);
+    });
+    flush();
+    fetcher.resolveAll();
+    await tick();
+    expect(seen).toEqual({
+      "tacos.id": false,
+      "burritos.id": false,
+      "burritos.votes": false,
+      "burritos.label": false,
+      length: false
+    });
+
+    vote(1);
+    flush();
+    // Held write: the declared mark pends; the sibling row does not.
+    expect(seen["tacos.id"]).toBe(true);
+    expect(seen["burritos.id"]).toBe(false);
+
+    // Server confirms, the action refreshes: the refetch is in flight. The
+    // mark still pends; every other leaf stays silent.
+    confirm();
+    await tick();
+    await tick();
+    expect(fetcher.calls).toBe(2);
+    expect(seen).toEqual({
+      "tacos.id": true,
+      "burritos.id": false,
+      "burritos.votes": false,
+      "burritos.label": false,
+      length: false
+    });
+
+    fetcher.resolveAll();
+    await tick();
+    await tick();
+    expect(list.find(r => r.label === "Tacos")!.votes).toBe(1);
+    expect(seen).toEqual({
+      "tacos.id": false,
+      "burritos.id": false,
+      "burritos.votes": false,
+      "burritos.label": false,
+      length: false
+    });
+    dispose();
+  });
+
   it("3.4: polling (repeated refresh) stays silent every cycle", async () => {
     const t = createThing();
     await settleInitial(t);
@@ -181,6 +273,57 @@ describe("same-question motion is silent", () => {
     expect(t.thing.foo).toBe(10); // authority wins at reveal
     expect(isPending(() => t.thing.foo)).toBe(false);
     t.dispose();
+  });
+
+  it("#3178: a quiet refresh landing leaks no one-frame pending pulse to direct render effects", async () => {
+    const resolvers: Array<(value: number) => void> = [];
+    const verdicts: boolean[] = [];
+    let source!: SourceAccessor<number>;
+    let dispose!: () => void;
+
+    createRoot(d => {
+      dispose = d;
+      source = createMemo(async () => {
+        return new Promise<number>(resolve => resolvers.push(resolve));
+      });
+      // Keep the async source observed.
+      createRenderEffect(
+        () => {
+          try {
+            return source();
+          } catch {
+            return undefined;
+          }
+        },
+        () => {}
+      );
+      // DIRECT render effect on the verdict — no memo coalescing in between.
+      createRenderEffect(
+        () => isPending(() => source()),
+        pending => {
+          verdicts.push(pending);
+        }
+      );
+    });
+
+    flush();
+    resolvers.splice(0).forEach(resolve => resolve(1));
+    await tick();
+    expect(source()).toBe(1);
+
+    const completed = refresh(source);
+    flush();
+    // Quiet while the same-question request flies…
+    expect(verdicts.every(value => value === false)).toBe(true);
+
+    resolvers.splice(0).forEach(resolve => resolve(2));
+    await tick();
+    await completed;
+
+    // …and quiet through the landing: the fresh answer reveals silently.
+    expect(source()).toBe(2);
+    expect(verdicts.every(value => value === false)).toBe(true);
+    dispose();
   });
 
   it("a quiet refetch does not poison an isPending memo with NotReady", async () => {

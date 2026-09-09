@@ -31,6 +31,7 @@ import {
 import type { JSX } from "../jsx/jsx.js";
 
 export * from "./client.js";
+// Pay-for-use: retained only when compiled patch-mode output imports
 export * from "./server-mock.js";
 export * from "./response.js";
 export type { JSX } from "../jsx/jsx.js";
@@ -237,6 +238,10 @@ function portalImpl(props: { mount?: Element; children: JSX.Element }): JSX.Elem
  * propagates as `NotReadyError` through the surrounding reactive scope, so
  * async swaps compose with `<Loading>` boundaries the same way as `lazy`.
  *
+ * During SSR a pending source streams in behind its boundary by default. Pass
+ * `{ deferStream: true }` to hold the document's first flush until it settles
+ * (the same option `createMemo` takes); the client ignores it.
+ *
  * @example
  * ```tsx
  * // `source` can return either a custom Component or a native tag
@@ -264,8 +269,19 @@ function bindingOf(value: any): { component: Function; address: string } | undef
   );
 }
 
+export interface DynamicOptions {
+  /**
+   * SSR only: hold the document's first flush until the source settles, so
+   * the resolved component renders into the shell instead of streaming in
+   * behind its boundary's fallback. Same meaning as `createMemo`'s
+   * `deferStream`. Ignored on the client.
+   */
+  deferStream?: boolean;
+}
+
 export function dynamic<T extends ValidComponent>(
-  source: () => T | Promise<T> | null | undefined | false
+  source: () => T | Promise<T> | null | undefined | false,
+  _options?: DynamicOptions
 ): Component<ComponentProps<T>> {
   // `prev` threads into the resolution so a source switching server-component
   // calls of the same function DELIVERS instead of swapping: the memo keeps
@@ -521,9 +537,10 @@ export function clientOnly<T extends Component<any>>(
  * `event.response` status at write time and restores it when the owning
  * scope is disposed — so a boundary that errored, declared a status, and
  * then recovered retracts its write instead of stomping a status a
- * surviving part of the tree legitimately set. Once the integration marks
- * the response head `committed` (head derived/sent), writes and
- * retractions are no-ops.
+ * surviving part of the tree legitimately set. Once the response head is
+ * `committed` (head derived/sent — the shell flush of a piped
+ * `renderToStream`, the completion of an awaited one, `createSSRResponse`
+ * for a `renderToString` result), writes and retractions are no-ops.
  */
 export function httpStatus(_code: number, _text?: string): void {}
 
@@ -542,7 +559,9 @@ export function httpStatus(_code: number, _text?: string): void {}
  * Retraction semantics (server): the header's prior value is snapshotted at
  * write time and restored when the owning scope is disposed (deleted if
  * there was none) — a boundary that errors or recovers retracts its writes.
- * Once the integration marks the response head `committed` (head
- * derived/sent), writes and retractions are no-ops.
+ * Once the response head is `committed` (head derived/sent — the shell
+ * flush of a piped `renderToStream`, the completion of an awaited one,
+ * `createSSRResponse` for a `renderToString` result), writes and
+ * retractions are no-ops.
  */
 export function httpHeader(_name: string, _value: string, _options?: { append?: boolean }): void {}

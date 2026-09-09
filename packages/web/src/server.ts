@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { ChildProperties } from "./constants.js";
+import { COMPOSED_BODY_FRAMING, ChildProperties, isHttpNavigationTarget } from "./constants.js";
 import {
   sharedConfig,
   createRoot as root,
@@ -25,6 +25,7 @@ import { REVALIDATE_HEADER } from "./response.js";
 import {
   BODY_FORMAT_HEADER,
   ERROR_HEADER,
+  REDIRECT_HEADER,
   SINGLE_FLIGHT_HEADER
 } from "../server-functions/src/shared.js";
 // The cookie codec (the platform-gap primitives — see cookies.js for the
@@ -48,6 +49,7 @@ import {
   evalHeadProps,
   evalHeadValue,
   resourceIdentity,
+  asciiLowerCase,
   replaceableIdentity,
   resolveHead,
   STYLESHEET_FETCH_META
@@ -59,10 +61,68 @@ import { SerializerPlugin } from "../serialization/src/serializer-decode.js";
 
 type MountableElement = Element | Document | ShadowRoot | DocumentFragment | Node;
 
-/** Static asset manifest produced by a build (e.g. parsed Vite manifest.json). */
+type PreloadLinkAttributes = {
+  type?: string;
+  crossorigin?: JSX.HTMLCrossorigin;
+  integrity?: string;
+  referrerpolicy?: JSX.HTMLReferrerPolicy;
+  fetchpriority?: JSX.HTMLFetchPriority;
+  media?: string;
+};
+
+/**
+ * An explicit `<link rel="preload">` emitted by the SSR asset pipeline.
+ *
+ * `as` is the HTML Standard's set of preload destinations exactly — anything
+ * else translates to null and the browser does nothing with the link.
+ *
+ * `imagesrcset` candidates must already be resolved by the integration: they
+ * are carried verbatim (a relative candidate resolves against the DOCUMENT
+ * URL, not the manifest base). Pair it with `imagesizes` whenever a candidate
+ * uses a width descriptor, which the spec requires — without it the source
+ * size falls back to `100vw` and the preload can miss the image the `<img>`
+ * selects. Omitting `href` is the spec's own recommendation for the source-set
+ * form: it would only serve browsers without `imagesrcset` support, and there
+ * it would likely preload the wrong candidate.
+ */
+export type PreloadLink = PreloadLinkAttributes &
+  (
+    | {
+        href: string;
+        as: Exclude<JSX.HTMLPreloadAs, "image">;
+        imagesrcset?: never;
+        imagesizes?: never;
+      }
+    | {
+        href: string;
+        as: "image";
+        imagesrcset?: string;
+        imagesizes?: string;
+      }
+    | {
+        href?: never;
+        as: "image";
+        imagesrcset: string;
+        imagesizes?: string;
+      }
+  );
+
+/**
+ * Static asset graph consumed by the SSR pipeline. This is Solid's own
+ * contract — a parsed Vite client manifest satisfies it structurally
+ * (unknown fields pass through untyped), but any bundler integration can
+ * produce it. Only these fields are ever read: `preloads` is Solid's
+ * extension slot for explicit typed links the integration selects.
+ */
 export type AssetManifest = Record<
   string,
-  { file: string; css?: string[]; isEntry?: boolean; imports?: string[] }
+  {
+    file: string;
+    css?: string[];
+    isEntry?: boolean;
+    imports?: string[];
+    preloads?: PreloadLink[];
+  }
 > & { _base?: string };
 
 /** Inline style content, e.g. dev CSS collected from a bundler's module graph. */
@@ -75,6 +135,7 @@ export type InlineStyleAsset = {
 export type ResolvedAssets = {
   js: string[];
   css: (string | InlineStyleAsset)[];
+  preloads?: PreloadLink[];
 };
 
 /**
@@ -83,8 +144,9 @@ export type ResolvedAssets = {
  * normalized into a sync resolver internally). `resolve` may return a
  * promise (async resolvers require streaming rendering); CSS entries may be
  * URL strings (emitted as load-gated `<link>` tags) or inline-style
- * descriptors (emitted as `<style>` tags). A bare `resolve`-shaped function
- * is accepted as shorthand for `{ resolve }`.
+ * descriptors (emitted as `<style>` tags), and `preloads` carries explicit
+ * preload links selected by the integration. A bare `resolve`-shaped
+ * function is accepted as shorthand for `{ resolve }`.
  */
 export type AssetResolver = {
   resolve(
@@ -272,6 +334,57 @@ function joinAssetPath(base, file) {
   return base + (file[0] === "/" ? file.slice(1) : file);
 }
 
+// Dev-only walks over a source set. Candidates are carried verbatim — rewriting
+// them would put a srcset parser on the render path — so these only report.
+//
+// The scan follows the shape of the spec's srcset parser rather than splitting
+// on commas: a candidate's URL is a maximal run of non-whitespace, and only the
+// commas TRAILING that run separate it from the next candidate. Commas INSIDE a
+// URL (`/w,400/hero.avif`, the shape image CDNs emit) are part of it, so they no
+// longer read as two relative candidates.
+// `visit(url, descriptors)` sees each candidate's URL and the descriptor text
+// between it and the closing comma, so a descriptor check never scans a URL.
+function eachCandidate(srcset, visit) {
+  let i = 0;
+  const n = srcset.length;
+  while (i < n) {
+    while (i < n && /[\s,]/.test(srcset[i])) i++;
+    const start = i;
+    while (i < n && !/\s/.test(srcset[i])) i++;
+    if (i === start) return false;
+    const raw = srcset.slice(start, i);
+    const url = raw.replace(/,+$/, "");
+    let descriptors = "";
+    // A URL that did not end in commas is followed by its descriptor; the
+    // comma that closes this candidate comes after it.
+    if (url === raw) {
+      const from = i;
+      while (i < n && srcset[i] !== ",") i++;
+      descriptors = srcset.slice(from, i);
+    }
+    if (url && visit(url, descriptors)) return true;
+  }
+  return false;
+}
+
+// `href` is joined with `_base`; candidates are not. A relative candidate
+// resolves against the DOCUMENT url instead, so the two point at different
+// places on any route below the root — which is true whether or not `_base` is
+// set, hence no base guard here.
+function hasRelativeCandidate(srcset) {
+  return eachCandidate(srcset, url => !/^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|\/)/.test(url));
+}
+
+// Whether any candidate carries a width descriptor (`400w`), which the spec
+// makes `imagesizes` mandatory for. Only descriptor text is examined: a URL is
+// free-form and `https://cdn.example/image,400w 1x` is one density candidate,
+// not a width descriptor.
+function hasWidthDescriptor(srcset) {
+  return eachCandidate(srcset, (_, descriptors) =>
+    /(?:^|\s)\d+(?:\.\d+)?w(?=\s|$)/.test(descriptors)
+  );
+}
+
 function resolveAssets(moduleUrl, manifest) {
   if (!manifest) return null;
   const base = manifest._base;
@@ -279,6 +392,7 @@ function resolveAssets(moduleUrl, manifest) {
   if (!entry) return null;
   const css = [];
   const js = [];
+  let preloads;
   const visited = new Set();
   const walk = key => {
     if (visited.has(key)) return;
@@ -287,10 +401,37 @@ function resolveAssets(moduleUrl, manifest) {
     if (!e) return;
     js.push(joinAssetPath(base, e.file));
     if (e.css) for (let i = 0; i < e.css.length; i++) css.push(joinAssetPath(base, e.css[i]));
+    if (e.preloads) {
+      for (let i = 0; i < e.preloads.length; i++) {
+        const link = e.preloads[i];
+        const href = link && typeof link.href === "string" && link.href;
+        const srcset = link && typeof link.imagesrcset === "string" && link.imagesrcset;
+        if (!href && !srcset) continue;
+        if (!preloads) preloads = [];
+        if (href) preloads.push({ ...link, href: joinAssetPath(base, href) });
+        else {
+          // A source-set link needs no href, but an unusable one must not
+          // reach `ResolvedAssets.preloads`, whose href is typed as a string.
+          const { href: bad, ...rest } = link;
+          if ("_SOLID_DEV_" && bad !== undefined)
+            console.warn("Preload href must be a non-empty string; dropping it.", bad);
+          preloads.push(rest);
+        }
+        if ("_SOLID_DEV_" && srcset && hasRelativeCandidate(srcset))
+          console.warn(
+            "imagesrcset candidates are not joined with the manifest base — they resolve " +
+              "against the document URL, so a relative candidate points somewhere else " +
+              "than the joined href; the integration should emit resolved URLs.",
+            srcset
+          );
+      }
+    }
     if (e.imports) for (let i = 0; i < e.imports.length; i++) walk(e.imports[i]);
   };
   walk(moduleUrl);
-  return { js, css };
+  const assets = { js, css };
+  if (preloads) assets.preloads = preloads;
+  return assets;
 }
 
 function registerEntryAssets(manifest) {
@@ -303,6 +444,9 @@ function registerEntryAssets(manifest) {
     if (manifest[key].isEntry) {
       const assets = resolveAssets(key, manifest);
       if (assets) {
+        if (assets.preloads)
+          for (let i = 0; i < assets.preloads.length; i++)
+            ctx.registerAsset("preload", assets.preloads[i]);
         for (let i = 0; i < assets.css.length; i++) ctx.registerAsset("style", assets.css[i]);
         // js[0] is the entry itself, which the document loads with its own <script>;
         // preload only its static import closure.
@@ -326,6 +470,7 @@ function createAssetTracking() {
     boundaryStyles,
     emittedAssets,
     inlineStyles,
+    preloadLinks: null,
     // Inline styles (dev CSS collected from the module graph, critical CSS)
     // dedupe by `id` — repeated registrations reuse the same entry object so
     // boundary Sets and the head injection never emit the same style twice.
@@ -477,6 +622,151 @@ function applyAssetTracking(context, tracking, manifest, noScripts) {
 function isCssUrl(url) {
   const q = url.search(/[?#]/);
   return (q === -1 ? url : url.slice(0, q)).endsWith(".css");
+}
+
+const RESPONSIVE_ATTRIBUTES = ["imagesrcset", "imagesizes"];
+
+// "Was this attribute supplied?" — `""` and `false` both mean no. Only the
+// responsive pair uses it: `crossorigin: ""` is a real value (anonymous),
+// so the emission loop cannot apply this test globally.
+function isSetAttr(value) {
+  return value != null && value !== false && value !== "";
+}
+
+const PRELOAD_LINK_ATTRIBUTES = [
+  "type",
+  "crossorigin",
+  "integrity",
+  "referrerpolicy",
+  "fetchpriority",
+  "media",
+  "imagesrcset",
+  "imagesizes"
+];
+
+// Normalize once for document/frame output and dedupe with useHead resources.
+//
+// Order matters: the destination decides whether the source set counts as a
+// source at all, so `as` is resolved and the responsive pair normalized BEFORE
+// the "has a source" check. Doing it the other way round accepted an
+// `imagesrcset` on a non-image destination as the source, then filtered that
+// same attribute off, and emitted a sourceless `<link rel="preload" as="script">`.
+function registerPreloadLink(tracking, headRegistry, link, nonce) {
+  if (!link || typeof link !== "object") {
+    if ("_SOLID_DEV_") console.warn('registerAsset("preload") requires a descriptor object.', link);
+    return null;
+  }
+  if (typeof link.as !== "string") {
+    if ("_SOLID_DEV_") console.warn('registerAsset("preload") requires an as destination.');
+    return null;
+  }
+  const as = asciiLowerCase(link.as);
+  let destination = null;
+  // The HTML Standard's preload destinations, exactly: "A preload destination
+  // is 'fetch', 'font', 'image', 'script', 'style', or 'track'." Anything else
+  // translates to null and the preload does nothing, so it is rejected here
+  // rather than emitted as a link no browser will act on.
+  switch (as) {
+    case "script":
+    case "style":
+      destination = as;
+      break;
+    case "fetch":
+    case "font":
+    case "image":
+    case "track":
+      break;
+    default:
+      if ("_SOLID_DEV_")
+        console.warn(
+          `registerAsset("preload") received an unsupported as destination "${link.as}".`
+        );
+      return null;
+  }
+  // Responsive attributes are image-only. A non-image link carrying one is
+  // an authoring mistake, not a reason to drop a render-critical preload:
+  // the attribute is filtered out and the link still ships. `""` counts as
+  // absent, so an integration emitting `imagesrcset: srcsetFor(file)` for
+  // every asset keeps its script and style links. A non-string value is
+  // filtered too — `String(42)` would ship `imagesrcset="42"`, a source set
+  // no browser can parse, and forge a resource identity out of garbage.
+  const responsive = as === "image";
+  if ("_SOLID_DEV_" && !responsive && (isSetAttr(link.imagesrcset) || isSetAttr(link.imagesizes)))
+    console.warn(
+      'registerAsset("preload") only supports imagesrcset and imagesizes with as="image".'
+    );
+  let srcset = null;
+  let sizes = null;
+  if (responsive) {
+    for (const name of RESPONSIVE_ATTRIBUTES) {
+      const value = link[name];
+      if (!isSetAttr(value)) continue;
+      if (typeof value !== "string") {
+        if ("_SOLID_DEV_") console.warn(`registerAsset("preload") expects a string ${name}.`);
+        continue;
+      }
+      if (name === "imagesrcset") srcset = value;
+      else sizes = value;
+    }
+  }
+  const href = typeof link.href === "string" && link.href ? link.href : null;
+  if ("_SOLID_DEV_" && !href && link.href != null && link.href !== false)
+    console.warn("Preload href must be a non-empty string; dropping it.", link.href);
+  // Spec: "One or both of the href or imagesrcset attributes must be present."
+  // A source set only counts once it survived the image-only filter above.
+  if (!href && !srcset) {
+    if ("_SOLID_DEV_")
+      console.warn('registerAsset("preload") requires a non-empty string href or imagesrcset.');
+    return null;
+  }
+  // Spec: "If the imagesrcset attribute is present and has any image candidate
+  // strings using a width descriptor, the imagesizes attribute must also be
+  // present." Without it the source size defaults to 100vw, so a preload meant
+  // for a narrower slot silently fetches the wrong candidate and the <img>
+  // downloads a second one.
+  if ("_SOLID_DEV_" && srcset && !sizes && hasWidthDescriptor(srcset))
+    console.warn(
+      "imagesrcset uses a width descriptor, so imagesizes is required; without it the " +
+        "source size defaults to 100vw and the preload may not match the image.",
+      srcset
+    );
+  const props = { rel: "preload" };
+  if (href) props.href = href;
+  props.as = as;
+  for (let i = 0; i < PRELOAD_LINK_ATTRIBUTES.length; i++) {
+    const name = PRELOAD_LINK_ATTRIBUTES[i];
+    if (RESPONSIVE_ATTRIBUTES.indexOf(name) !== -1) {
+      // Normalized above: an empty or non-string source set is not a source
+      // set, and emitting one would fork the resource identity.
+      const value = name === "imagesrcset" ? srcset : sizes;
+      if (value !== null) props[name] = value;
+      continue;
+    }
+    const value = link[name];
+    if (value == null || value === false) continue;
+    props[name] = value === true ? "" : String(value);
+  }
+  const identity = resourceIdentity("link", props);
+  if (headRegistry.resources.has(identity)) return null;
+  // A different CORS or credentials mode has a different preload key.
+  if ("_SOLID_DEV_" && props.crossorigin == null && (as === "font" || as === "fetch"))
+    console.warn(
+      `registerAsset("preload") with as="${as}" has no crossorigin and may not match the eventual request.`
+    );
+
+  const attrs = headAttrRecord(props, true);
+  const nonceValue = destination && nonce && nonce[destination];
+  if (typeof nonceValue === "string" && nonceValue) attrs.nonce = nonceValue;
+  const entry = {
+    href: props.href,
+    attrs,
+    attrHtml: renderHeadAttrHtml(props) + nonceAttr(nonce, destination)
+  };
+  headRegistry.resources.add(identity);
+  let links = tracking.preloadLinks;
+  if (!links) tracking.preloadLinks = links = [];
+  links.push(entry);
+  return entry;
 }
 
 function createHeadRegistry() {
@@ -962,12 +1252,6 @@ export function styleNonce(nonce) {
   return destinationNonce(nonce, "style");
 }
 
-// HTML compares rel/as ASCII case-insensitively; toLowerCase would fold a
-// non-ASCII character onto an ASCII one the parser never matches.
-function asciiLowerCase(value) {
-  return value.replace(/[A-Z]/g, c => String.fromCharCode(c.charCodeAt(0) + 32));
-}
-
 // Attribute names are ASCII case-insensitive, so a caller-supplied `Nonce`
 // counts as one too.
 function hasNonceProp(props) {
@@ -1225,6 +1509,10 @@ export function renderToString(code, options = {}) {
       serializer.write(id, p);
     },
     registerAsset(type, value) {
+      if (type === "preload") {
+        registerPreloadLink(tracking, headRegistry, value, nonce);
+        return;
+      }
       if (type === "inline-style") {
         tracking.registerInlineStyle(value);
         return;
@@ -1256,6 +1544,7 @@ export function renderToString(code, options = {}) {
   return assembleDocument(
     resolveSSRSelectValues(html),
     tracking.emittedAssets,
+    tracking.preloadLinks,
     tracking.inlineStyles,
     scripts.length ? scripts : "",
     nonce,
@@ -1293,6 +1582,14 @@ export function renderToStream<T>(
    * await renderToStream(...)`). Render errors route through `onError` and
    * the promise resolves with whatever HTML the render produced; it never
    * rejects.
+   *
+   * Completion is this path's head-freeze point: the request event's
+   * `response` head (the request scope the render was started in) is
+   * committed right before the render's final dispose, so
+   * `httpStatus`/`httpHeader` declarations still live at completion survive
+   * into `createSSRResponse(html, event)` — which sees the already-committed
+   * stub and passes it through. The piped forms freeze at shell flush
+   * instead.
    */
   then<TResult1 = string, TResult2 = never>(
     onfulfilled?: ((html: string) => TResult1 | PromiseLike<TResult1>) | null,
@@ -1316,6 +1613,14 @@ export function renderToStream<T>(
 export function renderToStream(code, options = {}) {
   let { onCompleteShell, onCompleteAll, renderId = "", noScripts, manifest, onHead } = options;
   const nonce = normalizeNonce(options.nonce);
+  // The request this render serves, read at start: the scope-tied response
+  // primitives (`httpStatus`/`httpHeader`) write to ITS `response` head, and
+  // the awaited path freezes that same head at completion (see `then`).
+  // Captured here, not in `then`, because the thenable may legitimately be
+  // awaited outside the request scope it was started in —
+  // `await provideRequestEvent(event, () => renderToStream(...))` is the
+  // storage module's own documented shape.
+  const requestEvent = peekRequestEvent();
   let dispose;
   let dead = false;
   // Client-disconnect teardown. A sink that throws from `write`/`end` (its
@@ -1459,6 +1764,10 @@ export function renderToStream(code, options = {}) {
   };
   const onDone = () => {
     writeTasks();
+    // Every blocker has settled by definition here (the render is complete),
+    // so doShell's growth gate has nothing to wait for: align its baseline
+    // rather than let a stale flush-loop snapshot hold a finished shell.
+    lastBlockingSize = blockingPromises.size;
     doShell();
     onCompleteAll &&
       onCompleteAll({
@@ -1530,6 +1839,8 @@ export function renderToStream(code, options = {}) {
     asset(type, value) {
       if (type === "module") {
         buffer.write(`<link rel="modulepreload" href="${value}"${nonceAttr(nonce, "script")}>`);
+      } else if (type === "preload") {
+        buffer.write(`<link${value.attrHtml}>`);
       } else if (type === "inline-style") {
         buffer.write(renderInlineStyle(value, nonce));
       } else if (type === "head-tag") {
@@ -1547,6 +1858,7 @@ export function renderToStream(code, options = {}) {
         assembleDocument(
           shellHtml,
           meta.preloads,
+          meta.preloadLinks,
           meta.inlineStyles,
           meta.tasks.length ? meta.tasks : "",
           nonce,
@@ -1618,6 +1930,49 @@ export function renderToStream(code, options = {}) {
     }
   };
   const registry = new Map();
+  // Abandonment ledger (#3165): every pending promise written through
+  // context.serialize, keyed by hydration id. Seroval's onDone waits for
+  // every serialized async value to settle, so a fragment that reaches its
+  // terminal error state while a sibling in its subtree is still pending
+  // would hold the response open forever — the subtree is discarded, nothing
+  // will ever settle the deferred. Serialized promises are raced against a
+  // per-id abandon hook so the errored fragment can terminally settle
+  // serialization its subtree owns. Hydration ids are a prefix code (each
+  // sibling ordinal is self-delimiting), so `startsWith` is exact ancestry.
+  const pendingSerialized = new Map();
+  const trackSerialized = (id, p) => {
+    let settle;
+    const raced = Promise.race([p, new Promise(r => (settle = r))]);
+    pendingSerialized.set(id, settle);
+    // Once the source settles the entry is dead weight; drop it. The
+    // rejection arm also keeps an abandoned-then-rejected source from
+    // surfacing as an unhandled rejection (seroval only sees the race).
+    const drop = () => pendingSerialized.delete(id);
+    p.then(drop, drop);
+    return raced;
+  };
+  // A fragment settling with an error abandons its subtree: descendant
+  // fragments still in the registry would gate flushEnd forever (their
+  // resume loops may be parked on promises that never settle), and pending
+  // serialized values under the errored key would gate seroval's onDone the
+  // same way. Settle both. Descendant `_fr` stubs resolve clean (not
+  // rejected) and abandoned data ids resolve undefined: the client re-renders
+  // the errored region fresh off the OUTER fragment's rejection, so nothing
+  // consumes these — a rejection would only raise unhandled-rejection noise.
+  const abandonSubtree = key => {
+    for (const [k, entry] of registry) {
+      if (k.length > key.length && k.startsWith(key)) {
+        registry.delete(k);
+        entry.resolve();
+      }
+    }
+    for (const [id, settle] of pendingSerialized) {
+      if (id.startsWith(key)) {
+        pendingSerialized.delete(id);
+        settle();
+      }
+    }
+  };
   const writeTasks = () => {
     if (tasks.length && !completed && firstFlushed) {
       buffer.write(`<script${nonceAttr(nonce, "script")}>${tasks}</script>`);
@@ -1710,6 +2065,11 @@ export function renderToStream(code, options = {}) {
       );
     },
     registerAsset(type, value) {
+      if (type === "preload") {
+        const entry = registerPreloadLink(tracking, headRegistry, value, nonce);
+        if (entry && firstFlushed) sink.asset("preload", entry);
+        return;
+      }
       if (type === "inline-style") {
         const entry = tracking.registerInlineStyle(value);
         // Boundary-attributed inline styles flush with their fragment; a late
@@ -1763,17 +2123,21 @@ export function renderToStream(code, options = {}) {
     },
     serialize(id, p, deferStream) {
       if (sharedConfig.context.noHydrate) return;
-      if (!firstFlushed && p && typeof p === "object" && "then" in p) {
-        if (deferStream) {
+      if (p && typeof p === "object" && typeof p.then === "function") {
+        if (!firstFlushed && deferStream) {
           blockingPromises.add(p);
           p.then(d => serializer.write(id, d)).catch(e => serializer.write(id, e));
           return;
         }
+        // Every pending promise handed to seroval joins the abandonment
+        // ledger (#3165) — pre-shell and streaming alike, since a fragment
+        // can error terminally at any point after this write.
+        p = trackSerialized(id, p);
         // `shellCompleted` (not `firstFlushed`) gates batching: doShell()
         // flushes the batch into the shell's task snapshot, and writes in the
         // microtask window between the two flags must go direct or they'd
         // strand in a batch nobody flushes.
-        if (canBatchStubs && !shellCompleted) {
+        if (!firstFlushed && canBatchStubs && !shellCompleted) {
           (stubBatch ||= new Map()).set(id, p);
           return;
         }
@@ -1823,6 +2187,9 @@ export function renderToStream(code, options = {}) {
         if (registry.has(key)) {
           const item = registry.get(key);
           registry.delete(key);
+          // Terminal error: the subtree is discarded — release everything in
+          // it that would otherwise gate response completion (#3165).
+          if (error) abandonSubtree(key);
 
           if (item.children) {
             for (const k in item.children) {
@@ -1950,18 +2317,20 @@ export function renderToStream(code, options = {}) {
     // context. Restore this stream before re-pulling them so hydration data
     // is serialized into the response that owns the rendered markup.
     sharedConfig.context = context;
-    // A hole that completes by MOUNTING content can register new shell
-    // blockers as it renders: a deferStream read under a boundary created
-    // during this very re-invocation adds its source promise via
-    // serialize() (solidjs/solid#3047 — the code-split lazy route shape).
-    // This attempt already runs inside the previous allSettled snapshot's
-    // continuation, so flushing now would ship the fallback deferStream
-    // exists to prevent. Bail on growth; the flush loop re-awaits the grown
-    // set, and the boundary's pre-flush replace() splices the resolved
-    // content into the held shell before the retry flushes it.
-    const blockersBefore = blockingPromises.size;
+    // Content that MOUNTS after the awaited blockers settle can register new
+    // shell blockers as it renders: a deferStream read under a boundary that
+    // resumes during the drain (its lazy module just landed — the code-split
+    // route shape, solidjs/solid#3047, #3299) or under a root hole re-pulled
+    // below adds its source promise via serialize(). This attempt already runs
+    // inside the previous allSettled snapshot's continuation, so flushing now
+    // would ship the fallback deferStream exists to prevent. Bail on growth
+    // since that snapshot (`lastBlockingSize`, taken when the loop scheduled
+    // this attempt); the flush loop re-awaits the grown set, and the
+    // boundary's pre-flush replace() splices the resolved content into the
+    // held shell before the retry flushes it.
+    if (blockingPromises.size !== lastBlockingSize) return;
     if (!resolveRootHoles()) return;
-    if (blockingPromises.size !== blockersBefore) return;
+    if (blockingPromises.size !== lastBlockingSize) return;
     // Root-owned head registrations join the shell-hole contract: a pending
     // prop blocks the shell on its source and this attempt bails; the flush
     // loop re-awaits and retries (#2975 follow-up).
@@ -1980,8 +2349,14 @@ export function renderToStream(code, options = {}) {
     // Shell head flush: commits every registration not owned by a
     // still-pending fragment (those flush with their fragment later).
     const head = renderShellHead(headRegistry, nonce, k => registry.has(k), noScripts);
+    // `preloads`, `preloadLinks` and `inlineStyles` are the LIVE tracking
+    // containers, not snapshots: a post-shell registration pushes into them
+    // AND arrives separately through `sink.asset`. Consume them inside this
+    // call (the document sink splices the head synchronously) — a sink that
+    // stores the meta and re-reads it later sees late entries twice.
     sink.shell(resolveSSRSelectValues(html), {
       preloads: tracking.emittedAssets,
+      preloadLinks: tracking.preloadLinks,
       inlineStyles: tracking.inlineStyles,
       tasks,
       head
@@ -2016,10 +2391,14 @@ export function renderToStream(code, options = {}) {
   // cost is nanoseconds — and keep extending while fragments are actually
   // completing (registry churn), so nested settled boundaries drain fully.
   const MIN_DRAIN_TURNS = 8;
+  // Size of the blocking set when the current attempt was scheduled — i.e.
+  // the snapshot the preceding allSettled awaited. doShell (and the thenable's
+  // gate) compare against it: anything added since was discovered during the
+  // drain and has NOT been awaited.
   let lastBlockingSize = -1;
   let lastRegistrySize = -1;
   let drainTurn = 0;
-  const scheduleFlush = fn => {
+  const scheduleFlush = (fn, awaited) => {
     const attempt = () => {
       // Flush batched stubs at the TOP of the drain, not at doShell: a
       // promise that already settled emits its fulfillment on a microtask
@@ -2037,8 +2416,8 @@ export function renderToStream(code, options = {}) {
       }
       fn();
     };
-    const progressed = blockingPromises.size !== lastBlockingSize;
-    lastBlockingSize = blockingPromises.size;
+    const progressed = awaited !== lastBlockingSize;
+    lastBlockingSize = awaited;
     lastRegistrySize = -1;
     drainTurn = 0;
     progressed ? queue(attempt) : setTimeout(attempt);
@@ -2060,7 +2439,7 @@ export function renderToStream(code, options = {}) {
     let resolve;
     const p = new Promise(r => (resolve = r));
     function flush() {
-      allSettled(blockingPromises).then(() => {
+      allSettled(blockingPromises).then(awaited => {
         scheduleFlush(() => {
           if (dead) return resolve();
           // Root-hole retries and shell assembly run inside this microtask —
@@ -2121,7 +2500,7 @@ export function renderToStream(code, options = {}) {
             dispose();
             writable.end();
           } else flushEnd();
-        });
+        }, awaited);
       });
     }
     flush();
@@ -2133,9 +2512,28 @@ export function renderToStream(code, options = {}) {
     // renderToStringAsync. Render errors route through `onError` (the
     // promise resolves with whatever HTML the render produced; it never
     // rejects), matching the pipe/pipeTo contract.
+    //
+    // Head-freeze point: completion. The pipe paths freeze the request's
+    // response head when the shell reaches the sink (`createSSRResponse`
+    // commits the stub on the first write, before the final dispose runs).
+    // This path has no shell flush — the whole document resolves at once,
+    // and the consumer derives the head from the SAME stub afterwards
+    // (`createSSRResponse`'s string path) — so the render commits the stub
+    // itself, immediately before disposing the render owner. Without that,
+    // the final dispose would run every `httpStatus`/`httpHeader` cleanup
+    // against a still-open head and retract the declarations before the
+    // consumer ever saw the HTML (a page's `httpStatus(404)` came back 200).
+    // Retraction semantics are untouched: a scope disposed mid-render (an
+    // errored, recovered boundary) still retracts, because the head is
+    // still open then. Consumers see an already-committed stub, which
+    // `createSSRResponse`/`commitEventResponse` pass through idempotently.
     then(onFulfilled, onRejected) {
+      const freezeHead = () => {
+        if (requestEvent && requestEvent.response) commitResponseStub(requestEvent.response);
+      };
       const p = new Promise(resolve => {
         function complete() {
+          freezeHead();
           dispose();
           resolve(tmp);
         }
@@ -2147,7 +2545,7 @@ export function renderToStream(code, options = {}) {
           };
         } else onCompleteAll = complete;
         function flush() {
-          allSettled(blockingPromises).then(() => {
+          allSettled(blockingPromises).then(awaited => {
             scheduleFlush(() => {
               // Same gates as doShell: pending root head props are shell
               // blockers, so flushEnd must not run ahead of them (their
@@ -2156,22 +2554,26 @@ export function renderToStream(code, options = {}) {
               // new blockers (deferStream under a just-mounted boundary,
               // solidjs/solid#3047) must be re-awaited before completion.
               try {
-                const blockersBefore = blockingPromises.size;
                 if (
+                  blockingPromises.size !== lastBlockingSize ||
                   !resolveRootHoles() ||
-                  blockingPromises.size !== blockersBefore ||
+                  blockingPromises.size !== lastBlockingSize ||
                   !headShellReady(headRegistry, p => blockingPromises.add(p))
                 )
                   return flush();
               } catch (err) {
                 // Contain retry-pass errors (see failRender); the thenable
                 // contract already routes render errors through onError and
-                // resolves with whatever HTML the render produced.
+                // resolves with whatever HTML the render produced. The head
+                // is deliberately NOT frozen on this path: the render died,
+                // its teardown retracts the declarations as it always did,
+                // and the consumer keeps a writable head for whatever error
+                // response it builds around the partial HTML.
                 failRender(err);
                 return resolve(tmp);
               }
               queue(flushEnd);
-            });
+            }, awaited);
           });
         }
         flush();
@@ -2181,7 +2583,7 @@ export function renderToStream(code, options = {}) {
     pipe(w) {
       claimConsumer("pipe");
       function flush() {
-        allSettled(blockingPromises).then(() => {
+        allSettled(blockingPromises).then(awaited => {
           scheduleFlush(() => {
             if (dead) return;
             try {
@@ -2207,7 +2609,7 @@ export function renderToStream(code, options = {}) {
               dispose();
               writable.end();
             } else flushEnd();
-          });
+          }, awaited);
         });
       }
       flush();
@@ -3104,6 +3506,9 @@ export function ssr(t) {
 export function ssrClassName(value: string | { [k: string]: boolean } | Array<any>): string;
 
 export function ssrClassName(value) {
+  // Numbers stringify like the compiler's static output (`class={1}`
+  // inlines as `class="1"`), matching the client runtime (#3189).
+  if (typeof value === "number") return "" + value;
   if (!value) return "";
   if (typeof value === "string") return escape(value, true);
   value = classListToObject(value);
@@ -3167,13 +3572,23 @@ export function ssrElement(tag, props, children, needsId) {
   // so the server must allocate in the same order or the element's own id
   // shifts by one and it is left unclaimed on hydration.
   const hk = needsId ? ssrHydrationKey() : "";
+  if (typeof props === "function") props = props();
+  // A nullish source (static or resolved) is an empty spread (#3297).
   if (props == null) props = {};
-  else if (typeof props === "function") props = props();
   const skipChildren = VOID_ELEMENTS.test(tag);
   const keys = Object.keys(props);
   let result = `<${tag}${hk} `;
   for (let i = 0; i < keys.length; i++) {
     const prop = keys[i];
+    const value = props[prop];
+    // The compiler moves static textarea values into children, but an
+    // element with a spread is serialized here instead. Keep the runtime
+    // path equivalent: textarea value/defaultValue are its text content,
+    // never HTML attributes.
+    if (tag === "textarea" && (prop === "value" || prop === "defaultValue")) {
+      if (value !== null) children = escape(value);
+      continue;
+    }
     if (ChildProperties.has(prop)) {
       if (children === undefined && !skipChildren)
         children =
@@ -3182,7 +3597,6 @@ export function ssrElement(tag, props, children, needsId) {
             : escape(props[prop]);
       continue;
     }
-    const value = props[prop];
     if (prop === "style") {
       result += `style="${ssrStyle(value)}"`;
     } else if (prop === "class") {
@@ -3343,7 +3757,12 @@ function decodeSSREntities(s) {
         .replace(/&amp;/g, "&");
 }
 
-const SELECT_VALUE_ATTR = /\svalue="([^"]*)"/;
+// Matches the quoted form (`value="…"`) AND the bare form (`value` followed
+// by a space, `>`, or end-of-attrs): empty attribute values serialize as
+// bare attributes (see ssrSpread / compiled templates), and an empty-string
+// bound value is a real bound value — a `value=""` option must match it
+// (#3013 follow-up). Group 1 is undefined for the bare form → empty string.
+const SELECT_VALUE_ATTR = /\svalue(?:="([^"]*)")?(?=[\s>]|$)/;
 
 // True end (`>`) of the tag opening at `i`, skipping quoted attribute
 // values. -1 when the tag never closes in this string.
@@ -3421,7 +3840,7 @@ export function resolveSSRSelectValues(html) {
       cand = html.indexOf("<select", e0 + 1);
       continue;
     }
-    const bound = decodeSSREntities(m[1]);
+    const bound = decodeSSREntities(m[1] ?? "");
     const sel = {
       values: /\smultiple(?=[\s>=])/.test(open) ? bound.split(",") : [bound],
       strip: cand + m.index,
@@ -3468,8 +3887,9 @@ export function resolveSSRSelectValues(html) {
           else {
             const vm = SELECT_VALUE_ATTR.exec(attrs);
             // Spec: no value attribute → text content, whitespace collapsed.
+            // A bare `value` attribute (vm[1] undefined) IS a value: "".
             const value = vm
-              ? decodeSSREntities(vm[1])
+              ? decodeSSREntities(vm[1] ?? "")
               : decodeSSREntities(optionText(html, e + 1))
                   .replace(/\s+/g, " ")
                   .trim();
@@ -3661,11 +4081,16 @@ function queue(fn) {
 // Node; timer fallback for hosts without it (workerd, browsers).
 const deferFlush = typeof setImmediate === "function" ? setImmediate : fn => setTimeout(fn, 0);
 
+// Resolves with the size of the set it awaited. The caller snapshots THAT,
+// not the size when its continuation runs: a blocker registered in the
+// microtask between the growth check here and the caller's `.then` (a
+// boundary resuming on the same settlement — its lazy module landed and the
+// mounted content took a deferStream read) has not been awaited (#3299).
 function allSettled(promises) {
   let size = promises.size;
   return Promise.allSettled(promises).then(() => {
     if (promises.size !== size) return allSettled(promises);
-    return;
+    return size;
   });
 }
 
@@ -3692,7 +4117,16 @@ function allSettled(promises) {
 // output passes through with only the script splice. When the output does
 // contain `</head>`, splicing is automatic and `onHead` is not called: one
 // mode or the other, decided by the render output itself.
-function assembleDocument(html, emittedAssets, inlineStyles, scripts, nonce, headTags, onHead) {
+function assembleDocument(
+  html,
+  emittedAssets,
+  preloadLinks,
+  inlineStyles,
+  scripts,
+  nonce,
+  headTags,
+  onHead
+) {
   const scriptTag = scripts ? `<script${nonceAttr(nonce, "script")}>${scripts}</script>` : "";
   const title = headTags ? headTags.title : null;
   let headTagsHtml = headTags ? headTags.html : "";
@@ -3703,6 +4137,7 @@ function assembleDocument(html, emittedAssets, inlineStyles, scripts, nonce, hea
     !headTagsHtml &&
     !headPrelude &&
     !(emittedAssets && emittedAssets.size) &&
+    !preloadLinks &&
     !(inlineStyles && inlineStyles.size)
   ) {
     // Nothing head-bound: never look for `</head>`. Body-only renders (no
@@ -3747,7 +4182,7 @@ function assembleDocument(html, emittedAssets, inlineStyles, scripts, nonce, hea
         headPrelude +
           headTagsHtml +
           titleHtml +
-          renderHeadAssets(emittedAssets, inlineStyles, nonce)
+          renderHeadAssets(emittedAssets, preloadLinks, inlineStyles, nonce)
       );
     }
     // No head to splice into: without `onHead`, assets/preloads/styles are
@@ -3786,7 +4221,7 @@ function assembleDocument(html, emittedAssets, inlineStyles, scripts, nonce, hea
       headTagsHtml = `<title data-dh="title">${winner}</title>` + headTagsHtml;
     }
   }
-  const head = headTagsHtml + renderHeadAssets(emittedAssets, inlineStyles, nonce);
+  const head = headTagsHtml + renderHeadAssets(emittedAssets, preloadLinks, inlineStyles, nonce);
   if (!scriptTag) return html.slice(0, headIdx) + head + html.slice(headIdx);
   const xsIdx = html.indexOf("<!--xs-->");
   if (xsIdx === -1) return html.slice(0, headIdx) + head + html.slice(headIdx) + scriptTag;
@@ -3798,7 +4233,7 @@ function assembleDocument(html, emittedAssets, inlineStyles, scripts, nonce, hea
 // Tracked asset links (stylesheet/modulepreload by URL) and unconsumed inline
 // styles, rendered for a head splice or an `onHead` delivery. Inline-style
 // entries are consumed (marked emitted) by whichever path renders them first.
-function renderHeadAssets(emittedAssets, inlineStyles, nonce) {
+function renderHeadAssets(emittedAssets, preloadLinks, inlineStyles, nonce) {
   let head = "";
   const styleAttr = nonceAttr(nonce, "style");
   const scriptAttr = nonceAttr(nonce, "script");
@@ -3808,6 +4243,9 @@ function renderHeadAssets(emittedAssets, inlineStyles, nonce) {
         ? `<link rel="stylesheet" href="${url}"${styleAttr}>`
         : `<link rel="modulepreload" href="${url}"${scriptAttr}>`;
     }
+  }
+  if (preloadLinks) {
+    for (const entry of preloadLinks) head += `<link${entry.attrHtml}>`;
   }
   if (inlineStyles && inlineStyles.size) {
     for (const entry of inlineStyles.values()) {
@@ -3935,7 +4373,9 @@ function flattenClassList(list, result) {
     const item = list[i];
     if (Array.isArray(item)) flattenClassList(item, result);
     else if (typeof item === "object" && item != null) Object.assign(result, item);
-    else if (item || item === 0) result[item] = true;
+    // clsx-style composition: standalone booleans are ignored so guard
+    // expressions like `cond && "active"` never emit a "true" class (#3189).
+    else if (typeof item !== "boolean" && (item || item === 0)) result[item] = true;
   }
 }
 
@@ -4099,6 +4539,19 @@ export function getRequestEvent() {
           "RequestEvent is missing. This is most likely due to accessing `getRequestEvent` non-managed async scope in a partially polyfilled environment. Try moving it above all `await` calls."
         )
     : undefined;
+}
+
+// The runtime's own silent read of the request scope's event, for
+// `renderToStream` at render start: whether there is a response head to
+// freeze at completion. Only the scope store is consulted — no
+// `sharedConfig.context.event` fallback, since at render start that context
+// is the PREVIOUS render's and could name another request's head — and no
+// missing-event warning: that warning is for application code reading the
+// event where it should exist, while a render outside any request scope
+// (tests, static generation, a bare script) is a normal thing.
+function peekRequestEvent() {
+  const store = (globalThis as any)[RequestContext];
+  return store ? store.getStore() : undefined;
 } /** A fresh, uncommitted response head. */
 export function createResponseStub(): ResponseStub;
 
@@ -4162,8 +4615,9 @@ function reportLostHeaderWrite(method, name) {
  * reads are untouched) so a post-commit write fails loudly instead of
  * silently missing the wire: it throws in the dev build and reports +
  * no-ops otherwise. Every head materialization path commits through here
- * (`createSSRResponse`, the server-function handler's commit seam);
- * integrations deriving their own heads should too.
+ * (`createSSRResponse`, an awaited `renderToStream` result's completion,
+ * the server-function handler's commit seam); integrations deriving their
+ * own heads should too.
  *
  * `allowLateLocation` is the stream path's documented exception: a
  * `Location` set after the shell flushed is still honored client-side
@@ -4183,7 +4637,9 @@ export function commitResponseStub(
  * instead of silently missing the wire: it throws in the dev build and
  * reports + no-ops otherwise. Every head materialization path commits
  * through here — `createSSRResponse` (string results and the stream's
- * shell flush) and the server-function handler's commit seam — so the
+ * shell flush), an awaited `renderToStream` result's completion (the
+ * render commits before its final dispose so scope-tied declarations
+ * survive), and the server-function handler's commit seam — so the
  * guarantee holds for every writer, not just core's own primitives.
  *
  * `allowLateLocation` is the stream path's documented exception: a
@@ -4262,9 +4718,17 @@ function copyInitHeaders(init) {
 // outcome that declared them. Header names via the shared wire constants;
 // lowercased once because `Headers` iteration keys are lowercase.
 const STUB_GAP_FILL_EXCLUDED = /*#__PURE__*/ new Set(
-  [ERROR_HEADER, BODY_FORMAT_HEADER, SINGLE_FLIGHT_HEADER, REVALIDATE_HEADER, "Location"].map(
-    header => header.toLowerCase()
-  )
+  [
+    ERROR_HEADER,
+    BODY_FORMAT_HEADER,
+    SINGLE_FLIGHT_HEADER,
+    REVALIDATE_HEADER,
+    REDIRECT_HEADER,
+    "Location",
+    // written before the body exists, so they can only describe a different
+    // one (#3197)
+    ...COMPOSED_BODY_FRAMING
+  ].map(header => header.toLowerCase())
 );
 
 // Whether a stub header may gap-fill onto the outgoing response: not a
@@ -4329,28 +4793,30 @@ export function commitEventResponse(response, event = getRequestEvent()) {
     if (fillsStubGap(key, response.headers, response)) hasGaps = true;
   });
   if (!cookies.length && !hasGaps) return response;
-  try {
-    for (const cookie of cookies) response.headers.append("Set-Cookie", cookie);
-    stub.headers.forEach((value, key) => {
-      if (fillsStubGap(key, response.headers, response)) response.headers.set(key, value);
-    });
-    return response;
-  } catch {
-    const headers = copyInitHeaders(response.headers);
-    for (const cookie of cookies) headers.append("Set-Cookie", cookie);
-    stub.headers.forEach((value, key) => {
-      if (fillsStubGap(key, headers, response)) headers.set(key, value);
-    });
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers
-    });
-  }
+  // Always fold onto a rebuilt Response, never in place: the response is the
+  // application's object, and an app may return the same one again — a
+  // module-level redirect singleton, a memoized per-tenant Response. Folding
+  // in place accumulates every request's cookies onto that shared object, so
+  // one user's Set-Cookie is served to the next (#3155). Rebuilding also
+  // absorbs immutable-headers responses (Response.redirect) for free; the
+  // cost lands only on responses that were going to be modified anyway.
+  const headers = copyInitHeaders(response.headers);
+  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
+  stub.headers.forEach((value, key) => {
+    if (fillsStubGap(key, headers, response)) headers.set(key, value);
+  });
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 function deriveHead(stub, responseInit = {}) {
   const headers = mergeStubHeaders(copyInitHeaders(responseInit.headers), stub);
+  // This runtime supplies the HTML body, so framing written before render
+  // cannot describe the bytes that will leave.
+  for (const header of COMPOSED_BODY_FRAMING) headers.delete(header);
   const status = (stub && stub.status) || responseInit.status || 200;
   const statusText = (stub && stub.statusText) || responseInit.statusText || undefined;
   return { status, statusText, headers };
@@ -4358,7 +4824,8 @@ function deriveHead(stub, responseInit = {}) {
  * Derives the outgoing `Response` for an SSR render result, running the
  * response-head lifecycle against `event.response`: commit at shell flush,
  * pre-flush `Location` becomes a real redirect, post-flush `Location`
- * appends a client-side script redirect before the stream closes.
+ * appends a client-side script redirect before the stream closes when its
+ * target resolves to HTTP(S).
  * Synchronous for string results; resolves at shell flush for stream
  * results.
  */
@@ -4377,9 +4844,13 @@ export function createSSRResponse(
  * Derives the outgoing `Response` for an SSR render result, running the
  * response-head lifecycle against `event.response`:
  *
- * - String results (sync/async renders) commit the stub and return a
- *   `Response` synchronously; a `Location` on the stub becomes a real
- *   redirect (`getExpectedRedirectStatus`) instead of an HTML response.
+ * - String results commit the stub and return a `Response` synchronously;
+ *   a `Location` on the stub becomes a real redirect
+ *   (`getExpectedRedirectStatus`) instead of an HTML response. An awaited
+ *   `renderToStream(...)` result arrives with its stub ALREADY committed —
+ *   the render froze the head at completion, before its final dispose, so
+ *   `httpStatus`/`httpHeader` declarations survive into the derived head —
+ *   and the commit here is an idempotent pass-through for it.
  * - Stream results (`renderToStream(...)`) resolve at shell flush — the
  *   moment the head freezes: the stub is committed there (post-commit
  *   header writes fail loudly — see `commitResponseStub`), its
@@ -4387,8 +4858,8 @@ export function createSSRResponse(
  *   `Location` short-circuits to a redirect with no body (the render is
  *   abandoned). A `Location` set after the flush
  *   can only be honored client-side, so stream completion appends
- *   `<script>window.location=...</script>` (carrying `options.nonce` for
- *   strict `script-src` CSPs) before closing.
+ *   `<script>window.location=...</script>` for relative or HTTP(S) targets
+ *   (carrying `options.nonce` for strict `script-src` CSPs) before closing.
  *
  * `options.transformChunk(chunk)` rewrites each outgoing HTML chunk (entry
  * script injection, doctype prefixes, ...). The default `content-type` is
@@ -4471,7 +4942,7 @@ export function createSSRResponse(result, event, options = {}) {
         // (a pre-flush one short-circuited above) — client-side is the only
         // side that can still honor it.
         const location = stub && stub.headers.get("Location");
-        if (location) {
+        if (location && isHttpNavigationTarget(location)) {
           const attr = nonceAttr(nonce, "script");
           enqueue(
             `<script${attr}>window.location=${JSON.stringify(location).replace(

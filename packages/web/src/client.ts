@@ -4,7 +4,9 @@ import {
   getOwner,
   runWithOwner,
   createComponent,
+  createOwner,
   createRoot as root,
+  onCleanup,
   sharedConfig,
   untrack,
   merge as mergeProps,
@@ -13,9 +15,10 @@ import {
   flush,
   enableHydration,
   enforceLoadingBoundary,
-  resetErrorHalt
+  resetErrorHalt,
+  DEV
 } from "solid-js";
-import { effect, memo } from "./render.js";
+import { effect, memo, tagElement } from "./render.js";
 
 import { JSX } from "../jsx/jsx.js";
 
@@ -121,12 +124,6 @@ export const waitAsset = (promise: Promise<unknown>): void => {
   gate();
 };
 
-// Optional patch-channel seams (DESIGN §16): dormant (default-off). Cores
-// that don't provide them degrade gracefully — list accessors run classic
-// mapArray, compiled bodies run the dual-phase effect.
-const driveList = undefined;
-const patchableRaw = undefined;
-const registerPatch = undefined;
 import reconcileArrays from "./reconcile.js";
 import { DOMWithState } from "./constants.js";
 import {
@@ -138,6 +135,8 @@ import {
   resourceIdentity,
   replaceableIdentity,
   resolveHead,
+  RESOURCE_QUALIFIERS,
+  qualifierValue,
   STYLESHEET_FETCH_META
 } from "./head.js";
 export {
@@ -153,6 +152,8 @@ export {
 } from "./constants.js";
 
 const $$EVENT_OWNER = "_$SOLID_EVENT_OWNER";
+const $$EVENT_TUPLE = Symbol();
+const hasOwn = Object.prototype.hasOwnProperty;
 const INNER_OWNED = {};
 const delegatedEvents = new Set();
 const delegatedContainers = new Map();
@@ -279,6 +280,18 @@ function create(html, bypassGuard, flag) {
     throw new Error(
       "Failed attempt to create new DOM elements during hydration. Check that the libraries you are using support hydration."
     );
+  // A document shell cannot be client-created: `<template>` contents parsing
+  // ignores `<html>`/`<head>`/`<body>` start tags, so the markup would be
+  // silently flattened and the emitted walk would bind the wrong nodes. The
+  // validator deliberately accepts well-formed shells (#3259) because they
+  // are legitimate under hydration — the failure belongs here, at the actual
+  // broken act, not on every module that imports the component.
+  if ("_SOLID_DEV_" && /^<(html|head|body)[\s>]/i.test(html))
+    throw new Error(
+      "Document shell templates (<html>, <head>, <body>) cannot be client-created: " +
+        "a <template> parse strips those tags. Render this component through hydrate(), " +
+        "where the document shell already exists."
+    );
   const t = document.createElement("template");
   t.innerHTML = html;
   return flag === 2 ? t.content.firstChild.firstChild : t.content.firstChild;
@@ -366,9 +379,44 @@ export function unregisterDelegatedContainer(container, owner = container) {
 
 function attachDelegatedEvent(name, container, state) {
   if (state.handlers.has(name)) return;
-  const handler = e => eventHandler(e, container, state);
+  const handler = "_SOLID_DEV_"
+    ? e => dispatchAsInteraction(e, () => eventHandler(e, container, state))
+    : e => eventHandler(e, container, state);
   state.handlers.set(name, handler);
   container.addEventListener(name, handler);
+}
+
+// === Interaction provenance (dev) ===
+//
+// Delegated events — every INP-relevant type: click, input, keydown,
+// pointer*… — reach user code through the dispatch above, and runtime-attached
+// direct handlers (spreads, non-literal handler expressions) through addEvent.
+// Wrapping those two in the signals attribution engine's `withInteraction`
+// stamps every root write a handler performs with the event that caused it
+// (`click on button#next "Next →"`) — what turns a transition hold or a hot
+// scope into a per-interaction number. Not covered: non-delegated events
+// whose handler is a literal function (the compiler emits a bare
+// `addEventListener` for those) and hand-written `ref`-based listeners.
+
+/** `button#next "Next →"`, `input[name=q]`, `a "Docs"` — what the user hit. */
+function describeEventTarget(target) {
+  if (!target || typeof target.tagName !== "string") return undefined;
+  const tag = target.tagName.toLowerCase();
+  let out = tag;
+  if (target.id) out += `#${target.id}`;
+  else if (typeof target.name === "string" && target.name) out += `[name=${target.name}]`;
+  if (tag !== "input" && tag !== "textarea" && tag !== "select") {
+    const text = (target.textContent || "").trim().replace(/\s+/g, " ");
+    if (text) out += ` "${text.length > 30 ? text.slice(0, 29) + "…" : text}"`;
+  }
+  return out;
+}
+
+function dispatchAsInteraction(e, fn) {
+  return DEV.attribution.withInteraction(
+    { type: e.type, target: describeEventTarget(e.target) },
+    fn
+  );
 } /** Event-delegation plumbing (Portal/custom-root wiring). Integration plumbing. @internal */
 export function getDelegatedRoot(node: MountableElement): MountableElement | undefined;
 
@@ -391,8 +439,23 @@ function findOwner(target, state) {
 export function setProperty(node: Element, name: string, value: any): void;
 
 export function setProperty(node, name, value) {
+  if ("_SOLID_DEV_") tagElement(node);
   if (isHydrating(node)) return;
-  node[name] = value;
+  // Stateful DOM properties (DOMWithState) route through here in hydratable
+  // builds so the claim pass adopts pre-hydration user state instead of
+  // clobbering it (#3182). Mirror the special cases the compiler emits for
+  // the direct-assignment path: <select value> defers a microtask so options
+  // rendered later in the same pass are selectable, and input/textarea
+  // value/defaultValue clear on nullish instead of stringifying (#2957).
+  const nodeName = node.nodeName;
+  if (name === "value" && nodeName === "SELECT")
+    queueMicrotask(() => (node.value = value)) || (node.value = value);
+  else if (
+    (name === "value" || name === "defaultValue") &&
+    (nodeName === "INPUT" || nodeName === "TEXTAREA")
+  )
+    node[name] = value ?? "";
+  else node[name] = value;
 }
 
 // === Element claims ===
@@ -504,9 +567,27 @@ export function claimElement(node) {
 export function setAttribute(node: Element, name: string, value: string): void;
 
 export function setAttribute(node, name, value) {
+  if ("_SOLID_DEV_") tagElement(node);
   if (isHydrating(node)) return;
+  const selectMultiple = name === "multiple" && node.localName === "select";
   if (value == null || value === false) node.removeAttribute(name);
-  else node.setAttribute(name, value === true ? "" : value);
+  else {
+    node.setAttribute(name, value === true ? "" : value);
+    // A dynamic `multiple` reaches the select only after its options were
+    // parsed under single-select rules, which keep just the last `selected`
+    // option. On the first truthy write restore the parser's multi-select
+    // selectedness from the options' defaults so an initially-true
+    // expression matches the static attribute (#3179). Later toggles keep
+    // the live selection state, exactly like toggling the attribute on
+    // static markup.
+    if (selectMultiple && !node._$multiple) {
+      const options = node.options;
+      for (let i = 0; i < options.length; i++) {
+        if (options[i].defaultSelected) options[i].selected = true;
+      }
+    }
+  }
+  if (selectMultiple) node._$multiple = true;
   // Frozen contract with compiled output: `href`/`action` can only change
   // through compiler-owned write paths, which all land here — so one recheck
   // at this site keeps claim consumers fresh with no observers.
@@ -515,6 +596,7 @@ export function setAttribute(node, name, value) {
 export function setAttributeNS(node: Element, namespace: string, name: string, value: string): void;
 
 export function setAttributeNS(node, namespace, name, value) {
+  if ("_SOLID_DEV_") tagElement(node);
   if (isHydrating(node)) return;
   // removeAttributeNS takes the local name; setAttributeNS accepts the qualified form.
   if (value == null || value === false)
@@ -524,22 +606,40 @@ export function setAttributeNS(node, namespace, name, value) {
 export function className(node: Element, value: JSX.ClassValue, prev?: JSX.ClassValue): void;
 
 export function className(node, value, prev) {
-  if (isHydrating(node)) return;
+  if ("_SOLID_DEV_") tagElement(node);
+  // Numbers stringify like the compiler's static output (`class={1}`
+  // inlines as `class="1"` in the template) so static and dynamic forms of
+  // the same ClassValue behave identically (#3189).
+  if (typeof value === "number") value = "" + value;
+  if (typeof prev === "number") prev = "" + prev;
+  if (isHydrating(node)) {
+    // Seed applied state without touching the claimed DOM so later in-place
+    // mutations can still be diffed after hydration completes.
+    node._$classes = value && typeof value === "object" ? classListToObject(value) : undefined;
+    return;
+  }
   if (value == null || value === false) {
-    prev && node.removeAttribute("class");
+    if (prev || node._$classes) {
+      node.removeAttribute("class");
+      node._$classes = undefined;
+    }
     return;
   }
   if (typeof value === "string") {
+    node._$classes = undefined;
     value !== prev && node.setAttribute("class", value);
     return;
   }
+  // Track classes applied by className() itself. value/prev are user-owned
+  // and may be the same object on shared-effect reruns.
+  let applied;
   if (typeof prev === "string") {
-    prev = {};
+    applied = {};
     node.removeAttribute("class");
-  } else prev = classListToObject(prev || {});
+  } else applied = node._$classes || classListToObject(prev || {});
   value = classListToObject(value);
-  const classKeys = Object.keys(value || {});
-  const prevKeys = Object.keys(prev);
+  const classKeys = Object.keys(value);
+  const prevKeys = Object.keys(applied);
   let i, len;
   for (i = 0, len = prevKeys.length; i < len; i++) {
     const key = prevKeys[i];
@@ -549,27 +649,51 @@ export function className(node, value, prev) {
   for (i = 0, len = classKeys.length; i < len; i++) {
     const key = classKeys[i],
       classValue = !!value[key];
-    if (!key || key === "undefined" || prev[key] === classValue || !classValue) continue;
+    if (!key || key === "undefined" || applied[key] === classValue || !classValue) continue;
     node.classList.add(key);
   }
+  node._$classes = value;
 } /** Compiler-emitted primitive; not for hand-written code. @internal */
 export function addEvent(
   node: Element,
   name: string,
   handler: EventListener | EventListenerObject | (EventListenerObject & AddEventListenerOptions),
   delegate: boolean
-): void;
+): EventListener | EventListenerObject | void;
 
 export function addEvent(node, name, handler, delegate) {
   if (delegate) {
+    const key = `$$${name}`;
+    let data;
     if (Array.isArray(handler)) {
-      node[`$$${name}`] = handler[0];
-      node[`$$${name}Data`] = handler[1];
-    } else node[`$$${name}`] = handler;
-  } else if (Array.isArray(handler)) {
+      data = handler[1];
+      node[key] = handler[0];
+    } else node[key] = handler;
+    node[`${key}Data`] = data;
+    return;
+  }
+  if (Array.isArray(handler)) {
     const handlerFn = handler[0];
-    node.addEventListener(name, (handler[0] = e => handlerFn.call(node, handler[1], e)));
-  } else node.addEventListener(name, handler, typeof handler !== "function" && handler);
+    const listener = "_SOLID_DEV_"
+      ? e => dispatchAsInteraction(e, () => handlerFn.call(node, handler[1], e))
+      : e => handlerFn.call(node, handler[1], e);
+    // Keep authored identity on this attachment's wrapper, never on the
+    // shared element where another spread/root/direct listener could replace it.
+    listener[$$EVENT_TUPLE] = handler;
+    node.addEventListener(name, listener);
+    return listener;
+  }
+  if ("_SOLID_DEV_" && typeof handler === "function") {
+    // Dev wraps plain function listeners for provenance; the wrapper is what
+    // the caller gets back, so removal by the returned identity still works.
+    // Listener objects keep their identity (their options object rides along
+    // on the attach call and must match on removal).
+    const listener = e => dispatchAsInteraction(e, () => handler.call(node, e));
+    node.addEventListener(name, listener);
+    return listener;
+  }
+  node.addEventListener(name, handler, typeof handler !== "function" && handler);
+  return handler;
 } /** Compiler-emitted primitive; not for hand-written code. @internal */
 export function style(
   node: Element,
@@ -578,6 +702,13 @@ export function style(
 ): void;
 
 export function style(node, value, prev) {
+  if ("_SOLID_DEV_") tagElement(node);
+  // Hydration is a claim pass: the server-rendered inline style stays
+  // authoritative, consistent with class/attribute bindings (#3180). The
+  // first post-hydration update diffs against the hydration-time value
+  // (threaded through `prev` by the compiled effect / spread bookkeeping),
+  // so properties that actually change apply and dropped ones are removed.
+  if (isHydrating(node)) return;
   if (!value) {
     if (prev || node._$styles) {
       setAttribute(node, "style");
@@ -604,7 +735,7 @@ export function style(node, value, prev) {
   }
   let v, s;
   for (s in applied) {
-    if (value[s] == null) {
+    if (!hasOwn.call(value, s) || value[s] == null) {
       nodeStyle.removeProperty(s);
       delete applied[s];
     }
@@ -612,6 +743,7 @@ export function style(node, value, prev) {
   // Diff against applied state so in-place mutations are detected without
   // rewriting unchanged DOM styles.
   for (s in value) {
+    if (!hasOwn.call(value, s)) continue;
     v = value[s];
     if (v != null && v !== applied[s]) {
       nodeStyle.setProperty(s, v);
@@ -622,27 +754,47 @@ export function style(node, value, prev) {
 export function setStyleProperty(node: Element, name: string, value: any): void;
 
 export function setStyleProperty(node, name, value) {
+  if ("_SOLID_DEV_") tagElement(node);
+  // Same hydration adoption contract as style() (#3180): the compiled
+  // per-property effect dedupes against the previous compute value, so the
+  // first actual change after hydration writes through.
+  if (isHydrating(node)) return;
   value != null ? node.style.setProperty(name, value) : node.style.removeProperty(name);
 } /** Compiler-emitted primitive; not for hand-written code. @internal */
 export function spread<T>(node: Element, accessor: T, skipChildren?: Boolean): void;
 
 // TODO: make this better
-export function spread(node, props = {}, skipChildren) {
+export function spread(node, props, skipChildren) {
   const prevProps = {};
-  if (!skipChildren) insert(node, () => props.children);
+  // A lone reactive spread compiles to its accessor directly: merging one
+  // source is pure overhead, and the mergeProps memo would consume a
+  // hydration id the server-side fast path never allocates (#3105). The
+  // accessor resolves inside each tracking scope instead. A nullish source
+  // (`{...props()}` where the optional props are absent, or no source at all)
+  // is an empty spread: attributes applied by the previous value are removed,
+  // nothing throws (#3297).
+  const get = () => (typeof props === "function" ? props() : props) ?? {};
+  if (!skipChildren)
+    insert(node, () => {
+      const source = get();
+      return hasOwn.call(source, "children") ? source.children : undefined;
+    });
   effect(
     () => {
-      const r = props.ref;
+      const source = get();
+      const r = hasOwn.call(source, "ref") && source.ref;
       (typeof r === "function" || Array.isArray(r)) && ref(() => r, node);
     },
     () => {}
   );
   effect(
     () => {
+      const source = get();
       const newProps = {};
-      for (const prop in props) {
+      for (const prop in source) {
+        if (!hasOwn.call(source, prop)) continue;
         if (prop === "children" || prop === "ref") continue;
-        newProps[prop] = props[prop];
+        newProps[prop] = source[prop];
       }
       return newProps;
     },
@@ -680,17 +832,7 @@ export function ref(fn, element) {
   runWithOwner(null, () => applyRef(resolved, element));
 }
 
-// Compile-time row proof (DESIGN-PATCH-CHANNEL §3c): the compiler wraps row
-// functions it PROVED pure — single compiled template, no reactive or owned
-// work, patches only on the row parameter — and the patch-mode list driver
-// engages only for stamped rows. `Symbol.for` so the stamp survives
-// duplicated module instances (compiled app code and the driver's core may
-// resolve different copies of this runtime).
-const PURE_ROW = Symbol.for("solid.pure-row");
-export function rowProof(fn) {
-  fn[PURE_ROW] = true;
-  return fn;
-} /** Compiler-emitted primitive; not for hand-written code. @internal */
+/** Compiler-emitted primitive; not for hand-written code. @internal */
 export function scope<T extends () => any>(fn: T): T;
 
 // Compiler tag for holes that can allocate hydration ids: the outer insert
@@ -791,32 +933,7 @@ function stripTextSeparators(nodes) {
   return nodes;
 }
 
-// Patch-mode dual driver: compiled template scopes whose bindings are pure
-// member reads of ONE subject hand a single compiled body
-// `(next, prev, force) => { compares + writes }` here.
-// - Patchable record (core provides the seams): the initial force-apply
-//   reads the raw backing, then the core's own visibility transitions
-//   dispatch the body through its patch channel. Under hydration the
-//   registration alone arms the record — server HTML already carries
-//   current values, so the initial apply is skipped.
-// - Anything else (props, derived objects, unaware cores): a dual-phase
-//   effect runs the same body — the compute pass calls it with
-//   next === prev so every compare fails and it becomes a pure tracked
-//   read; the commit pass force-applies, keeping DOM writes in the effect
-//   phase where transitions and batching expect them.
-export function patchDriver(subject, body) {
-  const raw =
-    patchableRaw !== undefined && registerPatch !== undefined ? patchableRaw(subject) : undefined;
-  if (raw !== undefined) {
-    if (!sharedConfig.hydrating) body(raw, undefined, true);
-    registerPatch(subject, body);
-  } else {
-    effect(
-      () => body(subject, subject, false),
-      () => body(subject, undefined, true)
-    );
-  }
-} /**
+/**
  * Compiler-emitted primitive; not for hand-written code.
  * @internal
  */
@@ -842,35 +959,6 @@ export function insert(parent, accessor, marker, initial, options) {
   const host = options && options.host;
   if (multi && !initial) initial = [];
   if (hydrationRt !== null) initial = hydrationRt.claimInitial(parent, multi, initial);
-  // Patch-mode list seam: a list accessor carrying `$ll` metadata is offered
-  // to the core's row-ops driver first. Admission is decided entirely up
-  // front — the row function must carry the compiler's `rowProof` stamp and
-  // the subject must be a patchable store array — so a false return means it
-  // declined (unproven rows, non-store subject, marker-bounded hydration
-  // region, key/count mismatch) and the accessor runs classically. The
-  // late-classic thunk is NOT an admission mechanism: it serves engaged
-  // lists whose subject later LEAVES the contract (an identity swap to a
-  // derived array, a shallow<->deep kind switch) — the driver clears the
-  // region and re-enters this insert with a bare accessor (no `$ll` marker)
-  // under the ORIGINAL owner.
-  if (driveList !== undefined && typeof accessor === "function" && accessor.$ll !== undefined) {
-    const listAccessor = accessor;
-    const owner = getOwner();
-    if (
-      driveList(parent, accessor, marker, () =>
-        runWithOwner(owner, () =>
-          insert(
-            parent,
-            () => listAccessor(),
-            marker,
-            marker !== undefined ? [] : undefined,
-            options
-          )
-        )
-      )
-    )
-      return;
-  }
   if (typeof accessor !== "function") {
     accessor = normalize(accessor, initial, multi, true);
     if (typeof accessor !== "function") {
@@ -924,6 +1012,7 @@ export function assign(
 ): void;
 
 export function assign(node, props, skipChildren, prevProps = {}, skipRef = false) {
+  if ("_SOLID_DEV_") tagElement(node);
   const nodeName = node.nodeName;
   props || (props = {});
   for (const prop in prevProps) {
@@ -975,10 +1064,25 @@ function assetEntryKey(descriptor) {
 
 // Attribute-compared lookup (instead of an attribute selector) so href/id
 // values never need selector escaping.
-function findAssetElement(selector, attr, value) {
+// `qualifiers` narrows a match to the same request: two preloads sharing an
+// href still differ if their destination, CORS mode or source set differ, so
+// adopting across them would drop a link the server meant to emit. Both sides
+// go through `qualifierValue`, the same canonicalization the identity uses —
+// a server-emitted `crossorigin=""` and an authored `crossorigin="anonymous"`
+// are one request, so adoption must see them as one.
+function findAssetElement(selector, attr, value, qualifiers) {
   const nodes = document.querySelectorAll(selector);
-  for (let i = 0; i < nodes.length; i++) {
-    if (nodes[i].getAttribute(attr) === value) return nodes[i];
+  outer: for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].getAttribute(attr) !== value) continue;
+    if (!qualifiers) return nodes[i];
+    for (let q = 0; q < RESOURCE_QUALIFIERS.length; q++) {
+      const name = RESOURCE_QUALIFIERS[q];
+      if (
+        qualifierValue(name, qualifiers[name]) !== qualifierValue(name, nodes[i].getAttribute(name))
+      )
+        continue outer;
+    }
+    return nodes[i];
   }
   return null;
 }
@@ -1387,10 +1491,15 @@ function mountHeadResource(tag, props) {
   headMountedResources.add(identity);
   const url = props.href || props.src;
   let el = null;
-  if (url != null) {
-    // Adopt a server-emitted element for the same resource. `rel` values are
-    // constrained to the resource set, so embedding in a selector is safe.
-    if (tag === "link") el = findAssetElement(`link[rel="${props.rel}"]`, "href", url);
+  // Adopt a server-emitted element for the same resource. `rel` values are
+  // constrained to the resource set, so embedding in a selector is safe.
+  // A responsive image preload legitimately has no href — the source set is
+  // the request — so it matches on a null href plus the identity qualifiers,
+  // the same rule the frame client applies.
+  if (tag === "link" && url == null && typeof props.imagesrcset === "string")
+    el = findAssetElement(`link[rel="${props.rel}"]`, "href", null, props);
+  else if (url != null) {
+    if (tag === "link") el = findAssetElement(`link[rel="${props.rel}"]`, "href", url, props);
     else if (tag === "script") el = findAssetElement("script[src]", "src", url);
     else el = findAssetElement("style[href]", "href", url);
   }
@@ -1594,6 +1703,24 @@ export function hydrate(code, element, options = {}) {
   enableHydration();
   installHydrationRuntime();
   if (globalThis._$HY.done) return render(code, element, [...element.childNodes], options);
+  // #3081: the server splices useHead's charset/base prelude immediately
+  // after the <head> open tag — a byte-placement constraint (charset within
+  // the first 1024 bytes, base before URL-bearing tags) the parser has
+  // already consumed by now. The compiled walk reads head's children
+  // positionally, so registry-INSERTED tags (data-dh without the data-dhf
+  // in-place-rewrite stash) sitting ahead of the shell's authored children
+  // shift every read by one. Move that leading run — inert metas in an
+  // unrendered element — to the end of head before any claiming. For apps
+  // without a prelude the loop exits on its first check.
+  const head = (element.nodeType === 9 ? element : element.ownerDocument).head;
+  if (head && element.contains(head)) {
+    let n = head.firstChild;
+    while (n && n.nodeType === 1 && n.hasAttribute("data-dh") && !n.hasAttribute("data-dhf")) {
+      const next = n.nextSibling;
+      head.appendChild(n);
+      n = next;
+    }
+  }
   options.renderId ||= "";
   if (!globalThis._$HY.modules) globalThis._$HY.modules = {};
   if (!globalThis._$HY.loading) globalThis._$HY.loading = {};
@@ -1934,7 +2061,9 @@ function flattenClassList(list, result) {
     const item = list[i];
     if (Array.isArray(item)) flattenClassList(item, result);
     else if (typeof item === "object" && item != null) Object.assign(result, item);
-    else if (item || item === 0) result[item] = true;
+    // clsx-style composition: standalone booleans are ignored so guard
+    // expressions like `cond && "active"` never emit a "true" class (#3189).
+    else if (typeof item !== "boolean" && (item || item === 0)) result[item] = true;
   }
 }
 
@@ -1955,12 +2084,16 @@ function assignProp(node, prop, value, prev, skipRef, nodeName) {
     const name = prop.slice(2).toLowerCase();
     const delegate = DelegatedEvents.has(name);
     if (!delegate && prev) {
-      const h = Array.isArray(prev) ? prev[0] : prev;
-      node.removeEventListener(name, h);
+      // prev is the exact attached listener. Tuple wrappers carry their
+      // authored tuple so unrelated spread reruns retain that same listener.
+      if (Array.isArray(value) && typeof prev === "function" && prev[$$EVENT_TUPLE] === value)
+        return prev;
+      node.removeEventListener(name, prev, typeof prev !== "function" && prev);
     }
     if (delegate || value) {
-      addEvent(node, name, value, delegate);
+      const attached = addEvent(node, name, value, delegate);
       delegate && delegateEvents([name]);
+      if (!delegate) return attached;
     }
   } else if (
     (hasNamespace && prop.slice(0, 5) === "prop:") ||
@@ -2036,7 +2169,11 @@ function eventHandler(e, container, state) {
     }
     if (handler && !node.disabled) {
       const data = node[`${key}Data`];
-      data !== undefined ? handler.call(node, data, e) : handler.call(node, e);
+      data !== undefined
+        ? handler.call(node, data, e)
+        : typeof handler === "function"
+          ? handler.call(node, e)
+          : handler.handleEvent(e);
       if (e.cancelBubble) return;
     }
     node.host &&
@@ -2092,6 +2229,7 @@ function eventHandler(e, container, state) {
 }
 
 function insertExpression(parent, value, current, marker) {
+  if ("_SOLID_DEV_") tagElement(parent);
   if (hydrationRt !== null && isHydrating(parent)) {
     // A hydrating render is a claim pass, not a mutation pass — but the
     // caller's `current` bookkeeping must stay HONEST about what the DOM
@@ -2202,12 +2340,19 @@ function normalize(value, current, multi, doNotUnwrap) {
   // hydration claiming: adopting the already-live server text node here is
   // position bookkeeping, not a mutation, and insertExpression's claim pass
   // needs the node (a raw primitive there means the claim FAILED).
+  // Only ACTUAL hydrating nodes (connected or under a declared claim root)
+  // adopt: a detached subtree rendering while hydration is globally active —
+  // eager JSX whose template claim missed because a falsy server conditional
+  // never rendered it (#3163) — is a client render, and adopting its empty
+  // placeholder here would swallow the primitive so the initial fill never
+  // lands.
   if (sharedConfig.hydrating && Array.isArray(value)) {
     for (let i = 0, len = value.length; i < len; i++) {
       const item = value[i],
         prev = current && current[i],
         t = typeof item;
-      if ((t === "string" || t === "number") && prev && prev.nodeType === 3) value[i] = prev;
+      if ((t === "string" || t === "number") && prev && prev.nodeType === 3 && isHydrating(prev))
+        value[i] = prev;
     }
   }
   return value;

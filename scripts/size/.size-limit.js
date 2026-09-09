@@ -33,6 +33,29 @@ const framesEsbuildConfig = config => ({
   ]
 });
 
+// RC.6 correctness reconciliation (2026-09-01): these caps were last
+// reconciled before #3181's synchronous superseded-flight settle walk, the
+// held-truth/optimistic-store follow-ups (#3146, #3147, #3178), and the
+// hydration/DOM correctness batch (#3163, #3180, #3182, #3187, #3189).
+// #3181 explicitly accepted its core-retained cost and updated the
+// in-package treeshake budget, but this scenario gate was missed. The frames
+// delta is the separately reviewed server-function transport hardening.
+// Limits below are the measured Linux CI/local artifacts rounded up to the
+// next 0.01 kB; this is a ratchet reconciliation, not additional headroom.
+//
+// Delegated EventListenerObject parity (#3206): scenarios retaining the
+// delegated dispatcher pay for object-form invocation and for clearing a
+// replaced bound tuple's data slot. Linux CI/local measurements are rounded
+// to the next 0.01 kB at the affected limits below.
+//
+// Own-property parity (#3204): style and spread now match SSR for inherited
+// attributes, children, and refs. The affected client scenarios are likewise
+// rounded up to the next 0.01 kB.
+//
+// Post-RC.6 audit (2026-09-02): #3226's pending-source ownership fix is
+// core-retained, adding 12 B to isPending/latest and up to 16 B to hydrating
+// builds on Linux. The remaining caps are ratcheted to the larger of the
+// measured Linux CI and macOS artifacts, rounded up to the next 0.01 kB.
 module.exports = [
   {
     name: "signals: core floor (createSignal/Memo/Effect/Root/flush)",
@@ -67,7 +90,39 @@ module.exports = [
     // companion-walk gate (#3038, debc22b9), and the #3042/#3043 transition
     // fixes. Verified the prod chunks carry no dev diagnostics — this is
     // the batch's real retained cost, accepted for its runtime wins.
-    limit: "7.85 KB",
+    // Re-audit-5 hardening ripple (2026-08-27): the mergeTransitionState
+    // stash move + stamp retarget and the dispatch snapshot marks are
+    // core-retained — a few dozen brotli bytes on every scenario.
+    //
+    // #3122 eager iterator teardown (2026-08-31): 7.9 -> 7.91 KB, measured
+    // at 7.903. The _flightTeardown release sits on recompute's supersede
+    // path, which the core loop always retains. Conscious bump — see the
+    // in-package treeshake budget note.
+    //
+    // #3164 fold ruling (2026-08-31): 7.91 -> 7.95 KB, measured at 7.94.
+    // read()'s A17-for-held-truth arm (fold-staged truth masked from
+    // ordinary readers under a live optimism-retaining transition) plus the
+    // GlobalQueue._heldTruthMasked hook slot. The mask's ledger and the
+    // transition-optimism probe live in the optimistic module behind the
+    // hook — the floor pays only the guarded call site.
+    //
+    // Fold relocation pass (2026-09-01): 7.95 -> 7.94 KB, measured at 7.93.
+    // heldTruthNodes + transitionHoldsOptimism moved from scheduler.ts into
+    // the optimistic module, and read()'s latest()/authoritative-read
+    // exemptions moved inside the hook (which now takes the observer) —
+    // the floor keeps only `config-gate && hook?.(el, c)`.
+    //
+    // Patch-channel removal (2026-09-02): 8.02 -> 7.98 KB, measured at
+    // 7.95. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the store write-path emission seams retained by the core floor.
+    //
+    // Store create-floor diet (2026-09-04): 7.98 -> 8.00 KB, measured at
+    // 7.995. The slot-node unobserved dispatch sits on the two core sweep
+    // sites (unlinkSubs, sweepTransientStoreNodes): a config-flag branch to
+    // the ONE shared hook. slotSignal itself shakes out of storeless
+    // bundles; these ~15 B buy the store scenarios their per-node closure/
+    // NodeExtension diet (see the createStore note).
+    limit: "8.00 KB",
     modifyEsbuildConfig
   },
   {
@@ -121,7 +176,118 @@ module.exports = [
     // the pre-shaped target constructor (c38bc24e — #3044 fields tipped
     // object targets into dictionary mode), and the written-keys notify
     // bound (2888642e). All on paths createStore always retains.
-    limit: "13.4 KB",
+    //
+    // Projection transition isolation (#3074/#3075): 13.4 -> 13.5 KB,
+    // measured at 13.40 exactly. The held-view mask (adoption under a live
+    // transition serves the pre-hold committed backing to untracked readers)
+    // plus the latest() pull in the get trap. Not shakeable: the derived
+    // createStore overload retains projection machinery in every store graph
+    // (see treeshake.test.ts) — an injection-table split was measured and
+    // came out LARGER under brotli (indirection adds unique tokens).
+    //
+    // Stage-2 patch channel: 13.5 -> 14.1 KB (measured 13.71 pre-#3074, ~13.8
+    // with the held-view bytes). The channel itself is pay-for-use (emitters
+    // ride hooks installed at first registration — patch-hooks.ts — and
+    // shake out of this scenario); the ~490 B here are the write-path SEAMS
+    // that must live on always-retained trap/walk/fold code: the `pc`
+    // extension + guards at every emission site, the setter-channel row-ops
+    // branch in drainFolds, and the fold-commit family emission. Compare the
+    // app-floor scenarios below, which carry only the ~100 B insert seam.
+    //
+    // Re-audit-2 correctness batch + upstream drift: 14.1 -> 14.35 KB
+    // (measured 14.31). Occurrence-aware key matching (adoption window +
+    // buildRowOps queues, SameValueZero everywhere keys compare), the
+    // same-batch coalescing stamp (pc.qa/ql + pushSelf), adoption-seam
+    // accessor demotion gates, and unhandled-halt parity; the rest is
+    // upstream core drift (#3082's visibility gate, the shared notifier,
+    // #3078's dormancy sweep) since the 14.1 ratchet.
+    //
+    // Fold scheduling (#3089, merged from next): 14.35 -> 14.45 KB. The
+    // always-arm in queueFold (the size-gated arm stranded later folds), the
+    // write-time transition stamp (foldBatches WeakMap + ensurePB stamp), and
+    // the drain's defer check — ~40 B measured on the pre-stage-2 base. All
+    // load-bearing correctness on paths createStore always retains.
+    //
+    // #3122/#3123 correctness batch (2026-08-31): 14.45 -> 14.51 KB,
+    // measured at 14.503. The #3122 teardown core bytes plus the store-walk
+    // exports (arrayStructureChanged/membershipChanged) the landing-
+    // contradiction gate reads; the replay machinery itself stays in the
+    // optimistic module (see the store-family app scenario).
+    //
+    // #3164 fold ruling (2026-08-31): 14.51 -> 14.56 KB, measured at 14.55.
+    // The core-floor arm (see that note) plus the held-truth mask SEAMS on
+    // always-retained store paths: nodeValue's guarded _heldTruthMasked
+    // call, readSource's optHooks.retainsOptimism dispatch, and the
+    // tentativePBs draft-session guard in ensurePB. The mask bodies
+    // themselves ride the optimistic module (see the store-family app
+    // scenario).
+    //
+    // Fold relocation pass (2026-09-01): 14.56 -> 14.55 KB, measured at
+    // 14.54 — the core-floor relocation (see that note).
+    //
+    // Patch-channel removal (2026-09-02): 14.66 -> 14.05 KB, measured at
+    // 14.00. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the write-path seams, wk struct indirection, and reconcile row-ops builders.
+    //
+    // Store create-floor diet (2026-09-04): 14.05 -> 14.16 KB, measured at
+    // 14.155. slotSignal (the pre-shaped store-leaf literal: _host/_key
+    // backrefs replacing the per-node options object, equals closure,
+    // unobserved closure, and NodeExtension) plus the get trap's first-read
+    // dedupe (one descriptor probe threaded to node creation, one node-map
+    // lookup, first-read wrap-cache population). ~105 B of retained code
+    // that deletes four allocations + three hidden-class transitions per
+    // store leaf: getNode self-time −23%, get-trap self-time −19%, dbmon
+    // mount min −4%. Conscious speed-for-bytes trade, same ruling as the
+    // Stage-3 hot-path batch.
+    //
+    // Store correctness batch (2026-09-04): 14.16 -> 14.20 KB, measured at
+    // 14.197 on Linux CI (14.19 macOS). The livestream-found fixes on
+    // always-retained store paths: the first-flight transaction carve-out
+    // (#3264), the held-manual-write re-ask classification (#3265), the
+    // draft compose-read gate (#3266, its dev-only sibling #3263 costs
+    // nothing in prod), plus routing async setter errors through the node's
+    // error state (#3262, handleAsync). A golf pass was attempted and
+    // measured: extracting the repeated compose-gate/override-read into
+    // helpers came out +29 B, fully inlining the #3266 helper +70 B, and
+    // merging the has-trap's twin override arms −1 B here but +7 B on the
+    // store-family app — the graph sits at its brotli optimum post-#3270
+    // (repeats compress free; indirection adds unique tokens). Ratcheted,
+    // not golfed.
+    //
+    // Fold privatization merge (#3271): 14.20 -> 14.29 KB, measured at
+    // 14.282 macOS (Linux typically +~7 B on this scenario). Clone-path
+    // folds finding their container privatized mid-batch (a descendant fold
+    // path-copied through them) merge written keys in place instead of
+    // swapping in the stale ensurePB clone — the swap orphaned the
+    // ancestor's writes (parent CAS failed against the privatization
+    // clone). Silent data loss on writable projections; load-bearing.
+    //
+    // rc.6 P1 store sweep (#3282/#3283/#3284): 14.29 -> 14.35 KB, measured
+    // at 14.35 macOS. Three corruption/disconnection fixes: identity-
+    // resolved parent-slot keys at fold time (wrap-time pk goes stale when
+    // arrays move — an edited moved row folded onto a sibling's slot),
+    // family-map registration of privatization clones (derived stores
+    // orphaned ancestor observers and broke proxy identity), and the #3044
+    // overlay key merge in deep()'s walk (mid-flush re-walks dropped every
+    // untouched child from the effect's dependency set). All fold-time or
+    // deep()-only paths — no hot read/write cost.
+    //
+    // Tracked-effect wakes ride the heap (#3291, 2026-09-06): 14.35 -> 14.42
+    // KB, measured at 14.391 macOS (+45 B). Not retained code: the tracked
+    // special case in enqueueSub is DELETED and GlobalQueue._update gains a
+    // four-line branch; the signals core floor is 75 B SMALLER minified
+    // (21,536 -> 21,461). Brotli layout drift on this scenario's output —
+    // the other seven scenarios moved -28…+21 B in both directions. Capped
+    // with ~30 B of Linux headroom (cf. the simple-app cap, 2026-09-05).
+    //
+    // Adoption diffs against the pending view (#3296, 2026-09-06): measured
+    // at 14374 macOS — 17 B UNDER the pre-fix 14391, cap unchanged. The
+    // adoption diff base is the view the nodes were last told (the draft's
+    // pending backing when one preceded the adoption), carried to the
+    // deferred fold in the slot that was the boolean `adopted` flag; the
+    // eager reconcile path reads `prev` it already had. An interim cancel
+    // pass (+44 B) was replaced by this before release.
+    limit: "14.42 KB",
     modifyEsbuildConfig
   },
   {
@@ -148,7 +314,58 @@ module.exports = [
     // 9.67 — the core-floor batch (see that note) plus the #3042 latest()
     // companion mid-transition backfill, which lives in the optimistic
     // module this scenario retains via latest().
-    limit: "9.85 KB",
+    //
+    // rc.5 signals drift (2026-08-30): 9.85 -> 9.9 KB, measured at 9.87.
+    // The #3108 truth-author authoritative-read fix (88fa9d64) lives in the
+    // optimistic module this scenario retains via latest(), and the
+    // refresh() quiescence promise (51ffcb9a) leaves marks on the settle
+    // walk. Drift, not a regression.
+    //
+    // #3104/#3122 correctness batch (2026-08-31): 9.9 -> 9.94 KB, measured
+    // at 9.932. The latest()/collectPending probe-suspension symmetry
+    // (#3104) lives in the verdict layer this scenario exists to measure;
+    // the rest is the #3122 teardown core bytes.
+    //
+    // #3164/#3166 batch (2026-08-31): 9.94 -> 9.99 KB, measured at 9.98.
+    // The core-floor fold arm (see that note), asyncWrite's authoritative-
+    // observer wake (#3164 signal path: a landing staged under an active
+    // override must wake until()'s predicate or it deadlocks), and the
+    // mid-flight latest(isPending()) probe fix (#3166) in the verdict
+    // layer this scenario retains.
+    //
+    // Fold relocation pass (2026-09-01): 9.99 -> 9.98 KB, measured at 9.97
+    // — the core-floor relocation (see that note).
+    //
+    // Patch-channel removal (2026-09-02): 10.10 -> 10.04 KB, measured at
+    // 10.01. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the optimistic emission seams retained via latest().
+    //
+    // Store correctness batch (2026-09-04): 10.04 -> 10.05 KB, measured at
+    // 10.043 on Linux CI (10.03 macOS) — this scenario pays only the #3262
+    // handleAsync try/catch and the #3265 re-ask line (see the createStore
+    // note for the batch and the measured no-win golf pass).
+    //
+    // Uninitialized cross-lane suspension (#3276/#3277): 10.05 -> 10.08 KB,
+    // measured at 10.058 macOS. The check rides laneSuspends in the
+    // optimistic module — which THIS scenario retains via latest()'s
+    // optimisticComputed shadow — rather than core read()'s throw path:
+    // the original inline placement cost 27-66 B across five scenarios
+    // (createStore, both floors, family, CSR); relocated, every other
+    // scenario is unchanged and only this one pays ~8 B.
+    //
+    // Lane hold on observation (#3289): 10.08 -> 10.13 KB, measured at
+    // 10.080 macOS (baseline 10.040). laneHeld — a lane is held only by
+    // async a render effect observed (the transaction's reporter map), the
+    // same INV-3 rule transactions use — lives in the lanes module this
+    // scenario retains via latest(); the core floor and createStore are
+    // byte-identical. ~40 B for the predicate and its two call sites.
+    //
+    // Dead companion refresh removed (follow-up): 10.13 -> 10.10 KB,
+    // measured at 10.062 macOS. laneAsyncPending/laneAsyncSettled refreshed
+    // the lane source's isPending companion on every derived pending/settle,
+    // but computePendingState never read _pendingAsync — the source's own
+    // write, commit and settlement paths already refresh it. -18 B.
+    limit: "10.10 KB",
     modifyEsbuildConfig
   },
   {
@@ -166,8 +383,47 @@ module.exports = [
     // the app growth across all four app scenarios tracks the signals
     // scenarios byte-for-byte (the linked dom-expressions runtime updates
     // contributed ~nothing to the client bundles).
+    //
+    // Upstream drift ratchet (2026-08-27): the shared effect notifier's
+    // always-retained core bytes ate the last headroom (measured 10.56).
+    // +50 B of cap, not a feature.
+    //
+    // next merge (2026-08-28): 10.6 -> 10.65 KB, measured at 10.61 — the
+    // branch's insert seam plus next's post-cap drift summing in the same
+    // floor.
+    //
+    // rc.5 signals drift (2026-08-30): 10.65 -> 10.7 KB, measured at 10.66.
+    // The refresh() quiescence promise's settle-walk bytes (51ffcb9a) are
+    // core-retained, so every app floor pays them. Drift, not a regression.
+    //
+    // #3164 fold ruling (2026-08-31): 10.7 -> 10.73 KB, measured at 10.72
+    // — the signals core-floor arm + asyncWrite wake (see those notes).
+    //
+    // Fold relocation pass (2026-09-01): 10.73 -> 10.72 KB, measured at
+    // 10.71 — the core-floor relocation (see that note).
+    //
+    // In-place class mutation fix (#3188): 10.80 -> 10.84 KB, measured at
+    // 10.834. className() retains the last applied object/array snapshot so
+    // shared-reference reruns can diff mutations without deleting external
+    // classes.
     path: "minimal-app.js",
-    limit: "10.55 KB",
+    //
+    // Patch-channel removal (2026-09-02): 10.86 -> 10.73 KB, measured at
+    // 10.70. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the core-retained emission seams.
+    // Preload identity canonicalization, rebased onto next (2026-09-02):
+    // 10.73 -> 10.74 KB, measured at 10.731 against next's 10.700 with only
+    // dist/web.js swapped. Not retained code: the tree-shaken bundle is
+    // byte-identical and web.js contributes the same 7106 minified bytes on
+    // both sides. head.ts gains two top-level helpers this bundle never
+    // reaches (asciiLowerCase, qualifierValue), which shifts esbuild's
+    // identifier allocation over the same-length output — brotli layout
+    // drift, 31 B. Ratcheted to the next 0.01 kB per this file's rule.
+    // Tracked-effect wakes ride the heap (#3291, 2026-09-06): 10.74 -> 10.78
+    // KB, measured at 10.751 macOS (+21 B; brotli drift — the minified core
+    // shrank, see the createStore note). Linux CI has measured ~23 B above
+    // macOS on this scenario, hence the extra 0.02 kB.
+    limit: "10.78 KB",
     modifyEsbuildConfig
   },
   {
@@ -196,8 +452,43 @@ module.exports = [
     //
     // Stage-3 batch (pre-release ratchet): 16.7 -> 17.25 KB, measured at
     // 16.92 — the signals-core bytes (see the core-floor note).
+    //
+    // useHead prelude relocation (#3081): 17.25 -> 17.4 KB, measured at
+    // 17.31. ~120 B brotli in hydrate() itself — the head-prelude
+    // normalization runs before any claiming, so it sits on the one entry
+    // point every hydrating app retains and cannot shake. Golfing measured
+    // ~1 B; the bytes are the fix's real cost.
     path: "hydrating-app.js",
-    limit: "17.25 KB",
+    // Upstream drift ratchet (2026-08-27): shared effect notifier (+core)
+    // and #3057 invoke's client surface since the 17.25 cap (measured
+    // 17.38). Drift, not a stage-2 feature.
+    //
+    // next merge (2026-08-28): 17.45 -> 17.55 KB, measured at 17.48 — the
+    // useHead prelude relocation (#3081, ~120 B in hydrate(), see its note)
+    // arriving from next on top of the drift-ratcheted floor.
+    //
+    // #3164 fold ruling (2026-08-31): 17.55 -> 17.6 KB, measured at 17.59
+    // — the signals core-floor arm + asyncWrite wake (see those notes).
+    //
+    // Fold relocation pass (2026-09-01): 17.6 -> 17.56 KB, measured at
+    // 17.54 — this bundle's import graph retained the scheduler-resident
+    // ledger; the relocation lets it shake.
+    //
+    // In-place class mutation fix (#3188): 17.67 -> 17.68 KB, measured at
+    // 17.673. Hydration seeds the applied-class snapshot without mutating
+    // the claimed DOM so the first live in-place change still diffs.
+    //
+    // Responsive image preloads (2026-09-01): 17.56 -> 17.59 KB, measured at
+    // 17.570 (+29 B). The one document scenario that pays: it retains
+    // `lazy`, so the whole asset-registration path is reachable and it picks
+    // up the source-set branch in mountHeadResource. csr-app moved the other
+    // way on brotli layout (see its note); the identity commit before this
+    // one was byte-neutral in every document bundle.
+    //
+    // Patch-channel removal (2026-09-02): 17.72 -> 17.61 KB, measured at
+    // 17.58. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the insert $ll seam and core emission bytes.
+    limit: "17.61 KB",
     modifyEsbuildConfig
   },
   {
@@ -223,8 +514,84 @@ module.exports = [
     // Stage-3 batch (pre-release ratchet): 23.3 -> 24.65 KB, measured at
     // 24.19 — the signals-core bytes plus the store-side #3044/written-keys
     // work (see the createStore note; this scenario retains all of it).
+    //
+    // Projection transition isolation (#3074/#3075): 24.65 -> 24.75 KB,
+    // measured at 24.65 exactly — the held-view mask + latest() pull (see
+    // the createStore note; this scenario retains all of it).
+    //
+    // Shared effect status notifier (ba6c0b6f): 24.75 -> 24.9 KB, measured
+    // at 24.80. The statusNotifierOf seam is always-retained core; it buys
+    // -127 B/node heap and -15% effect creation (the per-effect NodeExtension
+    // allocation it removes). The other floors absorbed it within headroom.
+    //
+    // Stage-2 patch channel: 24.9 -> 25.9 KB (measured 25.23 pre-#3074,
+    // pre-notifier) — the createStore write-path seams (~490 B, see that
+    // note) plus this scenario's optimistic/projection family emission seams
+    // and the web runtime's ~100 B insert hook. The driver + emitters
+    // themselves are pay-for-use and absent here (no compiled patch output
+    // imports them).
+    //
+    // Fold scheduling (#3089, merged from next): 25.9 -> 26 KB — the same
+    // bytes as the createStore note (this scenario retains all of it).
+    //
+    // rc.5 signals drift (2026-08-30): 26 -> 26.1 KB, measured at 26.07.
+    // The #3108 truth-author fix (88fa9d64, optimistic module) plus the
+    // refresh() quiescence promise (51ffcb9a, settle walk) — this scenario
+    // retains every store family, so it pays both. Drift, not a regression.
+    //
+    // Transaction-lifecycle fixes (2026-08-31): 26.1 -> 26.15 KB, measured at
+    // 26.12. #3141 (initTransition guarantees a flush) and #3140 (commit
+    // clears _transition stamps; initTransition refuses a done transaction)
+    // — ~25 B of scheduler prod code for an ambient-capture fix and a
+    // prod-hang fix. The other nine budgets absorbed it within headroom.
+    //
+    // #3123/#3164 fold ruling (2026-08-31): 26.15 -> 26.71 KB, measured at
+    // 26.70. The optimistic-store reckoning, re-ruled from replay to FOLD
+    // after GabbeV's union-tear report (#3164): the interim #3123 replay
+    // machinery (retained-setter replay, echo dedupe, settle re-derivation,
+    // ~26.535 measured) was backed out and replaced by landing folds —
+    // truth landings stage into the retaining transaction
+    // (runAsTransitionBatch), held-truth masks keep ordinary readers on
+    // committed until the atomic reveal (heldTruthNodes ledger +
+    // transitionHoldsOptimism, dispatched through _heldTruthMasked /
+    // optHooks.retainsOptimism), until()/latest() tunnel through, and the
+    // revert path resyncs overlaid keysets for mapArray. This scenario
+    // retains every store family, so it pays the whole module. Ruled
+    // correctness-over-size in the #3164 thread; conscious bump.
+    //
+    // Typed responsive preloads (2026-09-01): byte-neutral, measured at
+    // 26.701 across the whole branch — the identity canonicalization shares
+    // one helper with the code it replaced, and this bundle does not retain
+    // the source-set adoption branch.
     path: "hydrating-store-app.js",
-    limit: "24.65 KB",
+    //
+    // Patch-channel removal (2026-09-02): 26.99 -> 26.15 KB, measured at
+    // 26.09. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the full store-family emission surface (value + row tiers).
+    //
+    // Store create-floor diet (2026-09-04): 26.15 -> 26.25 KB, measured at
+    // 26.248 — the slotSignal + first-read-dedupe bytes (see the
+    // createStore note; this scenario retains all of it).
+    //
+    // Store correctness batch (2026-09-04): 26.25 -> 26.27 KB, measured at
+    // 26.264 on Linux CI (26.26 macOS) — the same fixes as the createStore
+    // note; this scenario retains all of them plus the optimistic module's
+    // first-flight carve-out (#3264).
+    //
+    // Fold privatization merge (#3271): 26.27 -> 26.37 KB, measured at
+    // 26.36 macOS — the drainFolds merge arm (see the createStore note);
+    // this scenario retains all of it.
+    //
+    // rc.6 P1 store sweep (#3282/#3283/#3284): 26.37 -> 26.43 KB, measured
+    // at 26.42 macOS / 26424 B Linux CI (the usual +4-7 B Linux delta) —
+    // see the createStore note; this scenario retains all of it.
+    //
+    // Adoption diffs against the pending view (#3296, 2026-09-06): 26.43 ->
+    // 26.45 KB, measured at 26423 macOS (+~30 B brotli drift on this
+    // scenario's layout; the createStore scenario carrying the same change
+    // came in UNDER its pre-fix size — see its note). The usual +4-7 B
+    // Linux delta leaves ~20 B headroom.
+    limit: "26.45 KB",
     modifyEsbuildConfig
   },
   {
@@ -242,8 +609,35 @@ module.exports = [
     //
     // Stage-3 batch (pre-release ratchet): 12.3 -> 12.8 KB, measured at
     // 12.53 — the signals-core bytes (see the core-floor note).
+    //
+    // #3122 eager iterator teardown (2026-08-31): 12.9 -> 12.92 KB,
+    // measured at 12.911 — the core-floor teardown bytes (see that note).
+    //
+    // #3164 fold ruling (2026-08-31): 12.92 -> 12.94 KB, measured at 12.93
+    // — the signals core-floor arm + asyncWrite wake (see those notes).
+    //
+    // Fold relocation pass (2026-09-01): 12.94 -> 12.95 KB, measured at
+    // 12.948. The one counter-mover: this bundle never retained the
+    // scheduler-resident ledger (nothing to shake), so it pays only the
+    // hook call site's second argument plus brotli layout drift.
+    //
+    // Responsive image preloads (2026-09-01): 23 B SMALLER, measured at
+    // 12.925 against 12.948. Brotli layout drift, not a real shrink — the
+    // preceding identity commit measured byte-identical here. Ceiling left
+    // where it is; ratchet it in a drift pass, not in a feature PR.
     path: "csr-app.js",
-    limit: "12.8 KB",
+    //
+    // Patch-channel removal (2026-09-02): 13.11 -> 12.97 KB, measured at
+    // 12.93. The channel is deleted from next — regions own value delivery,
+    // the unified-For design owns structure — reclaiming the insert $ll seam and core emission bytes.
+    //
+    // Responsive image preloads, as merged (#3183, 2026-09-05): 12.97 ->
+    // 13.01 KB, CI measured 13.00 (over by 30 B). The 09-01 note above
+    // predates the review round that added srcset URL-forgery rejection,
+    // the canonicalization split and hasWidthDescriptor to client.ts —
+    // those bytes land here, and this scenario was not ratcheted with the
+    // hydrating ones. Ratchet on next so the branch is green again.
+    limit: "13.01 KB",
     modifyEsbuildConfig
   },
   {
@@ -261,8 +655,32 @@ module.exports = [
     // client plus server-function call observers (pr-570) in the transport.
     // Verified via metafile that the bundle is still exactly the two dist
     // files (no seroval creep — the regression this scenario guards).
+    //
+    // Typed preload links: 11.06 -> 11.27 KB measured on the rc.5 base
+    // (~210 B). Frames now preserve request metadata (ensurePreload +
+    // qualifier-aware head matching), adopt matching document links, and
+    // retain every late root asset record for mounts that register after
+    // the stream arrives.
+    //
+    // Responsive image preloads (2026-09-01): 11.34 -> 11.37 KB, measured at
+    // 11.360 (+40 B on top of the identity commit). Frame consumers locate
+    // and create a source-set link with no href — adoption matches on a null
+    // href — and the wire entry drops the key when there is none.
+    //
+    // Canonical qualifier matching (2026-09-01): 11.37 -> 11.38 KB, measured
+    // at 11.374 (+14 B). The frame client's mirrored `qualifierValue` folds
+    // `as` and reads an empty source set or size as absent, so a document
+    // link spelled `as="IMAGE"` or carrying `imagesrcset=""` adopts instead
+    // of duplicating — the same rules head.ts applies.
+    //
+    // Rebased onto next after the patch-channel removal (2026-09-02):
+    // 11.30 -> 11.40 KB, measured at 11.372 against next's 11.266 — +106 B
+    // for the whole branch (identity canonicalization, the source-set form,
+    // and the mirrored qualifier folding above). The per-commit notes were
+    // measured on the pre-removal base, so their absolutes no longer line
+    // up with this file's floor, but their deltas do.
     path: "../../packages/web/frames/dist/client.js",
-    limit: "11.1 KB",
+    limit: "11.40 KB",
     modifyEsbuildConfig: framesEsbuildConfig
   }
 ];

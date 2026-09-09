@@ -6,7 +6,7 @@
 
 Two layers now surface the misuse:
 
-- **TypeScript** — a deprecated overload `createEffect(compute): never` is added so editors render the call with strikethrough and surface the migration message on hover.
+- **TypeScript** — calls without a separate effect callback are rejected.
 - **Runtime (dev)** — calling without an effect function now throws synchronously with a clear message and emits a new `MISSING_EFFECT_FN` diagnostic (replaces the previous opaque `TypeError: Cannot read properties of undefined`).
 
 If you want a derived value, use `createMemo`. If you want a one-shot side effect at construction time, just call the function directly.

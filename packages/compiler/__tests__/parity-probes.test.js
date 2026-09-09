@@ -63,6 +63,22 @@ const z = <p>P</p>;
 const a = <div a={(() => <span>{x()}</span>)()} />;
 const z = <p>P</p>;
 `,
+  "bare function child": `
+const a = <main>{() => <App />}</main>;
+const z = <p>P</p>;
+`,
+  "named function expression child": `
+const a = <main>{function tail() { return <App />; }}</main>;
+const z = <p>P</p>;
+`,
+  "function child via children attribute": `
+const a = <main children={() => <App />} />;
+const z = <p>P</p>;
+`,
+  "function child among siblings": `
+const a = <main><span>pre</span>{() => <App />}<span>post</span></main>;
+const z = <p>P</p>;
+`,
   "block IIFE in attribute": `
 const a = <div a={(() => { return <span>{x()}</span>; })()} />;
 const z = <p>P</p>;
@@ -481,6 +497,16 @@ const b = <span {...one} {...two()} />;
   "spread with events and refs": `
 const a = <div {...props} onClick={click} ref={r} class={c()}>{x()}</div>;
 `,
+  "reactive lone spread with intrinsic refs": `
+let node;
+const a = <div ref={node} {...props()} />;
+const b = <div {...props()} ref={node}>child</div>;
+const c = <div ref={el => (node = el)} {/* @static */ ...props()} />;
+const d = <div ref={node} id="x" {...props()} />;
+const e = <Comp ref={node} {...props()} />;
+const f = <input ref={node} prop:value={value()} {...props()} />;
+const g = <div ref={directive(source)} {...props()} />;
+`,
   "conditional attribute chains": `
 const a = <div class={cond() ? "a" : cond2() ? "b" : "c"} title={x() && y() || z()}>{t()}</div>;
 `,
@@ -665,33 +691,6 @@ function f() {
 function f(items) {
   return items.map(item => <li data-id={item.id}>{item.name}</li>);
 }
-`,
-  "pure row expression arrow (rowProof stamps)": `
-const row = r => <li class={r.done ? "done" : ""} onClick={() => pick(r.id)} textContent={r.name} />;
-`,
-  "pure row return-only block arrow (rowProof stamps)": `
-const row = r => { return <li textContent={r.name} />; };
-`,
-  "pure row function expression (rowProof stamps)": `
-const row = function (r) { return <li textContent={r.name} />; };
-`,
-  "row with user statement declines rowProof": `
-const row = r => { doWork(r); return <li textContent={r.name} />; };
-`,
-  "row with ref declines rowProof": `
-const row = r => <li ref={r.el} textContent={r.name} />;
-`,
-  "row with insert hole declines rowProof": `
-const row = r => <li>{r.name}</li>;
-`,
-  "foreign-subject row declines rowProof": `
-const outer = getStore();
-const row = r => <li textContent={outer.title} />;
-`,
-  "reassigned subject declines patch mode": `
-let subject = first();
-subject = second();
-const view = <li textContent={subject.name} />;
 `,
   "component member expression props": `
 const a = <Comp a={obj.prop} b={obj[key()]} c={obj?.maybe} d={fn.call} />;

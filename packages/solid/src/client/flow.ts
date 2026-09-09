@@ -1,6 +1,14 @@
 import { children, IS_DEV } from "../client/core.js";
-import { createMemo, untrack, mapArray, repeat, createRevealOrder } from "@solidjs/signals";
-import { createErrorBoundary, createLoadingBoundary } from "./hydration.js";
+import {
+  createMemo,
+  untrack,
+  mapArray,
+  repeat,
+  createRevealOrder,
+  getOwner,
+  runWithOwner
+} from "@solidjs/signals";
+import { createErrorBoundary, createLoadingBoundary, sharedConfig } from "./hydration.js";
 import type { Accessor, RevealOrder } from "@solidjs/signals";
 export type { RevealOrder };
 import type { Element as SolidElement } from "../types.js";
@@ -81,11 +89,23 @@ export function For<T extends readonly any[], U extends SolidElement>(props: {
       ? { keyed: props.keyed, fallback: () => props.fallback }
       : { keyed: props.keyed };
   if (IS_DEV) options.name = "<For>";
-  return mapArray(
-    () => props.each,
-    props.children as any,
-    options as any
-  ) as unknown as SolidElement;
+  const owner = getOwner();
+  let mapped: (() => any) | undefined;
+  const create = () =>
+    runWithOwner(owner, () =>
+      mapArray(() => props.each, props.children as any, options as any)
+    ) as () => any;
+  // Hydration id parity (#3161): hydration ids mint at CREATION time, and
+  // the server spends the list's id slot at For's source position — so a
+  // hydrating client must create the map HERE, not on first read. Deferred
+  // creation ran at insert's hole evaluation, AFTER later siblings had
+  // already claimed their template keys, shifting every hydration id after
+  // the list (the siblings hydrated detached: dead buttons). Outside
+  // hydration the laziness stands: an unread list never builds its
+  // mapArray at all.
+  if (sharedConfig.hydrating) mapped = create();
+  const list = () => (mapped ?? (mapped = create()))();
+  return list as unknown as SolidElement;
 }
 
 /**

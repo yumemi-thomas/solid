@@ -36,8 +36,44 @@ fn source_text(source: &str, start: u32, end: u32) -> &str {
 }
 
 #[test]
+fn ssr_lone_spread_records_discarded_native_refs() {
+    for source in [
+        "let node; const view = <div ref={node} {...props()} />;",
+        "const view = <div {...props()} ref={factory()} />;",
+        "const view = <div {...props()} ref={factory()} id={id()} />;",
+    ] {
+        let settings = CompileOptions {
+            generate: Generate::Ssr,
+            source_map: true,
+            ..options(true)
+        };
+        let traced = compile(source, &settings).unwrap();
+        let plain = compile(
+            source,
+            &CompileOptions {
+                semantic_trace: false,
+                ..settings
+            },
+        )
+        .unwrap();
+        assert_eq!(traced.code, plain.code);
+        assert_eq!(traced.source_map, plain.source_map);
+        let trace = traced.semantic_trace.unwrap();
+        let site = trace
+            .sites
+            .iter()
+            .find(|site| site.kind == ExecutionSiteKind::Ref)
+            .unwrap();
+        assert_eq!(
+            site.decision,
+            TerminalDecision::Callback(CallbackDecision::Elided)
+        );
+    }
+}
+
+#[test]
 fn trace_v3_binds_identity_and_reports_independent_execution_axes() {
-    const EXPECTED_UPSTREAM_REVISION: &str = "a10cf1a147209d8da50697896742d2b1d4afad75";
+    const EXPECTED_UPSTREAM_REVISION: &str = "91088d2c2b867492c173b0e45f8b40cbe8390b1b";
 
     let source = r#"const C = (p) => <div title={p.title} onClick={p.onClick} ref={makeRef()}>{p.child}</div>;"#;
     let output = compile(source, &options(true)).expect("compile with trace v3");
@@ -46,6 +82,7 @@ fn trace_v3_binds_identity_and_reports_independent_execution_axes() {
     assert_eq!(trace.version, 3);
     assert_eq!(trace.identity.config.mode, SemanticTraceMode::Dom);
     assert_eq!(trace.identity.config.module_name, "r-dom");
+    assert_eq!(trace.identity.config.patch_driver, "disabled");
     assert_eq!(trace.identity.source_sha256.len(), 64);
     assert_eq!(trace.identity.output_sha256.len(), 64);
     assert_eq!(SEMANTIC_TRACE_UPSTREAM_REVISION, EXPECTED_UPSTREAM_REVISION);
