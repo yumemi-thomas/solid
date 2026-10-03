@@ -32,6 +32,7 @@ pub(crate) struct DomTemplateState {
     pub(crate) uses_ref: bool,
     pub(crate) uses_style: bool,
     pub(crate) uses_set_style_property: bool,
+    pub(crate) uses_read_shallow: bool,
     pub(crate) uses_class_name: bool,
     pub(crate) uses_effect: bool,
     pub(crate) uses_set_attribute: bool,
@@ -124,6 +125,7 @@ impl DomTemplateState {
             uses_ref: false,
             uses_style: false,
             uses_set_style_property: false,
+            uses_read_shallow: false,
             uses_class_name: false,
             uses_effect: false,
             uses_set_attribute: false,
@@ -194,6 +196,9 @@ impl<'a> AstDomTransform<'a, '_> {
         }
         if self.template_state.uses_set_style_property {
             statements.push(self.import_named("setStyleProperty", "_$setStyleProperty"));
+        }
+        if self.template_state.uses_read_shallow {
+            statements.push(self.import_named("readShallow", "_$readShallow"));
         }
         if self.template_state.uses_class_name {
             statements.push(self.import_named("className", "_$className"));
@@ -312,12 +317,18 @@ impl<'a> AstDomTransform<'a, '_> {
         AstBuilder::new(self.allocator)
     }
 
+    /// `_$insert(parent, value[, marker[, initial]])`. `name` is the
+    /// `sourceNames.bindings` label for the hole's render effect
+    /// (`<tag>.children`), appended as insert's trailing options argument
+    /// with the marker and initial slots filled by `undefined` when the call
+    /// would otherwise omit them — Babel's `emitInsert`.
     pub(crate) fn insert_statement(
         &self,
         span: Span,
         parent: &str,
         value: Expression<'a>,
         marker: Option<InsertMarker<'a>>,
+        name: Option<String>,
     ) -> Statement<'a> {
         let mut args = vec![self.identifier_expression(span, parent), value];
         if let Some(marker) = marker {
@@ -326,8 +337,21 @@ impl<'a> AstDomTransform<'a, '_> {
                 args.push(initial);
             }
         }
+        if let Some(name) = name {
+            while args.len() < 4 {
+                args.push(self.identifier_expression(span, "undefined"));
+            }
+            args.push(self.name_options_object(span, &name));
+        }
         self.ast()
             .statement_expression(span, self.call_identifier(span, "_$insert", args))
+    }
+
+    /// The `sourceNames.bindings` label for a hole under `parent_tag`, or
+    /// `None` when the option is off or the hole inserts a static value (a
+    /// component call, a literal) that creates no effect to name.
+    pub(crate) fn hole_name(&self, parent_tag: &str, accessor: bool) -> Option<String> {
+        (self.binding_names && accessor).then(|| format!("{parent_tag}.children"))
     }
 
     pub(crate) fn object_property(

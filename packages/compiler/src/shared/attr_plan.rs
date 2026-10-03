@@ -9,7 +9,8 @@ use oxc_span::{GetSpan, SPAN, Span};
 use crate::shared::ast_builder::AstBuilder;
 use crate::shared::bindings::BindingTable;
 use crate::shared::utils::{
-    StaticValue, decode_html_entities, format_number, is_literal_only_expression,
+    StaticValue, decode_html_entities, escape_html_text_expression, format_number,
+    is_literal_only_expression,
 };
 
 /// Planned attribute value, mirroring the states a Babel JSX attribute value
@@ -547,7 +548,7 @@ impl<'a> AttrPlanner<'a, '_> {
     fn stateful_value_child(&self, plan: &AttrPlan<'a>) -> JSXChild<'a> {
         match &plan.value {
             PlanValue::Literal(text) => {
-                let atom = self.ast().str(text);
+                let atom = self.ast().str(&escape_html_text_expression(text));
                 self.ast().jsx_child_text(plan.span, atom, Some(atom))
             }
             PlanValue::Expr(expression) => self.ast().jsx_child_expression_container(

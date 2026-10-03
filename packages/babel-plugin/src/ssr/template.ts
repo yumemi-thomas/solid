@@ -1,34 +1,9 @@
 import * as t from "@babel/types";
 import { getConfig, isStatementVariableInitializer, registerImportMethod } from "../shared/utils";
 import type { NodePath } from "@babel/traverse";
-import type { ProgramScopeData, TemplateRecord, TransformResult } from "../types";
+import type { ProgramScopeData, SkipRecord, TemplateRecord, TransformResult } from "../types";
 
 type SSRDeclarator = t.VariableDeclarator & { id: t.LVal; init: t.Expression };
-
-// Wrap the *inner* value of a fragment-child accessor with `_$escape` so that
-// hostile string values returned from reactive accessors cannot be
-// concatenated raw into the SSR output. Element-child expressions already get
-// this treatment via `escapeExpression` in `ssr/element.js`; fragment
-// children reach SSR via a different code path and would otherwise skip the
-// escape step.
-//
-// `expr` is the first entry of `result.exprs` produced by `transformNode`
-// for a `JSXExpressionContainer`. It is either:
-//   - an arrow function `() => X` (default case)
-//   - a bare callee (`fnRef`, emitted when the expression is `fnRef()` with
-//     no args — see the JSXExpressionContainer branch in shared/transform.js)
-//   - the result of `transformCondition(..., inline=true)`, which also
-//     returns an arrow function
-// For arrows with an expression body we rewrite in place; for anything else
-// we conservatively wrap in a new arrow that calls and escapes.
-function wrapFragmentChildWithEscape(path: NodePath, expr: t.Expression) {
-  const escape = registerImportMethod(path, "escape", undefined);
-  if (t.isArrowFunctionExpression(expr) && !t.isBlockStatement(expr.body)) {
-    expr.body = t.callExpression(escape, [expr.body]);
-    return expr;
-  }
-  return t.arrowFunctionExpression([], t.callExpression(escape, [t.callExpression(expr, [])]));
-}
 
 export function createTemplate(
   path: NodePath,
@@ -37,19 +12,16 @@ export function createTemplate(
 ): t.Expression {
   if (!result.template) {
     // `wrap` is true for fragment children and for mixed component children.
-    // A sole component child (`wrap === false`) is a value passed to the
-    // callee — do not `_$escape` it here; the callee's insert/SSR sites
-    // escape when interpolating into HTML. Escaping both layers double-escapes.
+    // Both are VALUES — they flow to whatever hole eventually inserts them,
+    // and that hole's `_$escape` covers everything reachable from the value:
+    // strings, array items, and what a function (this memo) yields when the
+    // resolver calls it. Escaping here as well double-escapes through
+    // `<Comp>{props.children}</Comp>`. The memo exists for hydration-id
+    // alignment with the client, not for escaping.
     if (wrap && result.dynamic && getConfig(path).memoWrapper) {
-      // wontEscape is set on JSXElement children whose compiled form is
-      // already a safe SSR node (e.g. `_$ssr(...)` call). Wrapping those in
-      // escape would be a no-op at runtime but obscures intent — skip it.
-      const inner = result.wontEscape
-        ? (result.exprs[0] as t.Expression)
-        : wrapFragmentChildWithEscape(path, result.exprs[0] as t.Expression);
       return t.callExpression(
         registerImportMethod(path, getConfig(path).memoWrapper as string, undefined),
-        [inner]
+        [result.exprs[0] as t.Expression]
       );
     }
     return result.exprs[0] as t.Expression;
@@ -177,4 +149,37 @@ export function appendTemplates(path: NodePath<t.Program>, templates: TemplateRe
     return t.variableDeclarator(template.id, template.template as t.Expression);
   });
   path.node.body.unshift(t.variableDeclaration("var", declarators));
+}
+
+/**
+ * The `skip` predicate of an `ssrElement` call whose static tail attributes
+ * were baked into its attribute string (ssr/element.ts `createElement`):
+ * `k => k === "a" || k === "b"` over the baked keys, so the spread's own
+ * copies of them are never read or emitted. Hoisted to the module like a
+ * template — one function per distinct key set, shared by every element that
+ * bakes the same keys — so the call site allocates nothing per render.
+ */
+export function registerSkip(path: NodePath, keys: string[]): t.Identifier {
+  const data = path.scope.getProgramParent().data as ProgramScopeData;
+  const skips = data.ssrSkips || (data.ssrSkips = []);
+  const key = keys.join("\0");
+  const found = skips.find(s => s.key === key);
+  if (found) return found.id;
+  const id = path.scope.generateUidIdentifier("sk$");
+  const k = t.identifier("k");
+  let test: t.Expression = t.binaryExpression("===", k, t.stringLiteral(keys[0]));
+  for (let i = 1; i < keys.length; i++) {
+    test = t.logicalExpression("||", test, t.binaryExpression("===", k, t.stringLiteral(keys[i])));
+  }
+  skips.push({ key, id, predicate: t.arrowFunctionExpression([t.identifier("k")], test) });
+  return id;
+}
+
+export function appendSkips(path: NodePath<t.Program>, skips: SkipRecord[]) {
+  path.node.body.unshift(
+    t.variableDeclaration(
+      "var",
+      skips.map(s => t.variableDeclarator(s.id, s.predicate))
+    )
+  );
 }

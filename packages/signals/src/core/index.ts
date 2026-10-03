@@ -8,7 +8,6 @@ export {
   read,
   setSignal,
   setMemo,
-  suppressComputedRecompute,
   optimisticSignal,
   optimisticComputed,
   installAuthoritativeRead,
@@ -67,13 +66,30 @@ export {
   type IQueue,
   type QueueCallback
 } from "./scheduler.js";
-export type { AttributionHooks, InteractionRef } from "./attribution-hooks.js";
+export type { InteractionRef, NavigationRef } from "./attribution-hooks.js";
+export { ROOT_ERROR_HOOK } from "./scheduler.js";
+export {
+  configureClientErrors,
+  type ClientErrorContext,
+  type ClientErrorHook,
+  type ClientErrorsConfig
+} from "./error-hooks.js";
 export {
   DEV,
   OBSERVE,
+  setConsoleFooter,
   type AttributionSlot,
   type Dev,
   type Observe,
+  type ServerObserve,
+  type Records,
+  type RecordTypes,
+  type HostRecordTypes,
+  type RecordType,
+  type RecordEvent,
+  type RecordLive,
+  type RecordListener,
+  type RecordSubscribeOptions,
   type DevHooks,
   type DiagnosticCapture,
   type DiagnosticCode,

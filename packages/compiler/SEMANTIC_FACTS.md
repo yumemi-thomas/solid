@@ -83,3 +83,37 @@ with that single lint excluded, the remaining Clippy checks pass. Formatting
 checks retain upstream differences in `refresh/transform.rs` and
 `universal/transform.rs`. This fork does not modify those upstream branches
 merely to make a style gate green.
+
+## 2026-10-03 published RC.13 update
+
+The upstream base is the published `2.0.0-rc.13` Git head
+`5efaf260becb32293f2bcb4d32f8be72be6de674`. The merge preserves its lowering,
+diagnostics, source maps, SSR props hoisting, source-name labels, ref ordering,
+server-function export validation and TSRX frontend. Later unreleased `next`
+commits are outside this candidate.
+
+Trace v3 now binds `hoist_props`, `source_names_components` and
+`source_names_bindings` in its effective configuration. Recording covers the
+DOM spread `$key` discard, deferred SSR spread tails, conditional server
+component ref/event claims and server component class/style holes. Claims
+do not assert that an event or ref executes on the server.
+
+The corpus contains 95 fixture sources and 270 probes. Its test reader uses
+the JavaScript parser's cooked template-literal value, including escaped
+backslashes and quotes. The 365-entry output baseline comes from untouched
+RC.13. Independent upstream/fork and published-native comparisons cover nine
+profiles (3,285 outcomes): code, maps, CSS fields and diagnostics match;
+tracing preserves all DOM/SSR outcomes. Universal, Dynamic and authored TSRX
+fact recording remain refused. Generated operations retain partial enumeration.
+
+Rust validation passes 53 tests without default features, 116 with only TSRX,
+and 63 with default features. The baseline writer remains ignored. Strict
+all-feature Clippy inherits RC.13's `collapsible_if` in shared/validate.rs and
+`if_same_then_else` in tsrx/project.rs; excluding only those two named lints
+passes. The same strict failures occur in untouched upstream.
+
+Checker production pins and its full identity, process, coverage, ownership,
+contract and verification gates must migrate together before adoption. This
+local compiler candidate alone does not certify package behavior or feedback
+accuracy. Evidence and the reproducible patch are recorded in solid-checker's
+`benchmarks/compiler-facts/rc13/` and the dated RC.13 rebase report.

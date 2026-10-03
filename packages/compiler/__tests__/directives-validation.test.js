@@ -131,6 +131,156 @@ describe('"use server" closure-capture validation', () => {
       ].join("\n");
       expect(() => compile(code)).toThrow(/`conn` is declared in an enclosing function/);
     });
+
+    it("rejects an arrow capturing `this`", () => {
+      const code = [
+        "class Box {",
+        "  make() {",
+        "    return async () => {",
+        '      "use server";',
+        "      return this.value;",
+        "    };",
+        "  }",
+        "}",
+        "export { Box };"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(
+        /server functions cannot capture `this` from an enclosing function/
+      );
+    });
+
+    it("rejects `this` in a class field initializer", () => {
+      const code = [
+        "export class Service {",
+        "  refresh = async () => {",
+        '    "use server";',
+        "    return this.id;",
+        "  };",
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/cannot capture `this`/);
+    });
+
+    it("rejects `this` read from a nested arrow", () => {
+      const code = [
+        "class Box {",
+        "  make() {",
+        "    return async () => {",
+        '      "use server";',
+        "      return [1, 2].map(() => this.value);",
+        "    };",
+        "  }",
+        "}",
+        "export { Box };"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/cannot capture `this`/);
+    });
+
+    it("rejects an arrow capturing `arguments`", () => {
+      const code = [
+        "export function outer() {",
+        "  return async () => {",
+        '    "use server";',
+        "    return arguments.length;",
+        "  };",
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(
+        /server functions cannot capture `arguments` from an enclosing function/
+      );
+    });
+
+    it("rejects `this` captures in client mode too", () => {
+      const code = [
+        "class Box {",
+        "  make() {",
+        "    return async () => {",
+        '      "use server";',
+        "      return this.value;",
+        "    };",
+        "  }",
+        "}",
+        "export { Box };"
+      ].join("\n");
+      expect(() => compile(code, { mode: "client" })).toThrow(/cannot capture `this`/);
+    });
+
+    it("rejects the directive on an object method", () => {
+      const code = [
+        "export function make() {",
+        "  return {",
+        "    async go() {",
+        '      "use server";',
+        "      return 1;",
+        "    }",
+        "  };",
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(
+        /a "use server" directive has no effect on a method: `go` is not extracted/
+      );
+    });
+
+    it("rejects the directive on an object accessor", () => {
+      const code = [
+        "export function make() {",
+        '  return { get x() { "use server"; return 1; } };',
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/has no effect on a method: `x`/);
+    });
+
+    it("rejects the directive on a class method", () => {
+      const code = [
+        "export class Service {",
+        "  async go() {",
+        '    "use server";',
+        "    return 1;",
+        "  }",
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/has no effect on a method: `go`/);
+    });
+
+    it("rejects the directive on a static class method", () => {
+      const code = [
+        "export class Service {",
+        '  static async go() { "use server"; return 1; }',
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/has no effect on a method: `go`/);
+    });
+
+    it("names a computed method key generically", () => {
+      const code = [
+        'const key = "go";',
+        "export function make() {",
+        '  return { async [key]() { "use server"; return 1; } };',
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(
+        /has no effect on a method: this method is not extracted/
+      );
+    });
+
+    it("rejects method directives in client mode too", () => {
+      const code = ["export class Service {", '  async go() { "use server"; return 1; }', "}"].join(
+        "\n"
+      );
+      expect(() => compile(code, { mode: "client" })).toThrow(/has no effect on a method/);
+    });
+
+    it("reports the method's position", () => {
+      const code = [
+        "export class Service {",
+        "  async go() {",
+        '    "use server";',
+        "    return 1;",
+        "  }",
+        "}"
+      ].join("\n");
+      expect(() => compile(code)).toThrow(/\/project\/src\/module\.ts:2:3: /);
+    });
   });
 
   describe("allowed", () => {
@@ -186,6 +336,43 @@ describe('"use server" closure-capture validation', () => {
       expect(compile(code).valid).toBe(true);
     });
 
+    it("allows `this` and `arguments` in a marked function expression", () => {
+      // A `function` carries its own `this` and `arguments` with it, so
+      // extraction does not change what they mean.
+      const code = [
+        "export function outer() {",
+        "  return function () {",
+        '    "use server";',
+        "    return [this, arguments.length];",
+        "  };",
+        "}"
+      ].join("\n");
+      expect(compile(code).valid).toBe(true);
+    });
+
+    it("allows `this` inside a function or class nested in the server function", () => {
+      const code = [
+        "export const go = async () => {",
+        '  "use server";',
+        "  class Row { label() { return this.name; } }",
+        "  const build = function () { return this.kind; };",
+        "  return { Row, build, m() { return this.own; } };",
+        "};"
+      ].join("\n");
+      expect(compile(code).valid).toBe(true);
+    });
+
+    it("allows a declared binding named `arguments`", () => {
+      const code = [
+        "export const go = async (...args) => {",
+        '  "use server";',
+        "  const argumentsList = args;",
+        "  return argumentsList.length;",
+        "};"
+      ].join("\n");
+      expect(compile(code).valid).toBe(true);
+    });
+
     it("allows top-level function and class declarations", () => {
       const code = [
         "function helper(value) { return value + 1; }",
@@ -229,21 +416,44 @@ describe('"use server" closure-capture validation', () => {
       expect(result.functions).toHaveLength(1);
     });
 
-    it("ignores object methods (never extracted by the transform)", () => {
+    it("allows a function assigned to a property or class field", () => {
+      // The extractable spelling of what a method cannot do.
+      const code = [
+        "export function make() {",
+        '  return { go: async () => { "use server"; return 1; } };',
+        "}",
+        "export class Service {",
+        '  refresh = async () => { "use server"; return 2; };',
+        "}"
+      ].join("\n");
+      expect(compile(code).functions).toHaveLength(2);
+    });
+
+    it("allows a method directive inside an already-extracted server function", () => {
+      // The whole body ships to the server, so the inner directive changes
+      // nothing and must not be reported.
+      const code = [
+        "export const outer = async () => {",
+        '  "use server";',
+        '  return { m() { "use server"; return 1; } };',
+        "};"
+      ].join("\n");
+      expect(compile(code).functions).toHaveLength(1);
+    });
+
+    it("allows object methods without the directive", () => {
+      // Methods are never extracted, so their ordinary closures are fine.
       const code = [
         "export function factory() {",
         "  const state = 1;",
-        "  return {",
-        "    read() {",
-        '      "use server";',
-        "      return state;",
-        "    }",
-        "  };",
-        "}"
+        "  return { read() { return state; } };",
+        "}",
+        "export const ping = async () => {",
+        '  "use server";',
+        "  return 1;",
+        "};"
       ].join("\n");
-      // Not extracted, so no capture error and nothing transformed.
-      const result = compile(code);
-      expect(result.valid).toBe(false);
+      expect(compile(code).valid).toBe(true);
     });
   });
 });

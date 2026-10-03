@@ -5,7 +5,8 @@ import {
   untrack,
   setContext,
   getContext,
-  flatten
+  flatten,
+  OBSERVE
 } from "@solidjs/signals";
 import type { Accessor, EffectOptions } from "@solidjs/signals";
 import type { ArrayElement, Element as SolidElement } from "../types.js";
@@ -61,9 +62,11 @@ export interface Context<T> extends ContextProviderComponent<T> {
  *   static fallback (theme, locale, frozen config). Outside any Provider,
  *   `useContext` returns `defaultValue`.
  *
- * If you want truly app-wide state, **don't use Context** — a module-scope
- * signal/store *is* a global. Context is for scoping state to a subtree;
- * that's why a Provider is required.
+ * Context is for state that belongs to a subtree, which includes app-wide
+ * state in an app that renders on the server: a value created inside a
+ * component is created once per request, and the Provider owns and disposes
+ * it. Module scope is shared by every request in the same process, so reserve
+ * it for constants.
  *
  * @param defaultValue optional default; only meaningful for primitive
  *   fallbacks. Omit for any context carrying reactive state.
@@ -87,6 +90,7 @@ export interface Context<T> extends ContextProviderComponent<T> {
  * function TodoList() {
  *   const [todos, { addTodo }] = useContext(TodosContext); // typed as TodosCtx
  *   // ...
+ *   return null;
  * }
  * ```
  *
@@ -142,6 +146,7 @@ export function createContext<T>(defaultValue?: T, options?: EffectOptions): Con
  * function TodoList() {
  *   const [todos, { addTodo }] = useContext(TodosContext); // throws if no Provider
  *   // ...
+ *   return null;
  * }
  * ```
  *
@@ -197,8 +202,43 @@ export function children(fn: Accessor<SolidElement>): ChildrenReturn {
  * attribution need (`["<App>", "<TodoRow>", "effect"]`). Dev tier adds the
  * non-function check, the devtools `_component` record and `$DEVCOMP` brand,
  * and the strict-read label. The prod build never calls this.
+ *
+ * `name` is the source tag the compiler emitted under `sourceNames.components`; it
+ * wins over `Comp.name`, which a minifier rewrites and a `lazy()` or HMR
+ * wrapper hides.
  */
-export function observedComponent<P, V>(Comp: (props: P) => V, props: P): V {
+/**
+ * A `console.createTask` task (Chrome's async stack tagging API; no lib
+ * typing yet): `run(fn)` executes `fn` with the task's creation stack as
+ * the async parent of whatever `fn` reports.
+ */
+export interface ConsoleTask {
+  run<T>(fn: () => T): T;
+}
+
+function createConsoleTask(name: string): ConsoleTask | undefined {
+  const createTask = (console as { createTask?: (name: string) => ConsoleTask }).createTask;
+  return typeof createTask === "function" ? createTask.call(console, name) : undefined;
+}
+
+/**
+ * The dev-tier record a component root carries as `_component` — what
+ * devtools read off the owner tree.
+ */
+export interface ComponentRecord<P = unknown> {
+  fn: (props: P) => unknown;
+  props: P;
+  /** The source tag when the compiler emitted one, else `fn.name`. */
+  name: string | undefined;
+  /**
+   * The JSX site as a console task — when the console supports it and an
+   * attribution engine was installed when the component rendered (see
+   * `createConsoleTask` and the note at its use).
+   */
+  task: ConsoleTask | undefined;
+}
+
+export function observedComponent<P, V>(Comp: (props: P) => V, props: P, name?: string): V {
   // A JSX tag whose component resolved to a non-function otherwise surfaces
   // as `Cannot read properties of undefined (reading 'name')` from inside the
   // dev build — a framework-shaped stack for an app-shaped mistake (#3005).
@@ -209,7 +249,8 @@ export function observedComponent<P, V>(Comp: (props: P) => V, props: P): V {
       }. A JSX tag resolved to a non-function value — check the import: a missing or misnamed export resolves to undefined.`
     );
   }
-  const label = `<${Comp.name || "Anonymous"}>`;
+  name ||= Comp.name;
+  const label = `<${name || "Anonymous"}>`;
   return createRoot(
     () => {
       const owner: any = getOwner();
@@ -220,11 +261,25 @@ export function observedComponent<P, V>(Comp: (props: P) => V, props: P): V {
       // "(in <TodoRow>)".
       owner._name = label;
       if (IS_DEV) {
-        owner._component = {
+        // The JSX site as a console task (Chrome's async stack tagging):
+        // an observer that later reports on this component's nodes — the
+        // performance tracks painting a re-run span — runs its
+        // `performance.measure` inside `task.run(...)`, and the entry's
+        // stack in the panel points at where the component was rendered
+        // rather than at the observer. Only while an attribution engine is
+        // installed: `console.createTask` costs a stack capture per call
+        // (about the component wrapper's own cost again, and ~90 B retained
+        // per instance, DevTools open or not), and only an attribution
+        // consumer ever reads the task — so a dev session with nothing
+        // enabled pays nothing, and a consumer that enables before render
+        // (the tracks at bootstrap) sees every component's site.
+        const record: ComponentRecord<P> = {
           fn: Comp,
           props,
-          name: Comp.name
+          name,
+          task: OBSERVE!.attribution.installed !== null ? createConsoleTask(label) : undefined
         };
+        owner._component = record;
         Object.assign(Comp, { [$DEVCOMP]: true });
         return untrack(() => Comp(props), label);
       }

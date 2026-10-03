@@ -1,5 +1,7 @@
 # Store Storage Model Rewrite — Semantic Rules & Working Notes
 
+> **Index:** every rule ID cited from `src/` or `tests/` — this file's §-sections and RUL-ids, the rules-mining R-ids (namespaced per file: CS/OL/OS/PJ/RS), the spec's A-ids — is listed with status, definition and citations in [`RULES-INDEX.md`](./RULES-INDEX.md) (generated; `node scripts/rules-index.mjs`). IDs are never renumbered.
+
 Companion to `INTERNALS-ASYNC-STATE.md`, same method: pin the semantic contract
 as rules first, wire the checkable ones as `__TEST__` assertions, then let the
 implementation land against them. Nothing below is final until it survives the
@@ -146,6 +148,41 @@ there is nothing to diff.)
   graph, which is what makes post-reconcile `snapshot` free.
 - Commit hook: lane settle folds the winning lane value into raw, then the
   node returns to passthrough (no pending state retained).
+- **Adoption under a live transaction** (#3074, extended for the #3330 store
+  twin): `adoptPB` swaps the backing eagerly but records a hold (`ht` = the
+  transaction, `hv` = the pre-hold committed view) that committed-visibility
+  readers are served through `heldMaskView` — on optimistic families too (a
+  sync derive adopting truth under a transaction is held truth, not lane
+  business; unheld, handlers read the swapped-in backing early and an
+  optimistic write equal to it compared as a no-op, so no override and no
+  lane formed). A held adoption's nodes are notified at the outermost setter
+  exit (`stageHeldAdoptions`, the adoption twin of `notifyWrites`): staged
+  under the transaction's batch, transition-stamped, subscribers recompute in
+  that flush and park with the transaction, and the commit promotes silently
+  — the drain, which for a parked transaction IS the commit, would otherwise
+  deliver the adopted values as fresh writes and re-run every subscriber
+  against a frame the lane already published. `ab` moves to the adopted
+  backing (the view the nodes were last told, #3296) so the drain only
+  path-copies. `notifyOptimisticWrites` judges a tentative write against the
+  view readers see (`heldMaskView(t) ?? t.v`), not the backing slot. A plain
+  store's eager adoption (`reconcile` in a setter) under a live transaction
+  takes the same hold — its inline notify already staged the nodes; the
+  backing must not show handlers what the tracked read masks. A key first
+  read under a held adoption is **born holding** (`heldAdoptionTransition` /
+  `stageHeldKey` in `getNode`): committed value from `hv`, the adopted value
+  staged under the transaction — the adoption's notification ran before the
+  node existed and the drain has nothing left to say. (The #3336 PR adds the
+  same for setter-staged `pb` holds and makes the first tracked read serve
+  the node's value; the two compose.) The unit of the hold is the **key**
+  the adoption changed, not the container (#3706; the fold hold's `wk` rule,
+  #3688): `adoptPB` records the adopted object, and the keys it changed
+  against `hv` are computed once, on the first held read (own on both, never
+  an accessor, same enumerability, slot equality) — so a mainline setter
+  write during the hold, which replaces the backing, is never counted as the
+  adoption's. A get/has/descriptor read of any other key is served from the
+  backing to every reader and is not born holding. Keyless reads (`ownKeys`,
+  `$TRACK`, `deep()`), chained backings, optimistic families and a swapped
+  or non-plain prototype hold the whole container.
 
 ## 4. Identity rules
 
@@ -344,6 +381,35 @@ raw object. Mechanics:
 - **Structural chaining** (#2864, core R21): outer `ownKeys`/`$TRACK` reads
   likewise read through to the inner key-set node — chaining is the same
   read-through rule, not a special case.
+- **`deep()` through a chain** (#3323): the walk subscribes every inner
+  record's key-set AND deep-witness node along the chain (from `t.v`, not
+  `readSource` — a pending backing is a raw clone and would hide the chain),
+  and resolves children via `resolveChainedRaw` to the chained wrapper the
+  get trap serves, never a fresh raw-keyed one. Base writes bump the inner
+  witnesses, so a `deep(view)` subscriber hears them exactly as per-key
+  readers do (the reader-families-agree rule).
+- **One visibility rule** (#3323): `visibleKeys` / `visibleDescriptor` are
+  the bodies of the `ownKeys` / `getOwnPropertyDescriptor` traps AND what
+  the `deep()` walk enumerates. The walk used to re-derive the trap rules
+  over raw backings and missed each new one (the #3044 overlay merge, the
+  chain, optimistic presence/value overrides — a row added under a held
+  action lives in `h`/`n`, so its record was never walked and `deep()` was
+  deaf to every write on it until settle). Parity is now structural.
+- **Chained pending backings keep identity** (#3323): `ensurePB` on a
+  chained target clones the inner *proxy*, whose descriptors yield the
+  inner store's raws. Two rules keep the overlay serving the same chained
+  targets as the settled state: (1) `serveDataKey` (and the walk) pass a
+  raw the inner family owns — already served, or held by the inner backing
+  at that key — through `resolveChainedRaw` to the inner proxy before
+  wrapping; a raw the inner does not own is a draft's replacement object and
+  stays view-owned/non-chained. (2) `notifyOptimisticWrites` diffs
+  `unwrapValue`d values on both sides — `old = t.v` is the inner proxy whose
+  reads return inner child *proxies*, and comparing those to the clone's
+  raws marked every untouched row changed, so the overlay served each from
+  an override as a fresh non-chained target (row identities churned for the
+  life of the action and snapped back at settle). `snapshotWalk`, entering a
+  level from a raw below a chained family, starts from that family's wrapper
+  (keyed by the inner proxy) so outer overrides below the root compose.
 - **Lane masking = shadow + dynamic dependencies** (core R36 zero-churn): a
   lane value on an outer property node shadows read-through. Subscribers
   re-run once on the hold write, rebuild dependencies against the lane value
@@ -608,7 +674,9 @@ implementation, deduplicated across reports.
   writes must not entangle lanes (opt R38); equal-value action writes must
   still register ownership and dirty downstream (lanes R17); same-value
   manual writes on derived stores must mask the recompute for the tick (core
-  R31) despite equality-checked core signals.
+  R31; within a synchronous frame — across a hold the write is the
+  re-derivation's `prev`, A34 (3), #3612) despite equality-checked core
+  signals.
 - **RUL-11 — SPEC'D (2026-08-17): §6d.** Sticky descendants flag ported from
   `STORE_DESC`; reference-skip precedes reachability; monotone by design.
 - **RUL-12 — Smaller rulings, each with a proposed default** (proceeding on

@@ -5,10 +5,10 @@ import { template as _$template } from "r-dom";
 import { insert as _$insert } from "r-dom";
 import { memo as _$memo } from "r-custom";
 import { spread as _$spread } from "r-dom";
-import { mergeProps as _$mergeProps } from "r-custom";
 import { ref as _$ref } from "r-dom";
 import { style as _$style } from "r-dom";
 import { setStyleProperty as _$setStyleProperty } from "r-dom";
+import { readShallow as _$readShallow } from "r-dom";
 import { className as _$className } from "r-dom";
 import { effect as _$effect } from "r-custom";
 import { setAttribute as _$setAttribute } from "r-dom";
@@ -71,35 +71,43 @@ let link;
 var _el$ = _tmpl$();
 var _el$2 = _el$.firstChild;
 var _el$3 = _el$2.firstChild;
-_$spread(_el$, _$mergeProps({ id: "main" }, results, {
-	class: { selected: unknown },
-	style: { color }
-}), true);
-_$spread(_el$2, _$mergeProps({ id }, results, {
-	foo: true,
-	disabled: true,
-	get title() {
-		return welcoming();
-	},
-	get style() {
-		return {
-			"background-color": color(),
-			"margin-right": "40px"
-		};
-	},
-	get ["class"]() {
-		return ["base", {
-			dynamic: dynamic(),
-			selected
-		}];
+_$spread(_el$, [
+	{ id: "main" },
+	results,
+	{
+		class: { selected: unknown },
+		style: { color }
 	}
-}), true);
+], true);
+_$spread(_el$2, [
+	{ id },
+	results,
+	{
+		foo: true,
+		disabled: true,
+		get title() {
+			return welcoming();
+		},
+		get style() {
+			return {
+				"background-color": color(),
+				"margin-right": "40px"
+			};
+		},
+		get "class"() {
+			return ["base", {
+				dynamic: dynamic(),
+				selected
+			}];
+		}
+	}
+], true);
+_$claimElement(_el$3);
+_$className(_el$3, { "ccc ddd": true });
 var _ref$ = link;
 typeof _ref$ === "function" || Array.isArray(_ref$) ? _$ref(() => {
 	return _ref$;
 }, _el$3) : link = _el$3;
-_$claimElement(_el$3);
-_$className(_el$3, { "ccc ddd": true });
 const template = _el$;
 var _el$4 = _tmpl$2();
 var _el$5 = _el$4.firstChild;
@@ -137,7 +145,7 @@ const template4 = _el$10;
 const template5 = _tmpl$5();
 var _el$12 = _tmpl$4();
 _el$12.textContent = "Hi";
-_$effect(() => someStyle(), (_v$, _$p) => {
+_$effect(() => _$readShallow(someStyle()), (_v$, _$p) => {
 	_$style(_el$12, _v$, _$p);
 });
 const template6 = _el$12;
@@ -234,7 +242,7 @@ _$effect(() => "t" in test, (_v$) => {
 const template23 = _el$30;
 var _el$31 = _tmpl$16();
 _$claimElement(_el$31);
-_$spread(_el$31, _$mergeProps(props, { something: true }), false);
+_$spread(_el$31, [props, { something: true }], false);
 const template24 = _el$31;
 var _el$32 = _tmpl$17();
 var _el$33 = _el$32.firstChild;
@@ -242,16 +250,21 @@ _$insert(_el$32, () => {
 	return props.children;
 }, _el$33);
 _$claimElement(_el$33);
-_$spread(_el$33, _$mergeProps(props, { something: true }), false);
+_$spread(_el$33, [props, { something: true }], false);
 const template25 = _el$32;
 var _el$34 = _tmpl$18();
-_$spread(_el$34, _$mergeProps({
+_$spread(_el$34, [{
 	start: "Hi",
 	middle
-}, spread), true);
+}, spread], true);
 const template26 = _el$34;
 var _el$35 = _tmpl$18();
-_$spread(_el$35, _$mergeProps({ start: "Hi" }, first, { middle }, second), true);
+_$spread(_el$35, [
+	{ start: "Hi" },
+	first,
+	{ middle },
+	second
+], true);
 const template27 = _el$35;
 var _el$36 = _tmpl$19();
 var _el$37 = _el$36.firstChild;
@@ -280,28 +293,28 @@ const template32 = _tmpl$4();
 const template33 = [
 	(() => {
 		var _el$45 = _tmpl$21();
-		_$effect(() => styles.button, (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles.button), (_v$, _$p) => {
 			_$className(_el$45, _v$, _$p);
 		});
 		return _el$45;
 	})(),
 	(() => {
 		var _el$46 = _tmpl$21();
-		_$effect(() => styles["foo--bar"], (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles["foo--bar"]), (_v$, _$p) => {
 			_$className(_el$46, _v$, _$p);
 		});
 		return _el$46;
 	})(),
 	(() => {
 		var _el$47 = _tmpl$21();
-		_$effect(() => styles.foo.bar, (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles.foo.bar), (_v$, _$p) => {
 			_$className(_el$47, _v$, _$p);
 		});
 		return _el$47;
 	})(),
 	(() => {
 		var _el$48 = _tmpl$21();
-		_$effect(() => styles[foo()], (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles[foo()]), (_v$, _$p) => {
 			_$className(_el$48, _v$, _$p);
 		});
 		return _el$48;
@@ -491,28 +504,33 @@ var _el$101 = _tmpl$4();
 _$spread(_el$101, { ...propsSpread }, false);
 const template81 = _el$101;
 var _el$102 = _tmpl$4();
-_$spread(_el$102, _$mergeProps(propsSpread, {
-	get ["data-dynamic"]() {
+_$spread(_el$102, [propsSpread, {
+	get "data-dynamic"() {
 		return color();
 	},
 	"data-static": /* @static */ color()
-}), false);
+}], false);
 const template82 = _el$102;
 var _el$103 = _tmpl$4();
-_$spread(_el$103, _$mergeProps({ ...propsSpread }, {
-	get ["data-dynamic"]() {
+_$spread(_el$103, [{ ...propsSpread }, {
+	get "data-dynamic"() {
 		return color();
 	},
 	"data-static": /* @static */ color()
-}), false);
+}], false);
 const template83 = _el$103;
 var _el$104 = _tmpl$4();
-_$spread(_el$104, _$mergeProps({ ...propsSpread1 }, propsSpread2, { ...propsSpread3 }, {
-	get ["data-dynamic"]() {
-		return color();
-	},
-	"data-static": /* @static */ color()
-}), false);
+_$spread(_el$104, [
+	{ ...propsSpread1 },
+	propsSpread2,
+	{ ...propsSpread3 },
+	{
+		get "data-dynamic"() {
+			return color();
+		},
+		"data-static": /* @static */ color()
+	}
+], false);
 const template84 = _el$104;
 // STATIC PROPERTY OF OBJECT ACCESS
 // https://github.com/ryansolid/dom-expressions/issues/252#issuecomment-1572220563
@@ -528,7 +546,7 @@ _$style(
 );
 const template85 = _el$105;
 var _el$106 = _tmpl$4();
-_$effect(() => styleProp.style, (_v$, _$p) => {
+_$effect(() => _$readShallow(styleProp.style), (_v$, _$p) => {
 	_$style(_el$106, _v$, _$p);
 });
 const template86 = _el$106;
@@ -541,8 +559,8 @@ _$insert(_el$107, count);
 _$effect(() => {
 	return {
 		e: count(),
-		t: style,
-		a: style
+		t: _$readShallow(style),
+		a: _$readShallow(style)
 	};
 }, ({ e, t, a }, _p$) => {
 	e !== _p$?.e && _$setAttribute(_el$107, "aria-label", e);

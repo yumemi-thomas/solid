@@ -1,6 +1,8 @@
 import { template as _$template } from "r-dom";
+import { spread as _$spread } from "r-dom";
 import { createComponent as _$createComponent } from "r-dom";
 import { className as _$className } from "r-dom";
+import { readShallow as _$readShallow } from "r-dom";
 import { effect as _$effect } from "r-dom";
 import { insert as _$insert } from "r-dom";
 var _tmpl$ = /*#__PURE__*/ _$template(`<ul><li>Apple`),
@@ -15,7 +17,7 @@ var _el$2 = _tmpl$2(),
   _el$3 = _el$2.firstChild;
 _$insert(_el$3, () => item.text);
 _$effect(
-  () => item.cls,
+  () => _$readShallow(item.cls),
   (_v$, _$p) => {
     _$className(_el$3, _v$, _$p);
   }
@@ -29,3 +31,21 @@ const componentKey = _$createComponent(Row, {
     return item.text;
   }
 });
+
+// On a spread element the same rule applies to the spread path: the key
+// joins the element's sources (renamed for SSR, dropped for DOM) rather than
+// the template.
+var _el$4 = _tmpl$2(),
+  _el$5 = _el$4.firstChild;
+_$spread(
+  _el$5,
+  [
+    {
+      class: "todo"
+    },
+    () => item.attrs
+  ],
+  true
+);
+_$insert(_el$5, () => item.text);
+const spreadKey = _el$4;

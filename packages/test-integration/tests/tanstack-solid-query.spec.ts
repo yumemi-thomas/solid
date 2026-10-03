@@ -1,13 +1,31 @@
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { exec, mkdir, rm } from "shelljs";
 import { download, extract } from "gitly";
-import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync
+} from "fs";
+import { dirname, join, resolve } from "path";
+import { spawnSync } from "child_process";
 
 /**
  * Release gate: the TanStack Solid Query adapter's full suite against the
  * WORKSPACE-BUILT core — solid-js, @solidjs/signals, and @solidjs/web packed
- * from this tree and installed together, never a registry mix.
+ * from this tree and installed together, never a registry mix — compiled by
+ * the WORKSPACE-BUILT compiler (@solidjs/compiler with this tree's native
+ * binding, @solidjs/babel-plugin), never the registry's.
+ *
+ * Both halves matter. Compiled output and runtime are one contract: rc.9
+ * moved delegated event handlers to the `_$$<type>` key, and against the
+ * fixture's published compiler (still emitting `$$<type>`) every click in
+ * the suite was a no-op — 95 failures, none of them adapter semantics, and
+ * circular: the fixture could not pick up the new compiler until the
+ * release was on npm, and the gate blocked the release (#3534).
  *
  * This exists because core-side suites structurally cannot protect the
  * adapter contract. The rc.5 regression (#3181's fix waking parked readers
@@ -27,42 +45,230 @@ import { join, resolve } from "path";
 
 // The ref the gate tracks — overridable for one-off runs via
 // SOLID_QUERY_GATE_REPO. The question a release must answer is "does OUR
-// next core break the adapter people will install alongside it". Today that
-// adapter lives on the PR branch carrying the Solid 2.0 pairing
-// (TanStack/query#11326: named flight source, @solidjs/vite-plugin, the
-// solid-js/web alias its vitest config needs to run against a 2.0 core);
-// flip this to "TanStack/query" once it merges.
-const QUERY_REPO = process.env.SOLID_QUERY_GATE_REPO ?? "ryansolid/query#feat/flight-data-source";
+// next core break the adapter people will install alongside it". That
+// adapter is @tanstack/solid-query 6 (the `rc` dist-tag), developed and
+// released from TanStack's `solid-query-v6-pre` branch — the Solid 2.0
+// pairing (TanStack/query#11326) merged there, not `main`, which still
+// carries the Solid 1.x adapter. Flip to "TanStack/query" when v6 lands on
+// main.
+const QUERY_REPO = process.env.SOLID_QUERY_GATE_REPO ?? "TanStack/query#solid-query-v6-pre";
 
 const CORE_PACKAGES = ["signals", "solid", "web"] as const;
+// The compiler side of the contract. The fixture's @solidjs/vite-plugin
+// loads both: @solidjs/compiler in every mode (lazy/refresh/server-function
+// passes and, by default, JSX), @solidjs/babel-plugin for `compiler: "babel"`.
+const COMPILER_PACKAGES = ["compiler", "babel-plugin"] as const;
+// @solidjs/compiler's optionalDependencies pin platform binaries to THIS
+// version, which reaches the registry only after release.mjs publishes them
+// — after this gate. Resolve them to the in-repo stubs (no .node inside),
+// exactly as the workspace's own pnpm-workspace.yaml does, and hand the
+// loader the locally built binding through SOLID_COMPILER_NATIVE.
+const COMPILER_PLATFORMS = [
+  "darwin-x64",
+  "darwin-arm64",
+  "linux-x64-gnu",
+  "linux-arm64-gnu",
+  "win32-x64-msvc",
+  "wasm32-wasi"
+] as const;
+
+const repoRoot = resolve(join(__dirname, "../../.."));
+const packageRoot = (dir: string) => join(repoRoot, "packages", dir);
+
+// Runs a command and fails the gate on a non-zero exit or a signal.
+// shelljs's `exec` takes no per-call `fatal` (only the global config's), so
+// a failed install or type-check through it returned silently and the gate
+// went on to test a broken fixture.
+function run(command: string, cwd: string, env: NodeJS.ProcessEnv = process.env) {
+  const result = spawnSync(command, { cwd, env, shell: true, stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.signal) throw new Error(`\`${command}\` was killed by ${result.signal}`);
+  if (result.status !== 0) throw new Error(`\`${command}\` exited with ${result.status}`);
+}
 
 function pack(packageRoot: string) {
   const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-  const result = exec("npm pack --json", { cwd: packageRoot, fatal: true, silent: true });
+  const result = exec("npm pack --json", { cwd: packageRoot, silent: true });
+  if (result.code !== 0) throw new Error(`npm pack failed in ${packageRoot}:\n${result.stderr}`);
   const packedPkg = JSON.parse(result.stdout)[0].filename;
   return { name: pkg.name as string, path: join(packageRoot, packedPkg) };
+}
+
+// TEMPORARY — delete this block and the patch file once TanStack's adapter
+// no longer imports `sharedConfig`. `sharedConfig` is `@internal` since rc.12
+// (stripped from the published declarations: TS2305 in the adapter's
+// type-check), and rc.13 adds the public hydration API that replaces it. Until the
+// adapter migrates upstream, the gate applies that migration to the fetched
+// fixture; when upstream no longer imports `sharedConfig` from solid-js,
+// detection finds nothing and the patch is skipped on its own.
+const SHARED_CONFIG_PATCH = join(
+  __dirname,
+  "patches",
+  "tanstack-solid-query-public-hydration.diff"
+);
+const ADAPTER_SOURCES = ["packages/solid-query/src", "packages/solid-query-devtools/src"];
+const SHARED_CONFIG_IMPORT = /import\s*\{[^}]*\bsharedConfig\b[^}]*\}\s*from\s*['"]solid-js['"]/;
+
+// TEMPORARY — delete this block and the patch file once the adapter's
+// hydration test stops pinning the old latch. A shell node outside every
+// pending streamed boundary now commits a client write as soon as the root
+// pass is done; the adapter's test still expects the write to wait for the
+// whole page to hydrate. While the fetched fixture carries that test, the
+// gate rewrites it to the new expectation; once upstream renames or rewrites
+// it, the old title is gone and the patch is skipped on its own.
+const HYDRATION_LATCH_PATCH = join(
+  __dirname,
+  "patches",
+  "tanstack-solid-query-hydration-latch.diff"
+);
+const HYDRATION_TEST = "packages/solid-query/src/__tests__/hydration.test.tsx";
+const HELD_WRITE_TEST = "cache writes during the open stream commit when hydration completes";
+
+function pinsHeldWrite(repoDir: string): boolean {
+  const file = join(repoDir, HYDRATION_TEST);
+  return existsSync(file) && readFileSync(file, "utf8").includes(HELD_WRITE_TEST);
+}
+
+function applyHydrationLatchExpectation(repoDir: string) {
+  if (!pinsHeldWrite(repoDir)) {
+    console.log(
+      "solid-query gate: upstream no longer pins the held-write test; latch patch skipped."
+    );
+    return;
+  }
+  console.log(`solid-query gate: rewriting "${HELD_WRITE_TEST}" to the live-shell expectation.`);
+  applyPatch(repoDir, HYDRATION_LATCH_PATCH);
+  if (pinsHeldWrite(repoDir)) {
+    throw new Error(
+      `solid-query gate: the latch patch no longer covers upstream — "${HELD_WRITE_TEST}" is still present. Refresh ${HYDRATION_LATCH_PATCH}.`
+    );
+  }
+}
+
+function applyPatch(repoDir: string, patch: string) {
+  // The fixture sits inside this repository's work tree: without the ceiling,
+  // `git apply` would resolve paths against this repository and skip the lot.
+  run(`git apply --verbose "${patch}"`, repoDir, {
+    ...process.env,
+    GIT_CEILING_DIRECTORIES: dirname(repoDir)
+  });
+}
+
+function sharedConfigImporters(repoDir: string): string[] {
+  const found: string[] = [];
+  const walk = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.tsx?$/.test(entry.name) && SHARED_CONFIG_IMPORT.test(readFileSync(full, "utf8")))
+        found.push(full.slice(repoDir.length + 1));
+    }
+  };
+  for (const dir of ADAPTER_SOURCES) walk(join(repoDir, dir));
+  return found;
+}
+
+function applySharedConfigMigration(repoDir: string) {
+  const importers = sharedConfigImporters(repoDir);
+  if (!importers.length) {
+    console.log(
+      "solid-query gate: upstream no longer imports sharedConfig; migration patch skipped."
+    );
+    return;
+  }
+  console.log(
+    `solid-query gate: applying the public hydration API migration (${importers.join(", ")}).`
+  );
+  applyPatch(repoDir, SHARED_CONFIG_PATCH);
+  const left = sharedConfigImporters(repoDir);
+  if (left.length) {
+    throw new Error(
+      `solid-query gate: the migration patch no longer covers upstream — still importing sharedConfig: ${left.join(", ")}. Refresh ${SHARED_CONFIG_PATCH}.`
+    );
+  }
+}
+
+// Newest mtime under a directory tree — the honest "when was this last
+// touched" for a source folder.
+function newestMtime(dir: string): number {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    const mtime = entry.isDirectory() ? newestMtime(full) : statSync(full).mtimeMs;
+    if (mtime > newest) newest = mtime;
+  }
+  return newest;
+}
+
+// The native binding `pnpm --filter @solidjs/compiler run build` leaves next
+// to index.js, in the loader's own preference order. The published package
+// ships no local binary (see its "files"), so the packed tarball needs this
+// handed to it explicitly.
+function locateCompilerBinding(): string {
+  const compilerDir = packageRoot("compiler");
+  const { platform, arch } = process;
+  const suffix =
+    platform === "darwin" && (arch === "x64" || arch === "arm64")
+      ? `darwin-${arch}`
+      : platform === "linux" && (arch === "x64" || arch === "arm64")
+        ? `linux-${arch}-gnu`
+        : platform === "win32" && arch === "x64"
+          ? "win32-x64-msvc"
+          : null;
+  const candidates = suffix ? [`compiler.${suffix}.node`, "compiler.node"] : ["compiler.node"];
+  const found = candidates.map(file => join(compilerDir, file)).find(existsSync);
+  if (!found) {
+    throw new Error(
+      "packages/compiler has no native binding. Run `pnpm --filter @solidjs/compiler run build` first."
+    );
+  }
+  // A binding older than the compiler's sources would silently gate the
+  // release on the previous compiler — the exact failure this gate exists
+  // to catch. (CI builds it in the release job; this guards local runs.)
+  if (statSync(found).mtimeMs < newestMtime(join(compilerDir, "src"))) {
+    throw new Error(
+      `${found} is older than packages/compiler/src. Rebuild with \`pnpm --filter @solidjs/compiler run build\`.`
+    );
+  }
+  return found;
 }
 
 describe("TanStack Solid Query against workspace-built core", () => {
   const queryRepoDir = resolve(
     join(__dirname, "fixtures", "downloaded", QUERY_REPO.replace(/[#/]/g, "-"))
   );
-  let tarballs: Array<{ name: string; path: string }>;
+  let tarballs: Array<{ name: string; path: string }> = [];
+  let compilerBinding: string;
+
+  // The tarballs are packed into their package directories (untracked
+  // there); pnpm has copied them into its store by the time the suite ran.
+  afterAll(() => {
+    for (const { path } of tarballs) rm("-f", path);
+  });
 
   beforeAll(async () => {
     for (const dir of CORE_PACKAGES) {
-      if (!existsSync(resolve(join(__dirname, `../../${dir}/dist`)))) {
+      if (!existsSync(join(packageRoot(dir), "dist"))) {
         throw new Error(`packages/${dir} is not built. Run \`pnpm build\` first.`);
       }
     }
-    tarballs = CORE_PACKAGES.map(dir => pack(resolve(join(__dirname, `../../${dir}`))));
+    if (!existsSync(join(packageRoot("babel-plugin"), "index.js"))) {
+      throw new Error("packages/babel-plugin is not built. Run `pnpm build` first.");
+    }
+    compilerBinding = locateCompilerBinding();
+    tarballs = [...CORE_PACKAGES, ...COMPILER_PACKAGES].map(dir => pack(packageRoot(dir)));
 
-    // Fresh download every run: the gate must see TanStack's current main,
-    // and a stale extraction with a mutated lockfile would poison reruns.
+    // Fresh download every run: the gate must see TanStack's current branch
+    // head, and a stale extraction with a mutated lockfile would poison
+    // reruns. `force`: gitly serves its cached tarball first for any ref but
+    // master/main, so without it the gate re-tested the first download.
     rm("-rf", queryRepoDir);
-    const source = await download(QUERY_REPO);
+    const source = await download(QUERY_REPO, { force: true });
     mkdir("-p", queryRepoDir);
     await extract(source, queryRepoDir);
+    applySharedConfigMigration(queryRepoDir);
+    applyHydrationLatchExpectation(queryRepoDir);
   }, 300_000);
 
   test("solid-query suite is green", () => {
@@ -72,7 +278,21 @@ describe("TanStack Solid Query against workspace-built core", () => {
     // pnpm.overrides is silently ignored there — measured, not assumed).
     const workspaceYamlPath = join(queryRepoDir, "pnpm-workspace.yaml");
     const workspaceYaml = readFileSync(workspaceYamlPath, "utf8");
-    const overrideLines = tarballs.map(t => `  '${t.name}': 'file:${t.path}'`).join("\n");
+    // The fixture's own @solidjs/vite-plugin predates the switch from
+    // @dom-expressions/compiler to @solidjs/compiler; older plugins ignore the
+    // packed compiler entirely. Lift it to the plugin this tree is tested
+    // with — the root devDependency, one source of truth — so the fixture is
+    // compiled through the same plugin the examples and suites use.
+    const vitePluginVersion = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"))
+      .devDependencies["@solidjs/vite-plugin"];
+    expect(vitePluginVersion, "root devDependency @solidjs/vite-plugin").toBeTruthy();
+    const overrideLines = [
+      ...tarballs.map(t => `  '${t.name}': 'file:${t.path}'`),
+      ...COMPILER_PLATFORMS.map(
+        p => `  '@solidjs/compiler-${p}': 'link:${join(packageRoot("compiler"), "npm", p)}'`
+      ),
+      `  '@solidjs/vite-plugin': '${vitePluginVersion}'`
+    ].join("\n");
     if (/^overrides:/m.test(workspaceYaml)) {
       writeFileSync(
         workspaceYamlPath,
@@ -84,7 +304,7 @@ describe("TanStack Solid Query against workspace-built core", () => {
 
     // The file: overrides above deliberately differ from the downloaded
     // repository's lockfile, so this fixture cannot use CI's frozen default.
-    exec("pnpm install --no-frozen-lockfile", { cwd: queryRepoDir, fatal: true });
+    run("pnpm install --no-frozen-lockfile", queryRepoDir);
 
     // Belt and braces: assert the override actually resolved this tree's
     // build — a silent fallback to the registry would make a green run
@@ -112,13 +332,38 @@ describe("TanStack Solid Query against workspace-built core", () => {
     // nothing the registry could poison. When present it must be ours.
     const webLink = join(solidQueryDir, "node_modules", "@solidjs", "web");
     if (existsSync(webLink)) fromTarball(webLink, "@solidjs/web");
+    // The compiler pair is requested by @solidjs/vite-plugin, not by
+    // solid-query, so probe it through the plugin's own resolution — the
+    // path the fixture's vite config actually loads.
+    const vitePluginReal = realpathSync(
+      join(solidQueryDir, "node_modules", "@solidjs", "vite-plugin")
+    );
+    expect(
+      JSON.parse(readFileSync(join(vitePluginReal, "package.json"), "utf8")).version,
+      "@solidjs/vite-plugin was not lifted to the workspace's version"
+    ).toBe(vitePluginVersion);
+    // (vitePluginReal is `<store>/node_modules/@solidjs/vite-plugin`; its
+    // dependencies are siblings under the same scope directory.)
+    for (const name of ["@solidjs/compiler", "@solidjs/babel-plugin"]) {
+      fromTarball(join(vitePluginReal, "..", name.slice("@solidjs/".length)), name);
+    }
 
     // The suite's typecheck half resolves @tanstack/query-core through
     // project references — dist-ts must exist (`tsc --build` follows the
-    // reference graph).
-    exec("pnpm run compile", { cwd: solidQueryDir, fatal: true });
+    // reference graph). A type error here fails the gate: it is exactly how
+    // a declaration the adapter relies on going missing shows up (TS2305).
+    run("pnpm run compile", solidQueryDir);
 
-    const result = exec("npx vitest run", { cwd: solidQueryDir, fatal: false });
-    expect(result.code).toBe(0);
+    // spawnSync, not shelljs: a runner that dies on a signal (V8's heap OOM
+    // aborts) has no exit code, and shelljs reported that as 0 — a crashed
+    // suite read as green. Judge the exit and the signal separately.
+    const result = spawnSync("npx", ["vitest", "run"], {
+      cwd: solidQueryDir,
+      stdio: "inherit",
+      env: { ...process.env, SOLID_COMPILER_NATIVE: compilerBinding }
+    });
+    expect(result.error, "vitest could not be started").toBeUndefined();
+    expect(result.signal, "vitest was killed by a signal").toBeNull();
+    expect(result.status, "vitest exit status").toBe(0);
   }, 900_000);
 });

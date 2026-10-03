@@ -164,11 +164,14 @@ impl<'a> AstDomTransform<'a, '_> {
                             template,
                             declarations,
                         );
+                        // A component child inserts its call's value, not an
+                        // accessor: no effect, no `sourceNames.bindings` label.
                         operations.push(self.insert_statement(
                             element.span,
                             element_id,
                             lowered,
                             marker,
+                            None,
                         ));
                         self.semantic_trace
                             .owner_establishment(child.span, "insert", None);
@@ -342,7 +345,8 @@ impl<'a> AstDomTransform<'a, '_> {
                         // so the generates can't desync. Function children
                         // never classify as dynamic but are deferred holes all
                         // the same, so they take the scope too.
-                        let value = if (dynamic || jsx_child_is_function_hole(dynamic_child))
+                        let accessor_hole = dynamic || jsx_child_is_function_hole(dynamic_child);
+                        let value = if accessor_hole
                             && self.hydratable
                             && child_slot_allocates_ids(dynamic_child)
                         {
@@ -354,6 +358,7 @@ impl<'a> AstDomTransform<'a, '_> {
                         } else {
                             value
                         };
+                        let name = self.hole_name(tag_name, accessor_hole);
                         let marker = if let Some(name) = shared_marker_name.as_ref() {
                             Some(InsertMarker {
                                 marker: self.identifier_expression(element.span, name),
@@ -377,6 +382,7 @@ impl<'a> AstDomTransform<'a, '_> {
                             element_id,
                             value,
                             marker,
+                            name,
                         ));
                         self.semantic_trace.owner_establishment(
                             container.expression.span(),
@@ -400,7 +406,8 @@ impl<'a> AstDomTransform<'a, '_> {
                             crate::semantic_trace::ValueDecision::EagerOnce
                         },
                     );
-                    let value = spread_child_expression(self, spread.span, &spread.expression);
+                    let (value, accessor) =
+                        spread_child_expression(self, spread.span, &spread.expression);
                     // Spread children always allocate ids; scope keyed off the
                     // same shared dynamic predicate as the ssr generate.
                     let value = if self.hydratable && self.classify().is_dynamic_child_slot(child) {
@@ -408,6 +415,7 @@ impl<'a> AstDomTransform<'a, '_> {
                     } else {
                         value
                     };
+                    let name = self.hole_name(tag_name, accessor);
                     let marker = self.dynamic_slot_marker(
                         &element.children,
                         index,
@@ -419,7 +427,13 @@ impl<'a> AstDomTransform<'a, '_> {
                         template,
                         declarations,
                     );
-                    operations.push(self.insert_statement(element.span, element_id, value, marker));
+                    operations.push(self.insert_statement(
+                        element.span,
+                        element_id,
+                        value,
+                        marker,
+                        name,
+                    ));
                     self.semantic_trace.owner_establishment(
                         spread.expression.span(),
                         "insert",
@@ -1122,14 +1136,15 @@ fn spread_child_expression<'a>(
     ctx: &AstDomTransform<'a, '_>,
     span: oxc_span::Span,
     expression: &Expression<'a>,
-) -> Expression<'a> {
+) -> (Expression<'a>, bool) {
     // Babel's `JSXSpreadChild` branch of `transformNode`: dynamic spreads
-    // insert behind an explicit thunk; static ones insert raw.
+    // insert behind an explicit thunk (the flag: an accessor hole); static
+    // ones insert raw.
     let cloned = expression.clone_in(ctx.allocator);
     if ctx.classify().is_dynamic(None, expression, false) {
-        ctx.arrow_return_expression(span, cloned)
+        (ctx.arrow_return_expression(span, cloned), true)
     } else {
-        cloned
+        (cloned, false)
     }
 }
 

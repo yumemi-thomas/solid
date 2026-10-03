@@ -1,7 +1,8 @@
 import {
-  CONFIG_AUTHORITATIVE_OBSERVED,
   CONFIG_CHILD_COMPANIONS,
   CONFIG_AUTO_DISPOSE,
+  CONFIG_DERIVED_OVERRIDE,
+  CONFIG_INPUTS_PUBLISHED,
   CONFIG_SYNC,
   EFFECT_TRACKED,
   EFFECT_USER,
@@ -12,12 +13,13 @@ import {
   REACTIVE_ZOMBIE,
   STATUS_ERROR,
   STATUS_PENDING,
-  STATUS_UNINITIALIZED
+  STATUS_UNINITIALIZED,
+  unwrapOverride
 } from "./constants.js";
 import { attrHooks } from "./attribution-hooks.js";
 import { context, setSignal, untrack, ext, statusNotifierOf } from "./core.js";
 import { devTrackHeldPending } from "./invariants.js";
-import { emitDiagnostic } from "./dev.js";
+import { emitDiagnostic, reportDiagnostic, watchAsyncTail } from "./dev.js";
 import { NotReadyError, StatusError } from "./error.js";
 import { trimStaleDeps, unobserved } from "./graph.js";
 import { enqueueSub } from "./heap.js";
@@ -28,12 +30,16 @@ import {
   clock,
   currentTransition,
   dirtyQueue,
+  enterWaiting,
   flush,
   GlobalQueue,
   globalQueue,
   insertSubs,
+  origin,
   queuePendingNode,
   schedule,
+  setOrigin,
+  waitingTransition,
   zombieQueue
 } from "./scheduler.js";
 import type { Computed, FirewallSignal, Link } from "./types.js";
@@ -66,7 +72,7 @@ function clearPendingSources(el: Computed<any>): void {
 // SOURCE's subscribers, so it is retryable iff a tracked read created that
 // edge: a dep that IS the source, or one whose own pending chain carries it
 // (pending sources propagate the origin node, so this covers any depth).
-// Dev-only caller — tree-shaken from prod builds.
+// Also guards branch-local recovery: another dependency may still need the source.
 function retryReaches(el: Computed<any>, source: any): boolean {
   for (let d = el._deps; d; d = d._nextDep) {
     const dep = ((d._dep as FirewallSignal<unknown>)._firewall || d._dep) as Computed<any>;
@@ -168,9 +174,9 @@ export function releaseSettledDependents(el: Computed<any>): void {
 // object identity down the whole dependent tree, and holding it is exactly
 // the "blocked on this error" marker — re-enqueue those holders so they
 // re-run: fresh values commit and flow, and a dependent with another
-// still-broken source simply re-errors. The async dimension needs no twin of
-// its own: recovery there passes through a pending window whose re-runners
-// set _blocked and ride settlePendingSource. Walks the full dependent graph
+// still-broken source simply re-errors. Pending recovery uses
+// settlePendingSource to clear inherited status and retry blocked readers.
+// Walks the full dependent graph
 // (releaseSettledDependents shape): identity holders can sit below an
 // intermediate whose own error state has since been scrubbed or replaced
 // (e.g. an error boundary's tree node).
@@ -190,9 +196,13 @@ export function settleErroredDependents(el: Computed<any>, error: any): void {
   if (scheduled) schedule();
 }
 
-export function settlePendingSource(el: Computed<any>): void {
+// Retire `source` from pending state along the dependent graph rooted at `el`.
+// By default, `el` is the source whose flight settled or was superseded.
+// With a distinct `source`, `el` is a recovered computation that dropped it:
+// the source may still be pending, so dependents with another path to it stay pending.
+export function settlePendingSource(el: Computed<any>, source: Computed<any> = el): void {
   // Invariant: walking a settle implies truth exists. A caller reaching this
-  // with an uninitialized source is announcing a settle that has not
+  // with an uninitialized traversal root (`el`) is announcing a settle that has not
   // happened — parked readers would wake into a value that was never
   // produced (the rc.5 regression: the recompute-side walk fired on a
   // projection driver whose first flight was superseded before any commit
@@ -200,47 +210,71 @@ export function settlePendingSource(el: Computed<any>): void {
   // though: a first landing whose commit is transition-held (streamed
   // hydration rides this) parks its value in `_pendingValue` with the flag
   // still set, and a comparator throw on that landing leaves the node
-  // uninitialized but errored — both have real truth to reveal. Only an
-  // uninitialized node with neither a held value nor an error is a settle
-  // that never happened. Silent in production; loud in dev so a future
-  // call site that violates the contract fails in its author's test run
-  // instead of wedging a downstream app.
+  // uninitialized but errored — both have real truth to reveal. So does a
+  // first landing UNDER an optimistic lane (#3648): asyncWrite's lane branch
+  // publishes it as a derived override (`laneOverride`, A17 lanes stage),
+  // `_value` stays the never-committed frame and the flag stays set until
+  // the lane's transaction commits and promotes the override
+  // (resolveOptimisticNodes) — the override IS the node's truth meanwhile,
+  // displayed to the lane's readers, and the walk releases dependents into
+  // it. Only an uninitialized node with neither a held value, nor an error,
+  // nor a displayed derived override is a settle that never happened.
+  // Silent in production; loud in dev so a future call site that violates
+  // the contract fails in its author's test run instead of wedging a
+  // downstream app.
   if (__DEV__) {
     const sources = el._x?._pendingSources;
     if (
       el._statusFlags & STATUS_UNINITIALIZED &&
       el._pendingValue === NOT_PENDING &&
       !el._x?._error &&
+      !(el._config & CONFIG_DERIVED_OVERRIDE && hasActiveOverride(el)) &&
       // A replacement source makes this a cleanup-only transfer: removing
       // self leaves the source and every propagated dependent parked. No
       // sources (or self alone) would release readers without truth.
       !(sources?.size && (sources.size > 1 || !sources.has(el)))
     ) {
-      emitDiagnostic({
-        code: "SETTLE_WALK_UNINITIALIZED_SOURCE",
-        kind: "lifecycle",
-        severity: "error",
-        message:
-          "[SETTLE_WALK_UNINITIALIZED_SOURCE] settlePendingSource was called on a source that " +
-          "never produced a value. Settling parked readers requires truth to reveal — an " +
-          "uninitialized source waking its dependents serves them its initial face instead of " +
-          "settled data.",
-        ownerId: el.id,
-        ownerName: (el as any)._name
-      });
+      // Reported, not thrown: the walk runs from promise machinery with no
+      // caller to surface to, so the message must reach the console here —
+      // emitDiagnostic alone leaves only the repair-guide footer (#3648).
+      reportDiagnostic(
+        emitDiagnostic(
+          {
+            code: "SETTLE_WALK_UNINITIALIZED_SOURCE",
+            kind: "lifecycle",
+            severity: "error",
+            message:
+              "[SETTLE_WALK_UNINITIALIZED_SOURCE] settlePendingSource was called on a source that " +
+              "never produced a value. Settling parked readers requires truth to reveal — an " +
+              "uninitialized source waking its dependents serves them its initial face instead of " +
+              "settled data.",
+            ownerId: el.id,
+            ownerName: (el as any)._name
+          },
+          el
+        )
+      );
     }
   }
-  // The normal landing path already cleared the source's own set. Superseded
-  // re-parks arrive here with an abandoned self entry, which must retire in
-  // the same walk as its propagated copies.
-  removePendingSource(el, el);
+  // Landing and branch recovery already cleared el's own set. Superseded
+  // re-parks can retain an abandoned self entry (source === el), which must
+  // retire in the same walk as its propagated copies.
+  removePendingSource(el, source);
   let scheduled = false;
   let released: Computed<any>[] | undefined;
   const visited = new Set<Computed<any>>();
   // Companion updates no-op without the verdict layer (null hook).
   const updateCompanions = GlobalQueue._updatePendingSignal;
   const settle = (node: Computed<any>) => {
-    if (visited.has(node) || !removePendingSource(node, el)) return;
+    if (visited.has(node)) return;
+    // A conditional dropped this source, but another dependency can still
+    // carry it. Only retire pending state inherited through the recovered
+    // branch. Deliberately NOT marked visited on this early return: the
+    // carrying dependency may itself be a later branch of this same walk
+    // (two unchanged memos converging), and its visit must be free to
+    // re-examine this node once that branch has retired the source.
+    if (source !== el && retryReaches(node, source)) return;
+    if (!removePendingSource(node, source)) return;
     visited.add(node);
     node._time = clock;
     const remaining = node._x?._pendingSources?.values().next().value;
@@ -347,6 +381,18 @@ export function handleAsync<T>(
   // fired _flightTeardown. A future non-recompute registration path must
   // release it here before overwriting _inFlight.
   ext(el)._inFlight = result as PromiseLike<T> | AsyncIterable<T>;
+  // The run that asked this flight read every input without throwing: an
+  // input still in flight was masked for it (an active override, A17), so
+  // pending state those inputs propagated onto the node earlier does not
+  // describe this answer. Drop it — the flight is the node's pending now.
+  // The landing retires only the flight's own entry (landStatus, #3373), so
+  // an entry that survived here would hold the node past its own answer.
+  el._x!._pendingSources = undefined;
+  // Provenance of the question this flight asks (#3331): the action whose
+  // window is registering it, or the flight whose landing is. Its landings
+  // propagate under it (asyncWrite) so an override downstream can tell a
+  // stale answer from its own.
+  const flightOrigin = origin;
   // Attribution hook: a new flight is registered. Fired here (not in the
   // branches below) so every flight shape — plain thenable, iterator, the
   // flattened combinations — is announced exactly once, while the recompute
@@ -366,7 +412,20 @@ export function handleAsync<T>(
   // keeps transition scheduling; initialized (value-holding) pending settles
   // are the transaction's reveal machinery and always re-enter.
   const settleTransition = () => {
-    const transition = resolveTransition(el as any);
+    let transition = resolveTransition(el as any);
+    // A lane-routed node's landing is revealed by its lane, ahead of the
+    // transaction that owns the lane (whose own commit is only the override's
+    // confirm/revert). Entering that owner here would fold every transaction
+    // waiting on this flight into it at the landing — a reveal that
+    // discovered the flight (#3305) would then wait on the owner's action
+    // instead of on the flight (#3334). Enter the waiter: the transaction
+    // whose blocker this landing clears. Then every transaction waiting on
+    // the flight folds in (enterWaiting): a reveal that discovered it
+    // completes at its landing (A15) — a stampless node's fresh batch
+    // included (its flight started under a batch that committed beneath it,
+    // #3305). The fold used to happen as each stamped reader recomputed,
+    // which effects no longer do (#3407).
+    if (el._x?._optimisticLane) transition = waitingTransition(el) ?? transition;
     if (
       transition &&
       el._statusFlags & STATUS_UNINITIALIZED &&
@@ -378,6 +437,7 @@ export function handleAsync<T>(
       return;
     }
     globalQueue.initTransition(transition);
+    enterWaiting(el);
   };
 
   const handleError = (error: any) => {
@@ -430,6 +490,9 @@ export function handleAsync<T>(
     // skip this stale async result — the upcoming flush will recompute the node
     // with the new value, creating a fresh Promise that supersedes this one.
     if (el._flags & (REACTIVE_DIRTY | REACTIVE_OPTIMISTIC_DIRTY)) return;
+    // The landing propagates under the flight's provenance (#3331) — through
+    // the flush below, which clears it.
+    setOrigin(flightOrigin);
     settleTransition();
     const wasUninitialized = !!(el._statusFlags & STATUS_UNINITIALIZED);
     // Captured before clearStatus wipes it: a quiet re-ask's landing may be
@@ -439,8 +502,7 @@ export function handleAsync<T>(
     // old value as pending, a one-frame pulse to direct observers (#3178).
     // A truthy capture implies `_x` exists, so the restore writes it directly.
     const wasReask = el._x?._reask;
-    trimStaleDeps(el);
-    clearStatus(el);
+    landStatus(el);
     if (wasReask) el._x!._reask = true;
     const lane = resolveLane(el as any);
     if (lane) lane._pendingAsync.delete(el);
@@ -455,8 +517,15 @@ export function handleAsync<T>(
         handleError(error);
         return;
       }
-      if (wasUninitialized) clearStatus(el, true);
-    } else if (el._x?._overrideValue !== undefined) {
+      if (wasUninitialized) landStatus(el, true);
+    } else if (
+      el._x?._overrideValue !== undefined &&
+      !(lane && el._config & CONFIG_DERIVED_OVERRIDE)
+    ) {
+      // A derived override's landing UNDER its lane is the lane's own work
+      // (the branch below); demoted — its source superseded (A18) — the
+      // landing is the truth the correction asked for, and holds and
+      // supersedes here like the sync twin (recompute). Otherwise:
       // Optimistic node — resting OR covered by an active override — holds
       // through the shared pending-node path, exactly like a plain async memo,
       // so the commit clears STATUS_UNINITIALIZED (#2806) and elevation to
@@ -476,31 +545,37 @@ export function handleAsync<T>(
       // only notified when the hold is visible to them: under an active
       // override every reader sees the override (A17), so waking subs would
       // re-show an unchanged view — the revert is the notification point.
+      // Under an override the landing is handed to the engine's
+      // supersedeOverride (A18 supersession, #3331): own-source truth that
+      // differs from the override ends the optimism for the graph now (plain
+      // channel, lane demoted); a matching arrival is silent except to an
+      // authoritative-view reader (until()'s predicate) waiting on exactly
+      // this staged truth (#3164 — without the wake the hold deadlocks: the
+      // landing waits on the transaction, the transaction on the action, the
+      // action on an until() never re-notified). The hook is installed with
+      // the engine, which an active override implies. The propagation runs
+      // under this flight's provenance (setOrigin above).
       GlobalQueue._syncCompanions?.(el, value);
       if (!hasActiveOverride(el)) {
         if (__OBSERVE__ && attrHooks !== null) attrHooks.asyncEnd(el, undefined, value, true);
         insertSubs(el);
-      } else if (el._config & CONFIG_AUTHORITATIVE_OBSERVED) {
-        // A17 silence is stated over ordinary readers; an authoritative-view
-        // reader (until()'s predicate) observed this node PAST its override
-        // and is waiting for exactly this staged truth. Without the wake the
-        // hold deadlocks: the landing waits on the transaction, the
-        // transaction on the action, the action on an until() that was never
-        // re-notified (#3164). Same selective wake as the equal-landing
-        // branch in recompute(). Optional call: the bit implies the
-        // optimistic engine WAS consulted, but the hook only installs with
-        // it — a bare-core build must not crash here.
-        GlobalQueue._notifyAuthoritativeObservers?.(el);
-      }
+      } else GlobalQueue._supersedeOverride!(el, value);
       el._time = clock;
     } else if (lane) {
       // Route through lane's effect queue for independent flushing
       const isEffect = (el as any)._type;
-      const prevValue = el._value;
+      const prevValue = hasActiveOverride(el) ? unwrapOverride(el._x!._overrideValue) : el._value;
       const equals = el._equals;
       try {
-        if ((!isEffect && wasUninitialized) || !equals || !equals(value, prevValue)) {
-          el._value = value;
+        // `(prev, next)`, as every other commit path calls the comparator — a
+        // user comparator keyed on which side is incoming (dynamic's binding
+        // gate) reads the lane landing the same way it reads a sync commit.
+        if ((!isEffect && wasUninitialized) || !equals || !equals(prevValue, value)) {
+          // Lanes stage (#3479): a memo's landing under its lane is a derived
+          // override, as its sync pass's result is (recompute) — `_value`
+          // stays the committed truth for readers off the lane.
+          if (isEffect) el._value = value;
+          else GlobalQueue._laneOverride!(el, value, lane);
           el._time = clock;
           // The latest() shadow write gives latest() effects independent lanes; the
           // _pendingSignal update is a no-op repeat of the clearStatus() call above
@@ -546,6 +621,15 @@ export function handleAsync<T>(
     if (el._pendingValue === NOT_PENDING) {
       el._loading = false;
       if (wasReask) el._x!._reask = false;
+      // The landing published: the dependency tail the flight's pass left
+      // linked goes now (A30, #3410). A transition-held landing has not
+      // replaced the committed frame — the committed value still derives
+      // from the previous pass's inputs, and a mainline write to one of them
+      // must reach this node and join its hold (its stamp) instead of
+      // publishing beside the stale derivation (#3461: `b() ? b() : a()`
+      // held on `b` dropped `a` at its landing, and `A: 1` then committed
+      // beside `Selected: 0`). `commitPendingNode` trims a held landing.
+      trimStaleDeps(el);
     }
     settlePendingSource(el);
     schedule();
@@ -731,7 +815,7 @@ export function handleAsync<T>(
       else if (Array.isArray(el._disposal)) el._disposal.push(fn);
       else el._disposal = [el._disposal, fn];
     };
-    (result as PromiseLike<T>).then(
+    (__DEV__ ? watchAsyncTail(el, result as PromiseLike<T>) : (result as PromiseLike<T>)).then(
       v => {
         if (isSync) {
           syncValue = v;
@@ -824,6 +908,42 @@ export function clearStatus(el: Computed<any>, clearUninitialized: boolean = fal
   if (notify) notify.call(el);
 }
 
+/**
+ * Status clear for a flight LANDING (asyncWrite). A landing answers the
+ * node's OWN question — it retires the node's self entry, not the pending
+ * state its sources propagated onto it. An input re-asked while this flight
+ * was up (a second write to the signal feeding `a` while `b`'s first flight
+ * is in the air, #3373) marks `b` pending on `a` by propagation, with `b`'s
+ * flight still current: nothing superseded it (the re-ask only changed `a`'s
+ * status, not yet its value), so the landing arrives, and a full clear made
+ * `b` answer with the stale value — the transaction's reporter for `a` found
+ * nothing pending below it and committed the newer signal beside the older
+ * derived value (`2 / 1`); `isPending(b)` read false for the gap (#3376).
+ * With another source still pending the node stays derivatively pending on
+ * it; the landed value is written below (the staged answer is still the
+ * answer for the inputs it was asked with) and the input's own settle
+ * releases it, or its value change recomputes the node into a fresh flight.
+ * `_blocked` clears like a full clear: a landing that passed the `_inFlight`
+ * guard was not superseded by a re-run (recompute nulls `_inFlight` first),
+ * so the flag is the flight's own registration throw — the input settling
+ * unchanged must not re-run the node (an extra flight for the same inputs).
+ * The node is already STATUS_PENDING in that branch (only notifyStatus fills
+ * the set, with status; a loading-window park cannot coexist with a live
+ * flight since registration drops the set), so the flags only change when
+ * the first landing retires UNINITIALIZED. `_error` must move off self: a
+ * reader thrown NotReady(self) would park on a retired entry. Companions
+ * keep their verdict (pending before and after; the write re-syncs them).
+ */
+function landStatus(el: Computed<any>, clearUninitialized: boolean = false): void {
+  const sources = el._x?._pendingSources;
+  // (The full clear below drops the set whether or not self was retired first.)
+  if (sources && (sources.delete(el), sources.size)) {
+    el._x!._blocked = false;
+    if (clearUninitialized) el._statusFlags = STATUS_PENDING;
+    setPendingError(el, sources.values().next().value);
+  } else clearStatus(el, clearUninitialized);
+}
+
 export function notifyStatus(
   el: Computed<any>,
   status: number,
@@ -842,13 +962,31 @@ export function notifyStatus(
   const pendingSource =
     status === STATUS_PENDING && error instanceof NotReadyError ? error.source : undefined;
   const isSource = pendingSource === el;
+  // An optimistic node (a WRITTEN override slot) pending derivatively is a
+  // boundary: its override is the answer, pending stops here (A17). A
+  // derived override (#3479) is a previous speculative answer on a plain
+  // member — pending flows through it as through any memo.
   const isOptimisticBoundary =
-    status === STATUS_PENDING && el._x?._overrideValue !== undefined && !isSource;
+    status === STATUS_PENDING &&
+    el._x?._overrideValue !== undefined &&
+    !(el._config & CONFIG_DERIVED_OVERRIDE) &&
+    !isSource;
   const startsBlocking = isOptimisticBoundary && hasActiveOverride(el);
 
   if (!blockStatus) {
+    // Lane before companions: the companion pokes below may create the
+    // node's pending-signal lane, whose parent is read from the node's lane
+    // at creation. Assigned after them (as it was), a node made pending by
+    // propagation before it rode the lane got a parentless companion lane,
+    // and the isPending reader that also depends on the node merged it into
+    // the held lane — the verdict then waited on the async it reports (#3379).
+    if (lane) assignOrMergeLane(el, lane);
     if (status === STATUS_PENDING && pendingSource) {
       addPendingSource(el, pendingSource);
+      // A fresh flight from a settled state starts with its inputs unpublished
+      // (a replacement flight while still pending keeps the mark: the first
+      // flight's committed inputs are still the frame).
+      if (!(el._statusFlags & STATUS_PENDING)) el._config &= ~CONFIG_INPUTS_PUBLISHED;
       el._statusFlags = STATUS_PENDING | (el._statusFlags & STATUS_UNINITIALIZED);
       // Preserve the current source on this propagation so render-effect notification
       // can register every distinct pending source with the transition.
@@ -868,10 +1006,6 @@ export function notifyStatus(
       GlobalQueue._updateChildCompanions(el);
   }
 
-  if (lane && !blockStatus) {
-    assignOrMergeLane(el, lane);
-  }
-
   const downstreamBlockStatus = blockStatus || startsBlocking;
   const downstreamLane = blockStatus || isOptimisticBoundary ? undefined : lane;
 
@@ -889,6 +1023,30 @@ export function notifyStatus(
   }
   forEachDependent(el, (sub, link) => {
     sub._time = clock;
+    // A pending mark on a kept-tail link re-derives the subscriber instead of
+    // marking it (A30, #3494 review; fuzzer latest-1 #2141; #3519 review).
+    // Past `_depsTail` lie the committed frame's deps, kept by A30 because
+    // that frame still derives from them while the pass that dropped them is
+    // held (staged, or unchanged and parked). A source going pending there is
+    // a question for the node's NEXT pass, not a fact about its current one:
+    // marked, the node was registered as the flight's reporter and its holder
+    // entangled with the flight (the A15 arm below) on a dep the held frame
+    // never reads — an orphaned fetch held the truth (a hide joined to a
+    // parked action, A34), and a manual flight nobody awaited held a gated
+    // reader hidden forever (fuzzer branches-1 #1105). Skipped, the committed
+    // frame published stale beside its new inputs (`query=1` beside a
+    // `selected` derived from `remote(0)`). Re-derived, the pass decides: it
+    // reads the dep and registers through its own read, or reads a held input
+    // and enters that transaction (A29), or reads neither and is done. Clears
+    // and errors still ride every link. A link inside the prefix carries the
+    // pass's generation (`link()`), so the test is O(1); mid-pass the prefix
+    // is what the pass has read so far, and the heap refuses a recomputing
+    // node — a dep it has yet to reach registers through its own read.
+    if (status === STATUS_PENDING && link._gen !== sub._depGen) {
+      enqueueSub(sub);
+      schedule();
+      return;
+    }
     if (
       (status === STATUS_PENDING &&
         pendingSource &&
@@ -905,7 +1063,26 @@ export function notifyStatus(
         schedule();
         return;
       }
-      if (!downstreamBlockStatus && !sub._transition) queuePendingNode(sub);
+      // A memo another live transaction HOLDS — pending on its work, or
+      // staged by it — made pending by THIS flight cannot reveal before the
+      // flight lands: the two settle as one unit (A15, a shared derivation of
+      // both — #3443). Propagation marks the held memo without recomputing it
+      // (its inputs' values are unchanged), so this is the one moment the
+      // entanglement is known; the memo's stamped re-entry at its next pass
+      // came too late — the holder's own flight landed first and revealed the
+      // inputs beside the stale sum. The stamp alone decides nothing (#3334):
+      // a node the transaction once queued but holds nothing of — a switch's
+      // shared output whose first flight the second write superseded — must
+      // not drag the older flight into the newer reveal. Effects entangle
+      // nothing (A15 shared-hole corollary): their reader registers with the
+      // flight's transaction at queue notification.
+      if (!downstreamBlockStatus)
+        sub._transition
+          ? pendingSource &&
+            !(sub as any)._type &&
+            (sub._statusFlags & STATUS_PENDING || sub._pendingValue !== NOT_PENDING) &&
+            globalQueue.initTransition(sub._transition)
+          : queuePendingNode(sub);
       notifyStatus(sub, status, error, downstreamBlockStatus, downstreamLane);
     }
   });

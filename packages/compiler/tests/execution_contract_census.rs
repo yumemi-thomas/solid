@@ -62,54 +62,66 @@ fn fixture_sources() -> Vec<(String, String)> {
 /// Read the adversarial JSX probe cases from the parity suite so the
 /// reconciliation corpus cannot silently drift away from the cases that
 /// exercise compiler output. Probe sources are JavaScript template literals;
-/// escaped backticks and interpolation markers must be restored before parse.
+/// the parser's cooked value is the source executed by the JavaScript suite.
 fn probe_sources() -> Vec<(String, String)> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{BindingPattern, Expression, ObjectPropertyKind, PropertyKey, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("__tests__/parity-probes.test.js");
     let text = std::fs::read_to_string(path).expect("the probe corpus is readable");
-    let body = {
-        let start = text
-            .find("const cases = {")
-            .expect("probe corpus has cases");
-        let end = text
-            .find("describe(\"Babel vs Oxc parity probes\"")
-            .expect("probe corpus has an end");
-        &text[start..end]
-    };
-
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &text, SourceType::mjs()).parse();
+    assert!(parsed.diagnostics.is_empty(), "probe corpus must parse");
     let mut cases = Vec::new();
-    let mut rest = body;
-    while let Some(open) = rest.find("\n  \"") {
-        let after = &rest[open + 4..];
-        let Some(name_end) = after.find("\": `") else {
-            rest = after;
+    let mut objects = 0;
+    for statement in &parsed.program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
             continue;
         };
-        let name = &after[..name_end];
-        let source_start = &after[name_end + 4..];
-
-        let mut source_end = None;
-        let bytes = source_start.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'\\' => index += 2,
-                b'`' => {
-                    source_end = Some(index);
-                    break;
-                }
-                _ => index += 1,
+        for binding in &declaration.declarations {
+            let BindingPattern::BindingIdentifier(identifier) = &binding.id else {
+                continue;
+            };
+            if identifier.name != "cases" {
+                continue;
+            }
+            let Some(Expression::ObjectExpression(object)) = &binding.init else {
+                panic!("probe cases must be an object literal");
+            };
+            objects += 1;
+            for property in &object.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    panic!("probe cases must not contain spreads");
+                };
+                let PropertyKey::StringLiteral(name) = &property.key else {
+                    panic!("probe names must be string literals");
+                };
+                let Expression::TemplateLiteral(source) = &property.value else {
+                    panic!("probe sources must be template literals");
+                };
+                assert!(
+                    source.expressions.is_empty(),
+                    "probe sources must be static"
+                );
+                assert_eq!(source.quasis.len(), 1);
+                let source = source.quasis[0]
+                    .value
+                    .cooked
+                    .as_ref()
+                    .expect("probe source has valid escapes")
+                    .to_string();
+                cases.push((name.value.to_string(), source));
             }
         }
-        let Some(source_end) = source_end else {
-            panic!("probe {name} has no closing template literal");
-        };
-
-        let source = source_start[..source_end]
-            .replace("\\`", "`")
-            .replace("\\${", "${");
-        cases.push((name.to_string(), source));
-        rest = &source_start[source_end..];
     }
+    assert_eq!(objects, 1, "probe corpus has one cases object");
+    let names = cases
+        .iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names.len(), cases.len(), "probe names must be unique");
     cases
 }
 
@@ -289,7 +301,7 @@ fn every_parity_probe_reconciles_census_against_lowering() {
     let sources = probe_sources();
     assert_eq!(
         sources.len(),
-        263,
+        270,
         "expected the complete probe corpus, extracted {}",
         sources.len()
     );

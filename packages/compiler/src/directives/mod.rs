@@ -6,8 +6,9 @@
 //!
 //! The runtime ABI is frozen: `registerServerReference(id, fn)` on the
 //! server, `createServerReference(id)` proxies on the client, and the
-//! `<name>-<xxhash32(relative path)>` ID format shared by both builds
-//! (identity-keyed, not positional — solidjs/solid#3109).
+//! `<name>-<xxhash32(relative path)>` ID format shared by both builds. The
+//! name is the function's dotted binding path, so ids are keyed on identity
+//! rather than position (solidjs/solid#3109).
 
 mod dce;
 mod transform;
@@ -21,7 +22,7 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
 
 use crate::config::source_type_for_filename;
-use transform::{DirectivesTransform, Env, ImportDef, ImportKind, Mode};
+use transform::{DirectivesTransform, Env, ImportDef, ImportKind, Mode, UnsupportedExport};
 
 const DEFAULT_RUNTIME: &str = "@solidjs/web/server-functions";
 
@@ -66,7 +67,8 @@ pub struct TransformDirectivesOptions {
 pub struct ServerFunctionMeta {
     /// The wire ID (`<name>-<hash>[-<ordinal>]`).
     pub id: String,
-    /// The descriptive source name (`anonymous` when none applies).
+    /// The dotted binding path that names the function, such as
+    /// `handlers.save`. `anonymous` when no enclosing binding applies.
     pub name: String,
     /// Export names bound to this function (module-level directives only;
     /// empty for function-level extractions).
@@ -168,9 +170,23 @@ pub fn transform_directives(
         register: semantic_import_config(&register),
         create: semantic_import_config(&create),
     };
-    let mut pass =
-        DirectivesTransform::new(&allocator, mode, env, directive, hash, register, create);
-    pass.run(&mut program);
+    let mut pass = DirectivesTransform::new(
+        &allocator,
+        mode,
+        env,
+        directive.clone(),
+        hash,
+        register,
+        create,
+    );
+    if let Err(unsupported) = pass.run(&mut program) {
+        return Err(Error::from_reason(format_unsupported_export(
+            unsupported,
+            &code,
+            filename,
+            &directive,
+        )));
+    }
 
     let valid = pass.valid;
     let functions = pass
@@ -201,39 +217,17 @@ pub fn transform_directives(
     let orphans = std::mem::take(&mut pass.orphans);
     drop(pass);
 
-    let source_map = options.source_map.unwrap_or(false);
-    let codegen = |program: &oxc_ast::ast::Program<'_>| {
-        let build = Codegen::new()
-            .with_options(CodegenOptions {
-                source_map_path: source_map.then(|| std::path::PathBuf::from(filename)),
-                ..CodegenOptions::default()
-            })
-            .build(program);
-        (build.code, build.map.map(|map| map.to_json_string()))
-    };
-
-    let (build_code, build_map) = codegen(&program);
-    let (code, map) = if needs_dce {
-        // Babel's `removeUnusedVariables` fixpoint. This port re-parses
-        // printed output between passes, so when it runs the source map is
-        // regenerated relative to the pre-DCE output (a known limitation).
-        let cleaned =
-            dce::remove_unused_variables(build_code, source_type, orphans, env == Env::Development);
-        if source_map {
-            let allocator = Allocator::default();
-            let reparsed = Parser::new(&allocator, &cleaned, source_type)
-                .with_options(ParseOptions {
-                    preserve_parens: false,
-                    ..ParseOptions::default()
-                })
-                .parse();
-            codegen(&reparsed.program)
-        } else {
-            (cleaned, None)
-        }
-    } else {
-        (build_code, build_map)
-    };
+    if needs_dce {
+        dce::remove_unused_variables(&mut program, &allocator, orphans, env == Env::Development);
+    }
+    let build = Codegen::new()
+        .with_options(CodegenOptions {
+            source_map_path: options.source_map.unwrap_or(false).then(|| filename.into()),
+            ..CodegenOptions::default()
+        })
+        .build(&program);
+    let code = build.code;
+    let map = build.map.map(|map| map.to_json_string());
 
     let semantic_trace = semantic_trace_requested
         .then(|| {
@@ -406,6 +400,28 @@ mod semantic_tests {
         assert_eq!(client_function.directive_span, function.directive_span);
         assert!(!client_function.registers_server_implementation);
     }
+}
+
+/// The message for an export a module-level directive cannot register. The
+/// client build of such a module is rebuilt from its server-function exports
+/// alone, so an export the pass cannot trace would be missing from the
+/// browser bundle while the server build still has it. That used to compile
+/// and fail later as a missing-export error with nothing pointing back here.
+fn format_unsupported_export(
+    unsupported: UnsupportedExport,
+    code: &str,
+    filename: &str,
+    directive: &str,
+) -> String {
+    let (line, column) = validate::line_column(code, unsupported.span.start);
+    format!(
+        "{filename}:{line}:{column}: a \"{directive}\" module can only export server \
+         functions: `{name}` {clause}. The client build of this module is rebuilt from \
+         its server-function exports alone, so this export would be missing from it. {hint}",
+        name = unsupported.name,
+        clause = unsupported.reason.clause(),
+        hint = unsupported.reason.hint(),
+    )
 }
 
 fn import_def(option: Option<&DirectiveImportOption>, default_name: &str) -> ImportDef {

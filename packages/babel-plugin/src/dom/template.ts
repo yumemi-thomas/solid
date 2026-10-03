@@ -4,12 +4,14 @@ import {
   getConfig,
   getNumberedId,
   getRendererConfig,
+  isLockedDOMProperty,
   isStatementVariableInitializer,
   isStatefulDOMProperty,
   registerImportMethod,
   wrapForEffect
 } from "../shared/utils";
 import { setAttr } from "./element";
+import { namesBindings } from "../config";
 import type { NodePath } from "@babel/traverse";
 import type { DynamicBinding, ProgramScopeData, TemplateRecord, TransformResult } from "../types";
 
@@ -144,6 +146,32 @@ function registerTemplate(path: NodePath, results: TransformResult) {
   results.decl = t.variableDeclaration("var", results.declarations as t.VariableDeclarator[]);
 }
 
+/** A non-inline object-valued `style` / `class` binding is read in the TRACKED
+ * half of its effect through `readShallow()`: `style()`/`className()` enumerate
+ * their object in the untracked commit phase, so a proxy value (a store
+ * sub-object, merged props) would be identity-reactive only. Skipped when the
+ * expression is provably a string or a fresh literal (`readShallow` would pass
+ * those through anyway; the call is what's saved). */
+function wrapReadShallow(path: NodePath, key: string, value: t.Expression): t.Expression {
+  if (key !== "class" && key !== "style") return value;
+  if (
+    t.isStringLiteral(value) ||
+    t.isTemplateLiteral(value) ||
+    t.isBinaryExpression(value) ||
+    t.isObjectExpression(value) ||
+    // a class array of literals cannot hold a proxy either
+    (t.isArrayExpression(value) &&
+      value.elements.every(
+        e => t.isStringLiteral(e) || t.isTemplateLiteral(e) || t.isObjectExpression(e)
+      ))
+  )
+    return value;
+  return t.callExpression(
+    registerImportMethod(path, "readShallow", getRendererConfig(path, "dom").moduleName),
+    [value]
+  );
+}
+
 function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
   if (!dynamics.length) return;
   const config = getConfig(path);
@@ -151,6 +179,27 @@ function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
   // dynamics are only queued when effectWrapper is configured (element.ts
   // guards every push), so the name is always a string here
   const effectWrapperId = registerImportMethod(path, config.effectWrapper as string, undefined);
+  // `sourceNames.bindings`: the effect is named by what it writes — each
+  // binding's `<tag>.<attribute>` as written (undoing the `prop:` the locked
+  // DOM property pre-pass added to `value`, `checked`, …), the merged effect
+  // listing all of its bindings — as a trailing `{ name }` options argument.
+  const label = namesBindings(config)
+    ? [
+        t.objectExpression([
+          t.objectProperty(
+            t.identifier("name"),
+            t.stringLiteral(
+              dynamics
+                .map(
+                  d =>
+                    `${d.tagName}.${isLockedDOMProperty(d.tagName, d.key) ? d.key.replace(/^prop:/, "") : d.key}`
+                )
+                .join(", ")
+            )
+          )
+        ])
+      ]
+    : [];
 
   if (dynamics.length === 1) {
     const prevValue =
@@ -167,7 +216,7 @@ function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
     const newValue = t.identifier("_v$");
     return t.expressionStatement(
       t.callExpression(effectWrapperId, [
-        wrapForEffect(dynamics[0].value),
+        wrapForEffect(wrapReadShallow(path, dynamics[0].key, dynamics[0].value)),
         t.arrowFunctionExpression(
           prevValue ? [newValue, prevValue] : [newValue],
           t.blockStatement([
@@ -181,7 +230,8 @@ function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
               })
             )
           ])
-        )
+        ),
+        ...label
       ])
     );
   }
@@ -202,7 +252,7 @@ function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
     }
 
     properties.push(propIdent);
-    values.push(t.objectProperty(propIdent, value));
+    values.push(t.objectProperty(propIdent, wrapReadShallow(path, key, value)));
 
     if (key === "class" || key === "style" || isStatefulDOMProperty(tagName, key)) {
       statements.push(
@@ -244,7 +294,8 @@ function wrapDynamics(path: NodePath, dynamics: DynamicBinding[]) {
       t.arrowFunctionExpression(
         [t.objectPattern(properties.map(id => t.objectProperty(id, id, false, true))), prevId],
         t.blockStatement(statements)
-      )
+      ),
+      ...label
     ])
   );
 }

@@ -5,7 +5,8 @@
 use crate::error::{Error, Result};
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
-    Expression, JSXAttributeItem, JSXAttributeValue, JSXElement, ObjectPropertyKind, Statement,
+    Expression, JSXAttributeItem, JSXAttributeValue, JSXElement, JSXElementName,
+    JSXMemberExpression, JSXMemberExpressionObject, ObjectPropertyKind, Statement,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -32,6 +33,21 @@ pub(crate) trait ComponentLower<'a>:
     fn mark_create_component(&mut self);
     /// Records a component render site when this mode supplies a trace.
     fn trace_component_render_site(&mut self, _span: Span) {}
+    /// Babel's `sourceNames.components` on DOM output: append the source tag text as
+    /// `createComponent`'s third argument. The DOM lowering opts in here; the
+    /// SSR lowering has its own component path (ssr/transform.rs) and applies
+    /// the same option there; universal renderers own their two-argument
+    /// `createComponent` and never label.
+    fn component_names_enabled(&self) -> bool {
+        false
+    }
+    /// Whether the tag identifier at `span` was written as `this` in source.
+    /// The `this` pre-pass has already rewritten `<this.Row />` to the
+    /// `_self$` capture (keeping the original span), and the label must read
+    /// `this.Row`, not the generated uid.
+    fn tag_identifier_is_this(&self, _span: Span) -> bool {
+        false
+    }
     /// Whether this element is the JSX root currently being lowered (Babel
     /// keeps a raw `this` in the root tag callee).
     fn is_jsx_root_tag(&self, span: Span) -> bool;
@@ -211,15 +227,67 @@ pub(crate) fn lower_component_with_setup<'a, C: ComponentLower<'a>>(
 
     flush_component_props(ctx, &mut running_props, &mut prop_objects, element.span);
     let props = component_props_expression(ctx, element.span, prop_objects, force_merge_props);
+    let mut args = vec![component, props];
+    if ctx.component_names_enabled() {
+        let name = jsx_tag_name(
+            &|span| ctx.tag_identifier_is_this(span),
+            &element.opening_element.name,
+        );
+        args.push(ast.expression_string_literal(element.span, ast.str(&name), None));
+    }
     Ok((
-        ComponentPropContext::call_identifier(
-            ctx,
-            element.span,
-            "_$createComponent",
-            vec![component, props],
-        ),
+        ComponentPropContext::call_identifier(ctx, element.span, "_$createComponent", args),
         setup,
     ))
+}
+
+/// The tag as written in source (`Home`, `Ui.Button`, `this.Row`) — the
+/// label `sourceNames.components` emits, matching Babel's `jsxTagName`. `is_this`
+/// answers whether the identifier at a span was written as `this` in source
+/// (the shared `this` pre-pass has already rewritten it to the `_self$`
+/// capture, keeping the span). Shared by the DOM and SSR lowerings.
+pub(crate) fn jsx_tag_name<'a>(
+    is_this: &dyn Fn(Span) -> bool,
+    name: &JSXElementName<'a>,
+) -> String {
+    let identifier_name = |name: &str, span: Span| {
+        if is_this(span) {
+            "this".to_string()
+        } else {
+            name.to_string()
+        }
+    };
+    match name {
+        JSXElementName::Identifier(identifier) => {
+            identifier_name(&identifier.name, identifier.span)
+        }
+        JSXElementName::IdentifierReference(identifier) => {
+            identifier_name(&identifier.name, identifier.span)
+        }
+        JSXElementName::MemberExpression(member) => jsx_member_tag_name(is_this, member),
+        JSXElementName::ThisExpression(_) => "this".to_string(),
+        JSXElementName::NamespacedName(namespaced) => {
+            format!("{}:{}", namespaced.namespace.name, namespaced.name.name)
+        }
+    }
+}
+
+fn jsx_member_tag_name<'a>(
+    is_this: &dyn Fn(Span) -> bool,
+    member: &JSXMemberExpression<'a>,
+) -> String {
+    let object = match &member.object {
+        JSXMemberExpressionObject::IdentifierReference(identifier) => {
+            if is_this(identifier.span) {
+                "this".to_string()
+            } else {
+                identifier.name.to_string()
+            }
+        }
+        JSXMemberExpressionObject::MemberExpression(member) => jsx_member_tag_name(is_this, member),
+        JSXMemberExpressionObject::ThisExpression(_) => "this".to_string(),
+    };
+    format!("{}.{}", object, member.property.name)
 }
 
 /// Babel gates component-prop getters on
@@ -250,6 +318,14 @@ impl<'a> ComponentLower<'a> for AstDomTransform<'a, '_> {
 
     fn trace_component_render_site(&mut self, span: Span) {
         self.semantic_trace.component_render_site(span);
+    }
+
+    fn component_names_enabled(&self) -> bool {
+        self.component_names
+    }
+
+    fn tag_identifier_is_this(&self, span: Span) -> bool {
+        self.source.get(span.start as usize..span.end as usize) == Some("this")
     }
 
     fn is_jsx_root_tag(&self, span: Span) -> bool {

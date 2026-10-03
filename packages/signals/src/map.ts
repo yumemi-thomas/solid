@@ -1,8 +1,10 @@
-import { setStrictRead } from "./core/core.js";
+import { currentOptimisticLane, setStrictRead } from "./core/core.js";
+import { activeLanes } from "./core/lanes.js";
 import {
   computed,
   CONFIG_AUTO_DISPOSE,
   createOwner,
+  GlobalQueue,
   runWithOwner,
   setSignal,
   signal,
@@ -109,6 +111,7 @@ export function mapArray<Item, MappedItem>(
 }
 
 const pureOptions = { ownedWrite: true };
+
 // Exception safety (#2903): a map callback can throw NotReadyError mid-pass
 // (async read), and the computed re-runs the whole pass after settle. Every
 // pass therefore STAGES its work — new rows are created into temp arrays and
@@ -118,6 +121,189 @@ const pureOptions = { ownedWrite: true };
 // were, so the retry diffs against uncorrupted state. Consequence of the
 // strong-abort ordering: removed rows now dispose AFTER the pass's new rows
 // are created (you cannot destroy state before knowing the pass will land).
+
+/** SMALL-MOVE fast path (jfb-reorder profile, 2026-09-02): rotates, swaps,
+ * small displacements, and removals leave a keyed window that is the old
+ * window SHIFTED, with 32-or-fewer genuinely displaced identities — but the
+ * general diff pays O(newLen) regardless (window key-map, four full-length
+ * staged arrays, element-copied prefix/suffix): ~50-140µs/op on 1000 rows
+ * against ~20µs of actual DOM work.
+ *
+ * Scoped to the PLAIN identity-keyed mode (no row signals, no index
+ * accessors — the hot For shape); other modes keep the general path, which
+ * halves this function's size for the same benchmark wins.
+ *
+ * PHASE 1 (scan, zero allocation beyond two small ledgers): a two-pointer
+ * walk records ALIGNED RUNS — at most ledger+1 — realigning at boundaries
+ * with bounded lookahead (interleaved splices stack shift offsets past
+ * single-step). A compare BUDGET bails hopeless shapes (reverse, shuffle)
+ * almost immediately. PHASE 2 (commit, success only): slice() the live
+ * arrays (native memcpy keeps the fresh-identity contract downstream change
+ * propagation relies on), copy only shifted runs, patch displaced pairs,
+ * dispose leftover sources (dif < 0). Unmatched destinations (replacements,
+ * insertions) bail with nothing staged. Kept OUT of updateKeyedMap:
+ * inlining deoptimized the general path (JIT function-size budget). */
+/** Dev-only engagement counter (tests prove the fast path actually ran). */
+let smallMoveHits = 0;
+/** @internal */
+export function __smallMoveHits(): number {
+  return smallMoveHits;
+}
+
+function trySmallMove<Item, MappedItem>(
+  data: MapData<Item, MappedItem>,
+  newItems: Item[],
+  newLen: number,
+  start: number
+): boolean {
+  const oldItems = data._items;
+  const oldEnd = data._len - 1;
+  const srcPos: number[] = [];
+  const dstPos: number[] = [];
+  const runs: number[] = []; // flat triples: oldStart, newStart, length
+  let budget = 256;
+  let i = start;
+  let j = start;
+  let inRun = false;
+  while (i <= oldEnd && j <= newLen - 1) {
+    const oldItem = oldItems[i];
+    const newItem = newItems[j];
+    if (oldItem === newItem) {
+      if (!inRun) {
+        runs.push(i, j, 0);
+        inRun = true;
+      }
+      runs[runs.length - 1]++;
+      i++;
+      j++;
+      continue;
+    }
+    inRun = false;
+    // Bounded realignment lookahead, shorter distance wins.
+    let del = -1;
+    let lim = Math.min(32 - srcPos.length, oldEnd - i, budget);
+    for (let a = 1; a <= lim; a++) {
+      if (oldItems[i + a] === newItem) {
+        del = a;
+        break;
+      }
+    }
+    budget -= del === -1 ? lim : del;
+    let ins = -1;
+    lim = Math.min(32 - dstPos.length, newLen - 1 - j, budget);
+    for (let a = 1; a <= lim; a++) {
+      if (newItems[j + a] === oldItem) {
+        ins = a;
+        break;
+      }
+    }
+    budget -= ins === -1 ? lim : ins;
+    if (del !== -1 && (ins === -1 || del <= ins)) {
+      while (del-- > 0) srcPos.push(i++);
+      continue;
+    }
+    if (ins !== -1) {
+      while (ins-- > 0) dstPos.push(j++);
+      continue;
+    }
+    if (budget <= 0 || srcPos.length === 32 || dstPos.length === 32) return false;
+    srcPos.push(i++);
+    dstPos.push(j++);
+  }
+  for (; i <= oldEnd; i++) {
+    if (srcPos.length === 32) return false;
+    srcPos.push(i);
+  }
+  for (; j <= newLen - 1; j++) {
+    if (dstPos.length === 32) return false;
+    dstPos.push(j);
+  }
+  return commitSmallMove(data, newItems, newLen, srcPos, dstPos, runs);
+}
+
+/** PHASE 2 of the small-move path, in its OWN function so that a pass which
+ * only SCANS and bails (a full replace: the first structural pass of a page,
+ * typically) compiles nothing but the scan — V8 parses and compiles lazily
+ * per function, and cold `replace` measured +0.5 ms with both phases in one
+ * body. Pairs displaced sources with destinations (an unmatched destination
+ * is a replacement/insertion → general path), then commits: slice() the live
+ * arrays, copy shifted runs, patch displaced pairs, dispose leftovers. */
+function commitSmallMove<Item, MappedItem>(
+  data: MapData<Item, MappedItem>,
+  newItems: Item[],
+  newLen: number,
+  srcPos: number[],
+  dstPos: number[],
+  runs: number[]
+): boolean {
+  const oldItems = data._items;
+  let i: number;
+  let j: number;
+  let consumed: boolean[] | undefined;
+  if (dstPos.length !== 0) {
+    consumed = new Array(srcPos.length);
+    for (j = 0; j < dstPos.length; j++) {
+      let found = -1;
+      for (i = 0; i < srcPos.length; i++) {
+        if (!consumed[i] && oldItems[srcPos[i]] === newItems[dstPos[j]]) {
+          found = i;
+          break;
+        }
+      }
+      if (found === -1) return false;
+      consumed[found] = true;
+      dstPos[j] = (dstPos[j] << 6) | found; // pack pairing (found < 32)
+    }
+  }
+  // DUPLICATES: the general path pairs equal identities by OCCURRENCE ORDER
+  // (the chained index map). Displaced↔displaced pairing above is ascending
+  // on both sides, so it agrees; but an aligned run was matched by POSITION,
+  // and if a displaced identity also occurs inside a run the two algorithms
+  // can hand different occurrences different owners (row-local state moves;
+  // a shrink could dispose the wrong one). Decline that case — general path.
+  if (srcPos.length !== 0 || dstPos.length !== 0) {
+    const displaced = new Set<Item>();
+    for (i = 0; i < srcPos.length; i++) displaced.add(oldItems[srcPos[i]]);
+    for (j = 0; j < dstPos.length; j++) displaced.add(newItems[dstPos[j] >> 6]);
+    for (let r = 0; r < runs.length; r += 3) {
+      const ro = runs[r];
+      for (let a = 0, n = runs[r + 2]; a < n; a++)
+        if (displaced.has(oldItems[ro + a])) return false;
+    }
+  }
+  // PHASE 2: commit.
+  if (__DEV__) smallMoveHits++;
+  const oldMappings = data._mappings;
+  const oldNodes = data._nodes;
+  const mappings = oldMappings.slice(0, newLen);
+  const nodes = oldNodes.slice(0, newLen);
+  for (let r = 0; r < runs.length; r += 3) {
+    const ro = runs[r];
+    const rn = runs[r + 1];
+    if (ro !== rn) {
+      for (let a = 0; a < runs[r + 2]; a++) {
+        mappings[rn + a] = oldMappings[ro + a];
+        nodes[rn + a] = oldNodes[ro + a];
+      }
+    }
+  }
+  for (j = 0; j < dstPos.length; j++) {
+    const p = dstPos[j] >> 6;
+    const q = srcPos[dstPos[j] & 63];
+    mappings[p] = oldMappings[q];
+    nodes[p] = oldNodes[q];
+  }
+  data._mappings = mappings;
+  data._nodes = nodes;
+  data._len = newLen;
+  data._items = newItems.slice(0);
+  // Dispose unmatched sources LAST (general-path ordering).
+  for (i = 0; i < srcPos.length; i++) {
+    if (consumed === undefined || !consumed[i]) oldNodes[srcPos[i]].dispose();
+  }
+  return true;
+}
+
 function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[] {
   const newItems = this._list() || [],
     newLen = newItems.length;
@@ -214,6 +400,31 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         removedItems: Item[] | undefined,
         createdItems: Item[] | undefined;
 
+      // The pass's write to a per-slot signal (a row accessor in index mode,
+      // an index accessor in keyed mode). The list's frame lives in these
+      // writes as much as in the computed's result, so under a LANE pass they
+      // are the lane's frame too (F1): a plain `setSignal` staged them into
+      // the action's transaction and the row readers were served the
+      // committed value until the action landed — `<For>` without `keyed`
+      // showed the pre-action list for the whole action while the keyed modes
+      // showed the optimistic one. The engine publishes the write as a
+      // derived override on the slot (lanes stage, A17) and lands or
+      // supersedes it when a plain pass later writes a slot still carrying
+      // one (A18) — `landOnOverride`'s slot arm. Decided once per pass, not
+      // per slot: a lane pass marks the map (`_laneSlots`: its slots may
+      // carry overrides), a marked map routes every slot write through the
+      // engine while any lane is live — a slot's override resolves with its
+      // lane's transaction, or with the batch for an orphan lane
+      // (resolveOptimisticNodes, then cleanupCompletedLanes, both before the
+      // completion wakes any recompute), so a pass that finds no lane live
+      // knows the slots are clean and drops the mark — and an unmarked map
+      // takes `setSignal` directly. The engine is installed whenever a lane
+      // is active.
+      const write: <T>(el: Signal<T>, v: T) => unknown = (this._laneSlots =
+        currentOptimisticLane !== null || (this._laneSlots && activeLanes.size !== 0))
+        ? GlobalQueue._landOnOverride!
+        : setSignal;
+
       // skip common prefix
       for (
         start = 0, end = Math.min(this._len, newLen);
@@ -222,7 +433,7 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
           (this._rows && compare(this._key, this._items[start], newItems[start])));
         start++
       ) {
-        if (this._rows) setSignal(this._rows[start], newItems[start]);
+        if (this._rows) write(this._rows[start], newItems[start]);
       }
 
       // skip common suffix — counted only; retained entries land in one pass
@@ -242,6 +453,32 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
       if (start === newLen && this._len === newLen) {
         this._items = newItems.slice(0);
         return;
+      }
+
+      // SMALL-MOVE FAST PATH: extracted to its own function — inlining it
+      // here bloats updateKeyedMap past the JIT's optimization budget and
+      // deoptimizes the GENERAL path (measured 2x on reverse). Gated to
+      // LARGE trimmed windows: when the trims already shrank the window
+      // (plain removals, tail edits), the general path is window-
+      // proportional and cheap — the fast path would only re-walk what the
+      // trims proved.
+      if (
+        newLen <= this._len &&
+        end - start > 64 &&
+        this._rows === undefined &&
+        this._indexes === undefined
+      ) {
+        // PROBE before the scan: a small move keeps a mid-window item within
+        // ±32 of its old position; a REPLACE (all fresh items — the shape
+        // every page's first structural pass usually is) has it nowhere.
+        // ~65 compares, no allocation, and the scan function is never
+        // compiled for a replace (its cold first-call compile was the cost).
+        const m = start + ((newEnd - start) >> 1);
+        const probe = newItems[m];
+        const hi = Math.min(end, m + 32);
+        let k = Math.max(start, m - 32);
+        while (k <= hi && this._items[k] !== probe) k++;
+        if (k <= hi && trySmallMove(this, newItems as Item[], newLen, start)) return;
       }
 
       const dif = newLen - this._len;
@@ -305,19 +542,19 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
         indexes && (indexes[i] = this._indexes![i]);
       }
       for (j = start; j <= newEnd; j++) {
-        if (rows) setSignal(rows[j], newItems[j]);
-        if (indexes) setSignal(indexes[j], j);
+        if (rows) write(rows[j], newItems[j]);
+        if (indexes) write(indexes[j], j);
       }
       for (j = newEnd + 1; j < newLen; j++) {
         temp[j] = this._mappings[j - dif];
         tempNodes[j] = this._nodes[j - dif];
         if (rows) {
           rows[j] = this._rows![j - dif];
-          setSignal(rows[j], newItems[j]);
+          write(rows[j], newItems[j]);
         }
         if (indexes) {
           indexes[j] = this._indexes![j - dif];
-          if (dif !== 0) setSignal(indexes[j], j);
+          if (dif !== 0) write(indexes[j], j);
         }
       }
       this._mappings = temp;
@@ -501,4 +738,7 @@ interface MapData<Item = any, MappedItem = any> {
   _indexes?: Signal<number>[];
   _byIndex: boolean;
   _fallback?: Accessor<any>;
+  /** A lane pass has run over this map: its slot signals may carry a lane's
+   * derived override, so every slot write routes through the engine (F1). */
+  _laneSlots?: boolean;
 }

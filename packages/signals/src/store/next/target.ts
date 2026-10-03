@@ -53,6 +53,9 @@ export interface StoreNextFamily {
   /** The projection computed — assigned after creation (accessor pattern). */
   node: Computed<any> | null;
   shallow?: boolean;
+  /** Derive run counter (proj R37): the run whose draft is live. A draft
+   * compares its own run against this — the next run's start supersedes it. */
+  run?: number;
 }
 
 export interface StoreNextTarget {
@@ -99,9 +102,17 @@ export interface StoreNextTarget {
    * this target (first-read scan, defineProperty, or clone scan). Gates the
    * fold diff's descriptor-safe path and the get trap's descriptor path. */
   a: boolean;
-  /** Accessor scan performed (scan-once on first trap read; adopted data is
-   * not rescanned — legacy-parity behavior). */
-  sc: boolean;
+  /** Accessor scan grade: 0 = not yet scanned (adoption resets — adopted data
+   * is not rescanned until the next draft), 1 = scanned, 2 = scanned and
+   * PLAIN DATA — `Object.prototype` with every own key an enumerable data
+   * property. Grade 2 unlocks the spread clone (cloneRaw), bare-assignment
+   * overlay writes and flatten (#3360); a non-plain defineProperty through
+   * the draft downgrades it to 1. */
+  sc: 0 | 1 | 2;
+  /** Own-key count: exact at scan, then bumped by set-trap writes of keys new
+   * to the container (never decremented — an estimate for the overlay/clone
+   * choice only, #3360). */
+  kc: number;
   /** Adoption diff base, non-null when the backing was swapped by adoption
    * this batch: the view the nodes were LAST TOLD — the pre-batch committed
    * backing, or the draft's pending backing when a draft preceded the
@@ -112,7 +123,9 @@ export interface StoreNextTarget {
    * (`Object.create(v)` — own keys are this batch's writes, everything else
    * reads through). O(written) per flush instead of O(container) clones
    * (#3044); commit flattens own keys onto an owned committed backing in
-   * place. Only plain-data non-array non-family containers qualify;
+   * place. Plain-data non-array containers qualify, including projection
+   * and derived-store families (#3352); optimistic families, chained
+   * backings, and accessor containers keep the descriptor clone.
    * `materializePB` downgrades to the clone path when a consumer needs a
    * real container (reconcile, draft escape). */
   ovl: boolean;
@@ -137,21 +150,48 @@ export interface StoreNextTarget {
 }
 
 /**
- * Ownership (first cut, decision 2026-08-16d): one WeakSet of store-owned
- * backings serving both the production identity-skip guard and the __TEST__
- * no-mutation oracle.
+ * Ownership stamp (#3360): every backing the store ALLOCATES (CoW clones,
+ * privatized committed backings) carries its owning target under this
+ * enumerable symbol. One property write replaces the two weak-collection
+ * registrations (ownership set + raw→target map) a fresh object used to pay
+ * per draft — V8's identity-hash + ephemeron cost dominated the one-key
+ * write floor. Enumerable so a spread copy (the plain-data clone path) stays
+ * on the fast path and carries the stamp along.
+ *
+ * Owned backings are never user-reachable (`snapshot` copies them, the traps
+ * hide the key), so every raw key walk in the store must skip `$OWNER`, and
+ * ownership is answered by `isOwned` — a user object never carries it.
+ * Overlay drafts (`Object.create(v)` over an owned `v`) inherit the stamp.
  */
-export const ownedRaw = new WeakSet<object>();
+export const $OWNER: unique symbol = Symbol(__DEV__ ? "STORE_OWNER" : 0);
 
-/** raw → target. The only raw-keyed lookup; boundary mechanism (O8). */
+/** raw → target for UNOWNED backings (user-ingested, adopted); owned
+ * backings resolve through their `$OWNER` stamp. Boundary mechanism (O8). */
 export const storeNextLookup = new WeakMap<object, StoreNextTarget>();
+
+/** A backing the store allocated and may mutate in place. */
+export function isOwned(raw: object): boolean {
+  return (raw as any)[$OWNER] !== undefined;
+}
+
+/** raw → target within a family (`null` = plain stores / the global map).
+ * The stamp answers for backings owned by a target OF THAT FAMILY; anything
+ * else (user objects, adoptees, another family's backings the family
+ * re-registered for its own wrapper) resolves through the family's map. */
+export function lookupTarget(
+  raw: object,
+  fam: StoreNextFamily | null
+): StoreNextTarget | undefined {
+  const owner: StoreNextTarget | undefined = (raw as any)[$OWNER];
+  return owner !== undefined && owner.fam === fam ? owner : (fam?.map ?? storeNextLookup).get(raw);
+}
 
 /** __TEST__ oracle: every object ingested from a user (never mutate). */
 export const ingestedRaw: WeakSet<object> | null = __DEV__ ? new WeakSet<object>() : null;
 
 export function devAssertNeverUserMutation(target: object): void {
   if (!__TEST__ || !ingestedRaw) return;
-  if (ingestedRaw.has(target) && !ownedRaw.has(target)) {
+  if (ingestedRaw.has(target) && !isOwned(target)) {
     throw new Error(
       "[STORE-NEXT INV] write path mutated a user-provided (non-owned) object — CoW privatization was bypassed"
     );
@@ -166,7 +206,7 @@ export function devAssertNeverUserMutation(target: object): void {
  * the optimistic channel entirely. */
 export interface OptStoreHooks {
   notifyOptimisticWrites(t: any, pb: Record<PropertyKey, any>): void;
-  optimisticView(t: any, src: Record<PropertyKey, any>): Record<PropertyKey, any>;
+  optimisticView(t: any, src: Record<PropertyKey, any>, draft?: boolean): Record<PropertyKey, any>;
   applyTentative(t: any, incoming: any, keyFn: ((item: any) => any) | null): void;
   /** #3164 fold: does this live transaction still retain optimism (armed
    * nodes or tracked stores)? Backs the held-truth masks in next/store.ts so

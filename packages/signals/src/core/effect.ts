@@ -1,9 +1,11 @@
+import { NOT_PENDING } from "./constants.js";
 import {
   CONFIG_AUTO_DISPOSE,
   CONFIG_CHILDREN_FORBIDDEN,
   EFFECT_RENDER,
   EFFECT_TRACKED,
   EFFECT_USER,
+  LANE_RUN,
   REACTIVE_DISPOSED,
   STATUS_ERROR,
   STATUS_PENDING
@@ -11,6 +13,8 @@ import {
 import {
   computed,
   createEffectNode,
+  enterCallback,
+  exitCallback,
   recompute,
   setStrictRead,
   staleValues,
@@ -20,15 +24,19 @@ import {
 import { attrHooks } from "./attribution-hooks.js";
 import { emitDiagnostic, reportDiagnostic } from "./dev.js";
 import { StatusError, unwrapStatusError } from "./error.js";
+import { trimStaleDeps } from "./graph.js";
 import { enqueueSub } from "./heap.js";
 import {
   _hitUnhandledAsync,
+  activeTransition,
+  currentTransition,
   GlobalQueue,
   haltReactivity,
   resetUnhandledAsync,
   schedule,
   setTrackedQueueCallback,
-  setEffectCallback
+  setEffectCallback,
+  type Transition
 } from "./scheduler.js";
 import type { Computed, NodeOptions, Owner } from "./types.js";
 
@@ -38,7 +46,13 @@ export interface Effect<T> extends Computed<T>, Owner {
   _modified: boolean;
   _prevValue: T | undefined;
   _type: number;
-  _boundRunEffect?: () => void;
+  _boundRunEffect?: (type: number) => void;
+  /** The transaction whose staged view produced `_value` (null = committed
+   * view). Effects have one value slot and do not entangle transactions, so
+   * a second transaction recomputing the same effect overwrites a value the
+   * first one still owes a run for; see the contested-effect arm of recompute
+   * (#3322). */
+  _valueTransition: Transition | null;
 }
 
 /**
@@ -61,10 +75,14 @@ export function effect<T>(
     options
   ) as Effect<T>;
   recompute(node, true);
+  // A first pass that derived from a live transaction's staged world was
+  // staged into that transaction (recompute: born held); the transaction's
+  // commit replays this effect. Its first run is not this creation's (A29).
   !options?.defer &&
+    node._pendingValue === NOT_PENDING &&
     (node._type === EFFECT_USER || options?.schedule
       ? node._queue.enqueue(node._type, runEffect.bind(null, node))
-      : runEffect(node));
+      : runEffect(node, LANE_RUN));
   if (__DEV__ && !node._parent) {
     const message =
       "[NO_OWNER_EFFECT] Effects created outside a reactive context will never be disposed";
@@ -140,8 +158,32 @@ function notifyEffectStatus(this: Effect<any>, status?: number, error?: any): vo
   }
 }
 
-function runEffect(node: Effect<any>): void {
+function runEffect(node: Effect<any>, type: number): void {
   if (!node._modified || node._flags & REACTIVE_DISPOSED) return;
+  // Ownership (#3319): a value computed under a transaction is applied by that
+  // transaction's commit. The ordinary effect phase runs with a transaction
+  // active only when the flush's finalize ENTERED one (every other path parks
+  // or settles first): leave a run owned by a still-held transaction queued —
+  // `_modified` stays set — and the next gate stashes it with the owner.
+  // Mainline-owned runs (null) apply now. Lanes are exempt by design (they
+  // apply their own effects ahead of their transaction — the optimistic view)
+  // and mark their runs with LANE_RUN.
+  //
+  // Lane exemption has one exception (#3331): a lane runner for an effect that
+  // no longer rides a lane — its optimistic source was superseded, so the lane
+  // has no optimistic view left to apply, and the value this effect now
+  // carries (or will, once its plain recompute lands) belongs to the still-held
+  // transaction. Hand the run to the regular queue, where the transaction's
+  // gate stashes it with the owner. Lane-less runners with no live owner
+  // (reverts, wake-only lanes) apply now.
+  if (
+    node._valueTransition !== null &&
+    !currentTransition(node._valueTransition)._done &&
+    (type & LANE_RUN ? !node._x?._optimisticLane : activeTransition !== null)
+  ) {
+    node._queue.enqueue(node._type, node._boundRunEffect!);
+    return;
+  }
   // Error arm (#2840), user effects only: a compute-phase error that is still
   // the node's settled state at effect time runs the bundle's error handler in
   // this same imperative, writable scope. Unwrap the StatusError used for
@@ -172,12 +214,20 @@ function runEffect(node: Effect<any>): void {
     }
     return;
   }
+  // Captured before the callback: its own throw errors the node below, but
+  // the compute pass that produced `_value` was clean, so its tail still goes.
+  const cleanPass = node._x?._error == null;
   let prevStrictRead: string | false = false;
   if (__DEV__) {
     prevStrictRead = setStrictRead("an effect callback");
     setEffectCallback(true);
-    if (attrHooks !== null) attrHooks.effectRunStart(node);
+    enterCallback();
   }
+  // Observe tier, like its `effectRunEnd` twin below: the frame the engine
+  // opens here is what stamps the callback's writes as the effect's (the
+  // cascade an observer reports) and what times the callback (the `effect`
+  // record) — facts a production observer needs, not only a dev console.
+  if (__OBSERVE__ && attrHooks !== null) attrHooks.effectRunStart(node);
   const prevCleanup = node._cleanup;
   node._cleanup = undefined;
   try {
@@ -201,9 +251,16 @@ function runEffect(node: Effect<any>): void {
     if (__DEV__) {
       setStrictRead(prevStrictRead);
       setEffectCallback(false);
+      exitCallback();
     }
     node._prevValue = node._value;
     node._modified = false;
+    // The run applied: this is the frame now, so the dependency tail the
+    // compute pass left linked goes (A30, #3438 — `recompute` defers an
+    // effect's trim while a run is owed; the twin of `commitPendingNode`'s
+    // trim for a staged pass). An errored compute kept its full list with
+    // `_depsTail` marking where it stopped; leave it, as the commit does.
+    if (cleanPass) trimStaleDeps(node);
   }
   // Outside the try (see the rule in attribution-hooks.ts). Reached whether or
   // not the callback threw — a throw that escapes the catch above halts.
@@ -258,6 +315,9 @@ export function trackedEffect(fn: () => void | (() => void), options?: NodeOptio
   node._config = (node._config & ~CONFIG_AUTO_DISPOSE) | CONFIG_CHILDREN_FORBIDDEN;
   node._modified = true;
   node._type = EFFECT_TRACKED;
+  // Observe-tier label: the computed literal defaulted its `_name` slot to
+  // "computed"; relabel by kind (a store into the slot, not a new field).
+  if (__OBSERVE__ && options?.name === undefined) node._name = "trackedEffect";
   // Status dispatch rides the SHARED notifier (statusNotifierOf keys off
   // _type): its error arm is behavior-identical to the closure that used to
   // live here, without the per-node NodeExtension allocation.

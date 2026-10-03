@@ -32,6 +32,7 @@ import { emitDiagnostic, registerGraph, reportDiagnostic } from "./core/dev.js";
 import { installOptimisticEngine } from "./core/optimistic.js";
 import {
   activeTransition,
+  dirtyQueue,
   entangleConfirmingTransitions,
   globalQueue,
   Queue
@@ -63,6 +64,12 @@ import {
  *
  * Cannot be used inside `createTrackedEffect` or `onSettled` — return a
  * cleanup function from the callback body instead.
+ *
+ * Cleanups run in unwind order: an owner's children are disposed before its
+ * own cleanups, and within one owner later registrations run before earlier
+ * ones. In production a component body shares its enclosing owner, so
+ * register cleanup before creating children when the order between them
+ * matters.
  *
  * @example
  * ```ts
@@ -257,6 +264,13 @@ export interface MemoOptions<T> {
    */
   transparent?: boolean;
   /**
+   * @internal Framework plumbing (the `solid-js/refresh` HMR memo): in the
+   * observe tiers the memo has no name, is no owner-path segment, and the
+   * attribution engine records nothing about it, while what it owns stays
+   * observed. Not part of the public API.
+   */
+  _plumbing?: boolean;
+  /**
    * Custom equality function, or `false` to always notify subscribers.
    * Defaults to reference equality (`isEqual`). Pass a comparator (e.g.
    * `(a, b) => a.id === b.id`) for value-based equality, or `false` to
@@ -343,10 +357,14 @@ export type NoInfer<T extends any> = [T][T extends any ? 0 : never];
  *
  * @example
  * ```ts
- * // Writable memo: starts as `fn()`, can be locally overwritten by setter.
+ * // Writable memo: derives from `fn()` and can be written like a signal.
  * const [user, setUser] = createSignal(() => fetchUser(userId()));
  *
- * setUser({ ...user(), name: "Alice" }); // optimistic local edit
+ * // Within the frame the write wins over a same-tick recompute; the next
+ * // change to `userId` re-derives (the compute receives the written value
+ * // as `prev`). While a transaction holds a re-derived value, a write from
+ * // outside it does not replace that derivation — it becomes its `prev`.
+ * setUser({ ...user(), name: "Alice" });
  * ```
  *
  * @description https://docs.solidjs.com/reference/basic-reactivity/create-signal
@@ -512,7 +530,7 @@ export function createEffect<T>(
   }
   effect(compute as any, (effectFn as any).effect || effectFn, (effectFn as any).error, {
     user: true,
-    ...(__OBSERVE__ ? { ...options, name: options?.name ?? "effect" } : options)
+    ...options
   });
 }
 
@@ -550,12 +568,7 @@ export function createRenderEffect<T>(
   effectFn: EffectFunction<NoInfer<T>, T>,
   options?: EffectOptions
 ): void {
-  effect(
-    compute as any,
-    effectFn,
-    undefined,
-    __OBSERVE__ ? { ...options, name: options?.name ?? "effect" } : options
-  );
+  effect(compute as any, effectFn, undefined, options);
 }
 
 /**
@@ -607,10 +620,7 @@ export function createTrackedEffect(
   compute: () => void | (() => void),
   options?: BaseEffectOptions
 ): void {
-  trackedEffect(
-    compute,
-    __OBSERVE__ ? { ...options, name: options?.name ?? "trackedEffect" } : options
-  );
+  trackedEffect(compute, options);
 }
 
 /**
@@ -674,7 +684,7 @@ export function createReaction(
         },
         (effectFn as any).error,
         {
-          ...(__OBSERVE__ ? { ...options, name: options?.name ?? "effect" } : options),
+          ...options,
           user: true,
           defer: true
         }
@@ -890,13 +900,27 @@ export function refresh<T>(
 /** Falsy values a truthy predicate result is narrowed against. */
 export type Truthy<T> = Exclude<T, false | 0 | 0n | "" | null | undefined>;
 
+/**
+ * The global `AbortSignal` when the consumer's libs declare one (DOM,
+ * WebWorker, `@types/node`), else the surface `until` uses — so these
+ * declarations check under neither lib without widening the global type.
+ */
+type GlobalAbortSignal = typeof globalThis extends { AbortSignal: { prototype: infer S } }
+  ? S
+  : {
+      readonly aborted: boolean;
+      readonly reason: any;
+      addEventListener(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+      removeEventListener(type: "abort", listener: () => void): void;
+    };
+
 export interface UntilOptions {
   /** Reject with `TimeoutError` if the predicate has not turned truthy within
    * this many milliseconds. Strongly recommended when the confirming truth
    * arrives over a transport that can drop (sockets, subscriptions). */
   timeout?: number;
   /** Reject with `signal.reason` on abort. */
-  signal?: AbortSignal;
+  signal?: GlobalAbortSignal;
 }
 
 /**
@@ -939,12 +963,20 @@ export interface UntilOptions {
  *
  * Must be called *outside* a tracking scope.
  *
+ * Inside an action, call it from a step: after an `await`, put a bare `yield`
+ * before `yield until(...)`. The runtime cannot hook an async generator's
+ * `await` continuation, so the `until(...)` expression — which CREATES the
+ * predicate's reader — would otherwise run outside the transaction; created
+ * there it is born held (A29) and replays only at the commit its own promise
+ * holds open (#3482). See {@link action}.
+ *
  * @example
  * ```ts
  * const send = action(async function* (text: string) {
  *   const clientId = crypto.randomUUID();
  *   setMessages(m => { m.push({ clientId, text, pending: true }); }); // optimistic
  *   await socket.send({ clientId, text }); // fire-and-forget transport
+ *   yield; // re-enter the transaction after the await
  *   // Hold until the live source echoes the write (authoritative view —
  *   // the optimistic row above cannot satisfy this):
  *   yield until(() => messages.some(m => m.clientId === clientId), { timeout: 10_000 });
@@ -1187,7 +1219,15 @@ export function onSettled(callback: () => void | (() => void)): void {
   const owner = getOwner();
   owner && !(owner._config & CONFIG_CHILDREN_FORBIDDEN)
     ? trackedEffect(() => untrack(callback), __OBSERVE__ ? { name: "onSettled" } : undefined)
-    : globalQueue.enqueue(EFFECT_USER, () => {
+    : globalQueue.enqueue(EFFECT_USER, function fire() {
+        // Settled means derived. A settle that reverts optimism (or replays
+        // gated reads) only enqueues the affected subscribers; the pass after
+        // the commit re-derives them. Fired in the commit pass, the callback
+        // read the optimistic source already reverted beside a sync memo of it
+        // still holding the optimistic value — reads do not pull (#3411). Fall
+        // to the next pass while the heap has work; `run` swapped the queue,
+        // so this lands there, and `enqueue` keeps the drain alive.
+        if (dirtyQueue._max >= dirtyQueue._min) return globalQueue.enqueue(EFFECT_USER, fire);
         // Unowned, out-of-band fire (no owner, or a children-forbidden one this
         // one-shot must not bind to): a returned cleanup has no lifecycle to
         // attach to. Reject it in dev; in production the return is simply

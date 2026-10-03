@@ -11,12 +11,23 @@ import { resolve } from "path";
 const rootDir = resolve(import.meta.dirname);
 
 export default defineConfig({
-  plugins: [solidPlugin({ compiler, solid: { generate: "ssr", hydratable: true } })],
+  // `sourceNames`: what the vite plugin's dev/observe postures pass, so
+  // compiled `<Comp />` reaches the server `createComponent` with its label
+  // and diagnostics carry `ownerPath` (server-diagnostics.spec.tsx pins it).
+  // `serverComponents`: what the plugin passes for an SSR build with
+  // `serverFunctions.components` — attribute-slot positions (`ref`/`on*`, dynamic
+  // `class`/`style`) compile to runtime holes (test/server/frame-attribute-slots).
+  plugins: [
+    solidPlugin({
+      compiler,
+      solid: { generate: "ssr", hydratable: true, sourceNames: true, serverComponents: true }
+    })
+  ],
   test: {
     environment: "node",
     include: ["test/server/**/*.spec.tsx"],
     globals: true,
-    pool: "threads",
+    pool: "threads"
   },
   resolve: {
     conditions: ["node"],
@@ -29,7 +40,13 @@ export default defineConfig({
       "@solidjs/web/serialization/decode": resolve(rootDir, "serialization/dist/decode.js"),
       "@solidjs/web/serialization": resolve(rootDir, "serialization/dist/serialization.js"),
       "@solidjs/web": resolve(rootDir, "src/index.server.ts"),
+      // Before "solid-js": a string alias prefix-matches its subpaths.
+      "solid-js/internal": resolve(rootDir, "../solid/src/internal.ts"),
       "solid-js": resolve(rootDir, "../solid/src/server/index.ts"),
+      // The harness, from source, for the server scenario contract
+      // (diagnostics-server-scenario.spec.tsx): its `@solidjs/signals`
+      // resolves to the one workspace package, so it shares this `OBSERVE`.
+      "@solidjs/diagnostics": resolve(rootDir, "../diagnostics/src/index.ts")
     }
   }
 });

@@ -1,5 +1,7 @@
 use oxc_allocator::CloneIn;
-use oxc_ast::ast::{BinaryOperator, Expression, LogicalOperator, Statement, UnaryOperator};
+use oxc_ast::ast::{
+    ArrayExpressionElement, BinaryOperator, Expression, LogicalOperator, Statement, UnaryOperator,
+};
 use oxc_span::Span;
 
 use crate::dom::element::AstDomTransform;
@@ -24,6 +26,39 @@ pub(crate) struct DynamicSlot<'a> {
 }
 
 impl<'a> AstDomTransform<'a, '_> {
+    /// Port of Babel's `wrapReadShallow` (dom/template.ts): a non-inline
+    /// object-valued `style` / `class` binding is read in the TRACKED half of
+    /// its effect through `_$readShallow(value)` — `style()`/`className()`
+    /// enumerate their object in the untracked commit phase, so a proxy value
+    /// (a store sub-object, merged props) would be identity-reactive only.
+    /// Skipped when the expression is provably a string or a fresh literal.
+    fn wrap_read_shallow(&mut self, span: Span, key: &str, value: Expression<'a>) -> Expression<'a> {
+        if key != "class" && key != "style" {
+            return value;
+        }
+        let literal = match &value {
+            Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::BinaryExpression(_)
+            | Expression::ObjectExpression(_) => true,
+            // a class array of literals cannot hold a proxy either
+            Expression::ArrayExpression(array) => array.elements.iter().all(|element| {
+                matches!(
+                    element,
+                    ArrayExpressionElement::StringLiteral(_)
+                        | ArrayExpressionElement::TemplateLiteral(_)
+                        | ArrayExpressionElement::ObjectExpression(_)
+                )
+            }),
+            _ => false,
+        };
+        if literal {
+            return value;
+        }
+        self.template_state.uses_read_shallow = true;
+        self.call_identifier(span, "_$readShallow", vec![value])
+    }
+
     /// Port of Babel's `wrapDynamics` (dom/template.ts): one dynamic binding
     /// gets its own effect; multiple bindings share a single keyed effect
     /// with a previous-values object.
@@ -35,6 +70,24 @@ impl<'a> AstDomTransform<'a, '_> {
             return None;
         }
         self.template_state.uses_effect = true;
+        // `sourceNames.bindings`: the effect is named by what it writes — each
+        // binding's `<tag>.<attribute>` as written (undoing the `prop:` the
+        // locked DOM property plan added to `value`, `checked`, …), the
+        // merged effect listing all of its bindings — as a trailing `{ name }`
+        // options argument. Mirrors Babel's `wrapDynamics`.
+        let label = self.binding_names.then(|| {
+            dynamics
+                .iter()
+                .map(|slot| {
+                    let key = slot
+                        .key
+                        .strip_prefix("prop:")
+                        .filter(|local| dom_with_state(&slot.tag_name, local).is_some());
+                    format!("{}.{}", slot.tag_name, key.unwrap_or(&slot.key))
+                })
+                .collect::<std::vec::Vec<_>>()
+                .join(", ")
+        });
 
         if let Some(wrapper) = self.effect_wrapper.as_deref() {
             let group_id = (dynamics.len() > 1).then(|| self.semantic_trace.next_group_id());
@@ -61,6 +114,7 @@ impl<'a> AstDomTransform<'a, '_> {
                 slot.value
             };
 
+            let value = self.wrap_read_shallow(span, &slot.key, value);
             let getter = wrap_for_effect(self, span, value);
             let elem = self.identifier_expression(span, &slot.elem);
             let value_ident = self.identifier_expression(span, "_v$");
@@ -86,10 +140,14 @@ impl<'a> AstDomTransform<'a, '_> {
             };
             let setter = self.arrow_with_statements(span, params, self.ast().vec1(statement));
             let effect_local = self.effect_wrapper_local();
-            return Some(self.ast().statement_expression(
-                span,
-                self.call_identifier(span, &effect_local, vec![getter, setter]),
-            ));
+            let mut args = vec![getter, setter];
+            if let Some(label) = label {
+                args.push(self.name_options_object(span, &label));
+            }
+            return Some(
+                self.ast()
+                    .statement_expression(span, self.call_identifier(span, &effect_local, args)),
+            );
         }
 
         let span = dynamics
@@ -112,6 +170,7 @@ impl<'a> AstDomTransform<'a, '_> {
             } else {
                 slot.value
             };
+            let value = self.wrap_read_shallow(slot_span, &slot.key, value);
             value_props.push(self.object_property(slot_span, &prop_name, value));
 
             let elem = self.identifier_expression(slot_span, &slot.elem);
@@ -198,10 +257,26 @@ impl<'a> AstDomTransform<'a, '_> {
         let getter = self.arrow_with_return(span, std::vec::Vec::new(), values_object);
         let setter = self.arrow_with_destructured_params(span, &param_names, "_p$", statements);
         let effect_local = self.effect_wrapper_local();
-        Some(self.ast().statement_expression(
+        let mut args = vec![getter, setter];
+        if let Some(label) = label {
+            args.push(self.name_options_object(span, &label));
+        }
+        Some(
+            self.ast()
+                .statement_expression(span, self.call_identifier(span, &effect_local, args)),
+        )
+    }
+
+    /// `{ name: "<label>" }` — the options argument `sourceNames.bindings`
+    /// appends to `effect` and `insert` calls.
+    pub(crate) fn name_options_object(&self, span: Span, label: &str) -> Expression<'a> {
+        let value = self
+            .ast()
+            .expression_string_literal(span, self.ast().str(label), None);
+        self.ast().expression_object(
             span,
-            self.call_identifier(span, &effect_local, vec![getter, setter]),
-        ))
+            self.ast().vec1(self.object_property(span, "name", value)),
+        )
     }
 
     /// `_p$?.<name>`

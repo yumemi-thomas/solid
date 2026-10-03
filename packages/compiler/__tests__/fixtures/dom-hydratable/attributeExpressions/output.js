@@ -5,10 +5,10 @@ import { insert as _$insert } from "r-dom";
 import { scope as _$scope } from "r-dom";
 import { memo as _$memo } from "r-dom";
 import { spread as _$spread } from "r-dom";
-import { mergeProps as _$mergeProps } from "r-dom";
 import { ref as _$ref } from "r-dom";
 import { style as _$style } from "r-dom";
 import { setStyleProperty as _$setStyleProperty } from "r-dom";
+import { readShallow as _$readShallow } from "r-dom";
 import { className as _$className } from "r-dom";
 import { effect as _$effect } from "r-dom";
 import { setAttribute as _$setAttribute } from "r-dom";
@@ -79,35 +79,43 @@ let link;
 var _el$ = _$getNextElement(_tmpl$);
 var _el$2 = _el$.firstChild;
 var _el$3 = _el$2.firstChild;
-_$spread(_el$, _$mergeProps({ id: "main" }, results, {
-	class: { selected: unknown },
-	style: { color }
-}), true);
-_$spread(_el$2, _$mergeProps({ id }, results, {
-	foo: true,
-	disabled: true,
-	get title() {
-		return welcoming();
-	},
-	get style() {
-		return {
-			"background-color": color(),
-			"margin-right": "40px"
-		};
-	},
-	get ["class"]() {
-		return ["base", {
-			dynamic: dynamic(),
-			selected
-		}];
+_$spread(_el$, [
+	{ id: "main" },
+	results,
+	{
+		class: { selected: unknown },
+		style: { color }
 	}
-}), true);
+], true);
+_$spread(_el$2, [
+	{ id },
+	results,
+	{
+		foo: true,
+		disabled: true,
+		get title() {
+			return welcoming();
+		},
+		get style() {
+			return {
+				"background-color": color(),
+				"margin-right": "40px"
+			};
+		},
+		get "class"() {
+			return ["base", {
+				dynamic: dynamic(),
+				selected
+			}];
+		}
+	}
+], true);
+_$claimElement(_el$3);
+_$className(_el$3, { "ccc ddd": true });
 var _ref$ = link;
 typeof _ref$ === "function" || Array.isArray(_ref$) ? _$ref(() => {
 	return _ref$;
 }, _el$3) : link = _el$3;
-_$claimElement(_el$3);
-_$className(_el$3, { "ccc ddd": true });
 _$runHydrationEvents();
 const template = _el$;
 var _el$4 = _$getNextElement(_tmpl$2);
@@ -152,7 +160,7 @@ const template4 = _el$10;
 const template5 = _$getNextElement(_tmpl$5);
 var _el$12 = _$getNextElement(_tmpl$4);
 _$setProperty(_el$12, "textContent", "Hi");
-_$effect(() => someStyle(), (_v$, _$p) => {
+_$effect(() => _$readShallow(someStyle()), (_v$, _$p) => {
 	_$style(_el$12, _v$, _$p);
 });
 const template6 = _el$12;
@@ -252,7 +260,7 @@ _$effect(() => "t" in test, (_v$) => {
 const template23 = _el$30;
 var _el$31 = _$getNextElement(_tmpl$16);
 _$claimElement(_el$31);
-_$spread(_el$31, _$mergeProps(props, { something: true }), false);
+_$spread(_el$31, [props, { something: true }], false);
 _$runHydrationEvents();
 const template24 = _el$31;
 var _el$32 = _$getNextElement(_tmpl$17);
@@ -263,18 +271,23 @@ _$insert(_el$32, _$scope(() => {
 	return props.children;
 }), _el$34, _el$35);
 _$claimElement(_el$36);
-_$spread(_el$36, _$mergeProps(props, { something: true }), false);
+_$spread(_el$36, [props, { something: true }], false);
 _$runHydrationEvents();
 const template25 = _el$32;
 var _el$37 = _$getNextElement(_tmpl$18);
-_$spread(_el$37, _$mergeProps({
+_$spread(_el$37, [{
 	start: "Hi",
 	middle
-}, spread), true);
+}, spread], true);
 _$runHydrationEvents();
 const template26 = _el$37;
 var _el$38 = _$getNextElement(_tmpl$18);
-_$spread(_el$38, _$mergeProps({ start: "Hi" }, first, { middle }, second), true);
+_$spread(_el$38, [
+	{ start: "Hi" },
+	first,
+	{ middle },
+	second
+], true);
 _$runHydrationEvents();
 const template27 = _el$38;
 var _el$39 = _$getNextElement(_tmpl$19);
@@ -307,28 +320,28 @@ const template32 = _$getNextElement(_tmpl$4);
 const template33 = [
 	(() => {
 		var _el$51 = _$getNextElement(_tmpl$21);
-		_$effect(() => styles.button, (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles.button), (_v$, _$p) => {
 			_$className(_el$51, _v$, _$p);
 		});
 		return _el$51;
 	})(),
 	(() => {
 		var _el$52 = _$getNextElement(_tmpl$21);
-		_$effect(() => styles["foo--bar"], (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles["foo--bar"]), (_v$, _$p) => {
 			_$className(_el$52, _v$, _$p);
 		});
 		return _el$52;
 	})(),
 	(() => {
 		var _el$53 = _$getNextElement(_tmpl$21);
-		_$effect(() => styles.foo.bar, (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles.foo.bar), (_v$, _$p) => {
 			_$className(_el$53, _v$, _$p);
 		});
 		return _el$53;
 	})(),
 	(() => {
 		var _el$54 = _$getNextElement(_tmpl$21);
-		_$effect(() => styles[foo()], (_v$, _$p) => {
+		_$effect(() => _$readShallow(styles[foo()]), (_v$, _$p) => {
 			_$className(_el$54, _v$, _$p);
 		});
 		return _el$54;
@@ -508,30 +521,35 @@ _$spread(_el$104, { ...propsSpread }, false);
 _$runHydrationEvents();
 const template81 = _el$104;
 var _el$105 = _$getNextElement(_tmpl$4);
-_$spread(_el$105, _$mergeProps(propsSpread, {
-	get ["data-dynamic"]() {
+_$spread(_el$105, [propsSpread, {
+	get "data-dynamic"() {
 		return color();
 	},
 	"data-static": /* @static */ color()
-}), false);
+}], false);
 _$runHydrationEvents();
 const template82 = _el$105;
 var _el$106 = _$getNextElement(_tmpl$4);
-_$spread(_el$106, _$mergeProps({ ...propsSpread }, {
-	get ["data-dynamic"]() {
+_$spread(_el$106, [{ ...propsSpread }, {
+	get "data-dynamic"() {
 		return color();
 	},
 	"data-static": /* @static */ color()
-}), false);
+}], false);
 _$runHydrationEvents();
 const template83 = _el$106;
 var _el$107 = _$getNextElement(_tmpl$4);
-_$spread(_el$107, _$mergeProps({ ...propsSpread1 }, propsSpread2, { ...propsSpread3 }, {
-	get ["data-dynamic"]() {
-		return color();
-	},
-	"data-static": /* @static */ color()
-}), false);
+_$spread(_el$107, [
+	{ ...propsSpread1 },
+	propsSpread2,
+	{ ...propsSpread3 },
+	{
+		get "data-dynamic"() {
+			return color();
+		},
+		"data-static": /* @static */ color()
+	}
+], false);
 _$runHydrationEvents();
 const template84 = _el$107;
 // STATIC PROPERTY OF OBJECT ACCESS
@@ -548,7 +566,7 @@ _$style(
 );
 const template85 = _el$108;
 var _el$109 = _$getNextElement(_tmpl$4);
-_$effect(() => styleProp.style, (_v$, _$p) => {
+_$effect(() => _$readShallow(styleProp.style), (_v$, _$p) => {
 	_$style(_el$109, _v$, _$p);
 });
 const template86 = _el$109;
@@ -563,8 +581,8 @@ _$insert(_el$110, _$scope(() => {
 _$effect(() => {
 	return {
 		e: count(),
-		t: style,
-		a: style
+		t: _$readShallow(style),
+		a: _$readShallow(style)
 	};
 }, ({ e, t, a }, _p$) => {
 	e !== _p$?.e && _$setAttribute(_el$110, "aria-label", e);
@@ -597,7 +615,7 @@ _$effect(() => !!isActive(), (_v$) => {
 });
 const template90 = _el$113;
 var _el$114 = _$getNextElement(_tmpl$4);
-_$effect(() => ["todo", props.active], (_v$, _$p) => {
+_$effect(() => _$readShallow(["todo", props.active]), (_v$, _$p) => {
 	_$className(_el$114, _v$, _$p);
 });
 const template91 = _el$114;
@@ -615,11 +633,11 @@ _$effect(() => ["todo", {
 });
 const template93 = _el$116;
 var _el$117 = _$getNextElement(_tmpl$4);
-_$effect(() => [
+_$effect(() => _$readShallow([
 	"todo",
 	{ active: isActive() },
 	props.extra
-], (_v$, _$p) => {
+]), (_v$, _$p) => {
 	_$className(_el$117, _v$, _$p);
 });
 const template94 = _el$117;
@@ -636,14 +654,14 @@ _$effect(() => [
 });
 const template95 = _el$118;
 var _el$119 = _$getNextElement(_tmpl$51);
-_$spread(_el$119, _$mergeProps(spread, {
-	get ["stroke-width"]() {
+_$spread(_el$119, [spread, {
+	get "stroke-width"() {
 		return cond() ? width() : 2;
 	},
 	get fill() {
 		return cond() && color();
 	}
-}), false);
+}], false);
 _$runHydrationEvents();
 // #2959: conditional attribute merged into a spread must stay a bare
 // expression — a client-only condition memo would allocate a hydration id

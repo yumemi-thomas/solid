@@ -19,6 +19,10 @@ pub(crate) struct AstDomTransform<'a, 'source> {
     pub(crate) module_name: &'source str,
     pub(crate) hydratable: bool,
     pub(crate) dev: bool,
+    pub(crate) component_names: bool,
+    /// Babel's `sourceNames.bindings` on DOM output: compiled binding
+    /// effects carry the target they write as a trailing options argument.
+    pub(crate) binding_names: bool,
     pub(crate) context_to_custom_elements: bool,
     pub(crate) delegate_events: bool,
     pub(crate) delegated_events: std::vec::Vec<String>,
@@ -94,6 +98,8 @@ pub(crate) struct AstDomTransform<'a, 'source> {
 pub(crate) struct DomTransformConfig {
     pub(crate) hydratable: bool,
     pub(crate) dev: bool,
+    pub(crate) component_names: bool,
+    pub(crate) binding_names: bool,
     pub(crate) context_to_custom_elements: bool,
     pub(crate) delegate_events: bool,
     pub(crate) delegated_events: std::vec::Vec<String>,
@@ -135,6 +141,8 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
             module_name,
             hydratable: config.hydratable,
             dev: config.dev,
+            component_names: config.component_names,
+            binding_names: config.binding_names,
             context_to_custom_elements: config.context_to_custom_elements,
             delegate_events: config.delegate_events,
             delegated_events: config.delegated_events,

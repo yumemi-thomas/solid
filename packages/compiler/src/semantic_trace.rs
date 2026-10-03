@@ -15,7 +15,7 @@ pub const SEMANTIC_TRACE_VERSION: u32 = 3;
 
 /// Exact upstream revision whose compiler behavior this semantic-only branch
 /// observes. The fork may add facts, but it may not change that behavior.
-pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "8cfa2724f893e07b03e977bd2902c6d0e6019ca7";
+pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "5efaf260becb32293f2bcb4d32f8be72be6de674";
 
 /// Revision containing the trace-v3 semantic implementation. This is filled
 /// with the first semantic implementation commit before the distribution pin
@@ -59,6 +59,9 @@ pub struct SemanticTraceConfig {
     pub mode: SemanticTraceMode,
     pub hydratable: bool,
     pub server_components: bool,
+    pub hoist_props: bool,
+    pub source_names_components: bool,
+    pub source_names_bindings: bool,
     pub dev: bool,
     pub source_map: bool,
     pub context_to_custom_elements: bool,
@@ -1827,6 +1830,9 @@ impl SemanticTraceConfig {
             mode,
             hydratable: options.hydratable,
             server_components: options.server_components,
+            hoist_props: options.hoist_props,
+            source_names_components: options.source_names.components,
+            source_names_bindings: options.source_names.bindings,
             dev: options.dev,
             source_map: options.source_map,
             context_to_custom_elements: options.context_to_custom_elements,
