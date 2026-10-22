@@ -179,6 +179,14 @@ function Counter() {
 
 The name comes from the first element of the array pattern, the variable binding, the object-literal property key, or the class field the call initialises; a call in any other position (a hole in the pattern, an argument, an assignment) is left alone. Inside a non-component function — anything not PascalCase: `createCounter`, `useTheme`, a method — the name is prefixed with that function's, so a composed primitive's nodes fold under it (`createCounter.value`, `createCounter.twice`); components contribute no prefix, and anonymous callbacks inherit the nearest named function. Only calls that resolve to imports from `solid-js` or `@solidjs/signals` are named (aliases and namespace imports included; a shadowing local or another library's `createSignal` is not). The pass never overrides an explicit `name`, leaves a spread or non-literal options argument alone, fills omitted positional arguments with `void 0`, and reaches the call through `as`/`satisfies`/`!` and type arguments. Named: `createSignal`, `createMemo`, `createOptimistic`, `createStore`, `createOptimisticStore`, `createProjection`. A two-argument `createStore(x, y)` is only named when `y` is a non-empty object literal of option keys (`shallow`/`name`) — otherwise it may be a derive passed by reference with its seed.
 
+### Semantic fact side channel (unstable)
+
+The host-independent `compile` API can set `CompileOptions::semantic_trace` for DOM or SSR compilation. Trace version 3 reports reconciled source and generated operations with independent trigger, schedule, tracking, cardinality, and owner relations. It binds the exact compiler revisions, source, generated code, optional source map, and complete compiler configuration by identity or SHA-256 digest. Collection is output-neutral and fails the compilation when the source census cannot be reconciled with an actual lowering decision.
+
+`transformDirectives` accepts `semanticTrace: true` and returns a JSON `semanticTrace` side channel for `"use server"` transformations. It records source/directive spans, export identity, client-reference creation, server registration, and the exact transformation mode without claiming runtime transport behavior.
+
+These facts are an unstable machine interface for exact-revision consumers. They do not change lowering, diagnostics, runtime behavior, or the supported Node `transform()` contract.
+
 ## Rust compiler core
 
 The crate also exposes a host-independent Rust API. The crate name is `solidjs-compiler`; the Node `transform()` delegates to the same core.

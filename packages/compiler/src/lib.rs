@@ -27,6 +27,7 @@ mod lazy;
 mod node_adapter;
 #[cfg(feature = "node")]
 mod refresh;
+mod semantic_trace;
 mod shared;
 #[cfg(feature = "node")]
 mod source_names;
@@ -39,6 +40,22 @@ pub use compiler::{
     CompileOptions, CompileOutput, Generate, Renderer, SourceNames, Syntax, Wrapper, compile,
 };
 pub use error::{CompileError, CompileErrorKind};
+pub use semantic_trace::{
+    CallbackDecision, ComponentRenderSite, DeferredCallbackSite, ExecutionCardinality,
+    ExecutionDisposition, ExecutionSchedule, ExecutionSemantics, ExecutionSite, ExecutionSiteKind,
+    ExecutionTrigger, GeneratedOperation, GeneratedOperationKind, OwnerEstablishment,
+    OwnerRelation, OwnershipDecision, OwnershipSite, SEMANTIC_TRACE_IMPLEMENTATION_REVISION,
+    SEMANTIC_TRACE_UPSTREAM_REVISION, SEMANTIC_TRACE_VERSION, SemanticCompilerIdentity,
+    SemanticRendererConfig, SemanticTrace, SemanticTraceConfig, SemanticTraceIdentity,
+    SemanticTraceMode, ServerFunctionImportConfig, ServerFunctionOperation, ServerFunctionScope,
+    ServerFunctionSemanticTrace, ServerFunctionTraceConfig, ServerFunctionTraceIdentity,
+    ServerFunctionTransformEnv, ServerFunctionTransformMode, SourceSpan, TerminalDecision,
+    TrackingRelation, ValueDecision,
+};
+
+/// Cargo package version of the compiler implementation producing semantic
+/// traces. Consumers should pair this with the trace semantics revision.
+pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "tsrx")]
 pub use tsrx::{
     TsrxEmbeddedRegion, TsrxEmbeddedRegionKind, TsrxTypecheckMapping, TsrxTypecheckProjection,

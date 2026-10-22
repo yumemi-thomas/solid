@@ -56,6 +56,9 @@ pub(crate) struct FunctionMeta {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) exports: Vec<String>,
+    pub(crate) source_span: crate::semantic_trace::SourceSpan,
+    pub(crate) directive_span: crate::semantic_trace::SourceSpan,
+    pub(crate) scope: crate::semantic_trace::ServerFunctionScope,
 }
 
 pub(crate) struct DirectivesTransform<'a> {
@@ -88,6 +91,7 @@ pub(crate) struct DirectivesTransform<'a> {
     /// Babel implementation's `StateContext.orphans`.
     pub(crate) orphans: std::collections::HashSet<String>,
     module_level_applied: bool,
+    module_directive_span: Option<crate::semantic_trace::SourceSpan>,
 }
 
 enum RuntimeImport {
@@ -123,6 +127,7 @@ impl<'a> DirectivesTransform<'a> {
             valid: false,
             orphans: std::collections::HashSet::new(),
             module_level_applied: false,
+            module_directive_span: None,
         }
     }
 
@@ -145,6 +150,11 @@ impl<'a> DirectivesTransform<'a> {
             .iter()
             .any(|directive| directive.expression.value == self.directive);
         if is_module_level {
+            self.module_directive_span = program
+                .directives
+                .iter()
+                .find(|directive| directive.expression.value == self.directive)
+                .map(|directive| directive.span.into());
             self.module_level_applied = true;
             program
                 .directives
@@ -516,6 +526,12 @@ impl<'a> DirectivesTransform<'a> {
             let name = binding_descriptive_name(program, key);
             let Some(name) = name else { continue };
             let exported_names = exports.exported_names_for(key);
+            let Some(source_span) = binding_declarator(program, key)
+                .and_then(|declarator| declarator.init.as_ref())
+                .map(|expression| crate::semantic_trace::SourceSpan::from(expression.span()))
+            else {
+                continue;
+            };
             let fn_id = self.create_id(&name);
             // Babel's order inside `transformFunction`: register import
             // first, then the `serverFunction_N` uid, then (during
@@ -543,6 +559,11 @@ impl<'a> DirectivesTransform<'a> {
                 id: fn_id,
                 name,
                 exports: exported_names,
+                source_span,
+                directive_span: self
+                    .module_directive_span
+                    .expect("module-level transform records its directive span"),
+                scope: crate::semantic_trace::ServerFunctionScope::Module,
             });
         }
 
@@ -559,10 +580,21 @@ impl<'a> DirectivesTransform<'a> {
                 continue;
             };
             let id = self.create_id(&name);
+            let Some(source_span) = binding_declarator(program, key)
+                .and_then(|declarator| declarator.init.as_ref())
+                .map(|expression| crate::semantic_trace::SourceSpan::from(expression.span()))
+            else {
+                continue;
+            };
             self.functions.push(FunctionMeta {
                 id: id.clone(),
                 name: name.clone(),
                 exports: exports.exported_names_for(key),
+                source_span,
+                directive_span: self
+                    .module_directive_span
+                    .expect("module-level transform records its directive span"),
+                scope: crate::semantic_trace::ServerFunctionScope::Module,
             });
             source_ids.push((key, id, name));
         }
@@ -658,6 +690,8 @@ impl<'a> DirectivesTransform<'a> {
         &mut self,
         expression: &mut Expression<'a>,
         name: &str,
+        source_span: Span,
+        directive_span: Span,
         top_index: usize,
         insertions: &mut Vec<(usize, Statement<'a>)>,
     ) {
@@ -666,6 +700,9 @@ impl<'a> DirectivesTransform<'a> {
             id: fn_id.clone(),
             name: name.to_string(),
             exports: Vec::new(),
+            source_span: source_span.into(),
+            directive_span: directive_span.into(),
+            scope: crate::semantic_trace::ServerFunctionScope::Function,
         });
         match self.mode {
             Mode::Server => {
@@ -869,29 +906,40 @@ impl<'a> FunctionLevelVisitor<'_, 'a> {
             .retain(|entry| entry.expression.value != directive);
     }
 
+    fn directive_span(&self, body: &oxc_ast::ast::FunctionBody<'a>) -> Option<Span> {
+        if !self.body_has_directive(body) {
+            return None;
+        }
+        body.directives
+            .iter()
+            .find(|directive| directive.expression.value == self.transform.directive)
+            .map(|directive| directive.span)
+    }
+
     /// Applies the transform when the expression is a marked function.
     /// Returns true when the expression was replaced (children must not be
     /// walked — Babel's `replaceWith` short-circuits the old subtree).
     fn maybe_transform_expression(&mut self, expression: &mut Expression<'a>) -> bool {
-        let (has_directive, own_name) = match expression {
+        let source_span = expression.span();
+        let (directive_span, own_name) = match expression {
             Expression::ArrowFunctionExpression(arrow) if !arrow.is_expression() => (
                 arrow
                     .get_function_body()
-                    .is_some_and(|body| self.body_has_directive(body)),
+                    .and_then(|body| self.directive_span(body)),
                 None,
             ),
             Expression::FunctionExpression(function) => (
                 function
                     .body
                     .as_ref()
-                    .is_some_and(|body| self.body_has_directive(body)),
+                    .and_then(|body| self.directive_span(body)),
                 function.id.as_ref().map(|id| id.name.to_string()),
             ),
             _ => return false,
         };
-        if !has_directive {
+        let Some(directive_span) = directive_span else {
             return false;
-        }
+        };
         match expression {
             Expression::ArrowFunctionExpression(arrow) => {
                 if let Some(body) = arrow.get_function_body_mut() {
@@ -919,8 +967,14 @@ impl<'a> FunctionLevelVisitor<'_, 'a> {
         };
         let top_index = self.top_index;
         let mut insertions = std::mem::take(&mut self.insertions);
-        self.transform
-            .transform_marked_function(expression, &name, top_index, &mut insertions);
+        self.transform.transform_marked_function(
+            expression,
+            &name,
+            source_span,
+            directive_span,
+            top_index,
+            &mut insertions,
+        );
         self.insertions = insertions;
         true
     }

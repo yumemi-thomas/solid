@@ -5,6 +5,7 @@
 use crate::error::Result;
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{Expression, JSXChild, JSXExpression, JSXFragment};
+use oxc_span::GetSpan;
 
 use crate::shared::array::expression_to_array_element;
 use crate::shared::ast::arrow_return_expression;
@@ -14,6 +15,7 @@ use crate::shared::utils::{decode_html_entities, trim_jsx_text};
 pub(crate) fn lower_fragment<'a, C: ModeLower<'a>>(
     ctx: &mut C,
     fragment: &JSXFragment<'a>,
+    site_kind: crate::semantic_trace::ExecutionSiteKind,
 ) -> Result<Expression<'a>> {
     let allocator = ctx.condition_allocator();
     let ast = mode_ast(ctx);
@@ -40,30 +42,62 @@ pub(crate) fn lower_fragment<'a, C: ModeLower<'a>>(
                 let dynamic =
                     ctx.classify()
                         .is_dynamic(Some(container.span.start), &expression, false);
+                ctx.trace_value(
+                    container.expression.span(),
+                    site_kind,
+                    if dynamic {
+                        crate::semantic_trace::ValueDecision::ReactiveRerun
+                    } else {
+                        crate::semantic_trace::ValueDecision::EagerOnce
+                    },
+                );
                 if !dynamic {
                     values.push(expression);
                     continue;
                 }
+                // The emission spans stay Babel's (`container.span`); the
+                // child thunk's own memo fact lands on the wrapped source
+                // expression, the same span this hole's `ExecutionSite` was
+                // recorded at above. A condition inside the hole records its
+                // own memos at their tests.
                 let thunk = dynamic_child_thunk(ctx, container.span, expression);
-                values.push(ctx.memo_wrap_dynamic_child(container.span, thunk));
+                values.push(ctx.memo_wrap_dynamic_child(
+                    container.span,
+                    container.expression.span(),
+                    thunk,
+                ));
             }
             JSXChild::Element(element) => {
                 values.push(ctx.lower_child_element(element)?);
             }
             JSXChild::Fragment(fragment) => {
-                values.push(lower_fragment(ctx, fragment)?);
+                values.push(lower_fragment(ctx, fragment, site_kind)?);
             }
             JSXChild::Spread(spread) => {
                 // Babel's `JSXSpreadChild` branch of `transformNode`: dynamic
                 // spreads become an explicit thunk the fragment memo-wraps;
                 // static ones pass through raw.
                 let expression = spread.expression.clone_in(allocator);
-                if !ctx.classify().is_dynamic(None, &expression, false) {
+                let dynamic = ctx.classify().is_dynamic(None, &expression, false);
+                ctx.trace_value(
+                    spread.expression.span(),
+                    site_kind,
+                    if dynamic {
+                        crate::semantic_trace::ValueDecision::ReactiveRerun
+                    } else {
+                        crate::semantic_trace::ValueDecision::EagerOnce
+                    },
+                );
+                if !dynamic {
                     values.push(expression);
                     continue;
                 }
                 let thunk = arrow_return_expression(allocator, spread.span, expression);
-                values.push(ctx.memo_wrap_dynamic_child(spread.span, thunk));
+                values.push(ctx.memo_wrap_dynamic_child(
+                    spread.span,
+                    spread.expression.span(),
+                    thunk,
+                ));
             }
         }
     }

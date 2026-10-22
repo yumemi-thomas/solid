@@ -6,6 +6,9 @@ use oxc_span::SourceType;
 
 use crate::dom::element::{AstDomTransform, DomTransformConfig};
 use crate::error::CompileError;
+use crate::semantic_trace::{
+    ExecutionCensus, SemanticTrace, SemanticTraceConfig, SemanticTraceMode, TraceRecorder,
+};
 use crate::ssr::transform::AstSsrTransform;
 use crate::universal::transform::{
     AstUniversalTransform, DynamicDomConfig, UniversalWrapperConfig,
@@ -152,6 +155,9 @@ pub struct CompileOptions {
     pub omit_last_closing_tag: bool,
     pub built_ins: Vec<String>,
     pub renderers: Vec<Renderer>,
+    /// Collect DOM-lowering execution facts without changing generated code.
+    /// Unsupported output modes fail closed with a configuration error.
+    pub semantic_trace: bool,
 }
 
 impl Default for CompileOptions {
@@ -183,6 +189,7 @@ impl Default for CompileOptions {
             omit_last_closing_tag: true,
             built_ins: default_built_ins(),
             renderers: Vec::new(),
+            semantic_trace: false,
         }
     }
 }
@@ -192,6 +199,8 @@ impl Default for CompileOptions {
 pub struct CompileOutput {
     pub code: String,
     pub source_map: Option<String>,
+    /// Present only when `CompileOptions::semantic_trace` is enabled.
+    pub semantic_trace: Option<SemanticTrace>,
     /// Extracted TSRX stylesheet output. `None` for the JSX route.
     pub css: Option<String>,
     /// Space-separated TSRX scope hashes, matching `@tsrx/core`.
@@ -222,6 +231,11 @@ pub(crate) fn compile_for_node_adapter(
 }
 
 fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput, CompileError> {
+    if options.semantic_trace && !matches!(options.generate, Generate::Dom | Generate::Ssr) {
+        return Err(CompileError::configuration(
+            "semantic tracing currently requires the DOM or SSR generate",
+        ));
+    }
     let authored_source = source;
     let tsrx_route = match options.syntax {
         Syntax::Jsx => false,
@@ -231,6 +245,16 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             .as_deref()
             .is_some_and(|filename| filename.ends_with(".tsrx")),
     };
+    if options.semantic_trace && options.source_names.locations {
+        return Err(CompileError::configuration(
+            "semantic tracing cannot yet bind sourceNames.locations into its configuration identity",
+        ));
+    }
+    if options.semantic_trace && tsrx_route {
+        return Err(CompileError::configuration(
+            "semantic tracing cannot yet map TSRX lowering to authored source sites",
+        ));
+    }
 
     #[cfg(not(feature = "tsrx"))]
     if tsrx_route {
@@ -267,6 +291,11 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     if let Some(lib) = options.require_import_source.as_deref()
         && !has_jsx_import_source(&program, source, lib)
     {
+        if options.semantic_trace {
+            return Err(CompileError::configuration(
+                "semantic tracing cannot claim coverage for a file skipped by requireImportSource",
+            ));
+        }
         #[cfg(feature = "tsrx")]
         let (css, css_hash) = if tsrx_route {
             (direct_css.clone(), direct_css_hash.clone())
@@ -281,6 +310,7 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             // extracted and remains available to pipeline integrations.
             code: authored_source.to_string(),
             source_map: None,
+            semantic_trace: None,
             css,
             css_hash,
         });
@@ -293,14 +323,27 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
 
     crate::shared::component_children::anchor_coverage_pragmas(&mut program, source);
 
+    let mut semantic_recorder = None;
     match options.generate {
         Generate::Dom => {
+            let census = options.semantic_trace.then(|| {
+                ExecutionCensus::from_program(
+                    &program,
+                    &options.built_ins,
+                    options.inline_styles,
+                    SemanticTraceMode::Dom,
+                )
+            });
             let mut transform = AstDomTransform::new(
                 &allocator,
                 source,
                 &options.module_name,
                 dom_transform_config(options, options.built_ins.clone()),
             );
+            if let Some(census) = census {
+                transform.semantic_trace =
+                    TraceRecorder::new(census, matches!(options.effect_wrapper, Wrapper::Default));
+            }
             transform.visit_program(&mut program);
             if let Some(error) = transform.error.take() {
                 return Err(CompileError::transform(error));
@@ -308,6 +351,7 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             transform
                 .prepend_helpers(&mut program)
                 .map_err(|error| CompileError::transform(error.to_string()))?;
+            semantic_recorder = Some(transform.semantic_trace);
         }
         Generate::Dynamic => {
             if let Some(renderer) = dom_renderer(&options.renderers) {
@@ -343,6 +387,14 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             }
         }
         Generate::Ssr => {
+            let census = options.semantic_trace.then(|| {
+                ExecutionCensus::from_program(
+                    &program,
+                    &options.built_ins,
+                    options.inline_styles,
+                    SemanticTraceMode::Ssr,
+                )
+            });
             let mut transform = AstSsrTransform::new(
                 &allocator,
                 source,
@@ -355,6 +407,9 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
                 options.static_marker.clone(),
                 options.built_ins.clone(),
             );
+            if let Some(census) = census {
+                transform.semantic_trace = TraceRecorder::new(census, false);
+            }
             if options.hoist_props {
                 transform.enable_hoist_props();
             }
@@ -364,6 +419,7 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
             }
             transform.hoist_props(&mut program, options.dev);
             transform.prepend_helpers(&mut program);
+            semantic_recorder = Some(transform.semantic_trace);
         }
         Generate::Universal => {
             let mut transform = AstUniversalTransform::new(
@@ -399,6 +455,21 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     let source_map = build.map.as_ref().map(|map| map.to_json_string());
     #[cfg(not(feature = "tsrx"))]
     let source_map = build.map.as_ref().map(|map| map.to_json_string());
+    let code = build.code;
+
+    let semantic_trace = semantic_recorder
+        .map(|recorder| {
+            recorder.finish(
+                source,
+                SemanticTraceConfig::from_options(options)
+                    .expect("only traceable modes install a semantic recorder"),
+                &code,
+                source_map.as_deref(),
+            )
+        })
+        .transpose()
+        .map_err(CompileError::transform)?
+        .flatten();
 
     #[cfg(feature = "tsrx")]
     let (css, css_hash) = if tsrx_route {
@@ -410,8 +481,9 @@ fn compile_inner(source: &str, options: &CompileOptions) -> Result<CompileOutput
     let (css, css_hash) = (None, None);
 
     Ok(CompileOutput {
-        code: build.code,
+        code,
         source_map,
+        semantic_trace,
         css,
         css_hash,
     })
