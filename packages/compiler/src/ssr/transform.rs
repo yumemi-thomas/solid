@@ -886,6 +886,9 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         // template needs no `ssr()` wrapper — the raw HTML template reference
         // suffices (Babel returns the `_tmpl$` id directly).
         if wont_escape && template.parts.len() == 1 {
+            // The template's hoisted declarations are not emitted, so its
+            // `_ref$N` expressions never run.
+            self.semantic_trace.template_dropped(span);
             return Ok(self
                 .ast()
                 .expression_identifier(span, self.ast().ident(&template_local)));
@@ -2436,11 +2439,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                 self.semantic_trace.callback(
                     semantic_span,
                     crate::semantic_trace::ExecutionSiteKind::Ref,
-                    if matches!(&expression, Expression::CallExpression(_)) {
-                        crate::semantic_trace::CallbackDecision::RefFactoryOnly
-                    } else {
-                        crate::semantic_trace::CallbackDecision::Elided
-                    },
+                    template_ref_decision(&expression),
                 );
             }
             // `var _ref$N = <expr>;` keeps the evaluation without emitting
@@ -4349,6 +4348,49 @@ fn spread_element_ref_decision(
         crate::semantic_trace::CallbackDecision::RefFactoryOnly
     } else {
         crate::semantic_trace::CallbackDecision::Elided
+    }
+}
+
+/// The semantic decision for a template element's named `ref`. The template
+/// path hoists every non-literal ref as `_ref$N = <expr>`, evaluated once
+/// inline where the template is finalized (unless the whole template is
+/// dropped; see `finalize_template`). The site is a ref factory evaluation
+/// unless evaluating it provably runs no code: a binding read, `this`, a
+/// literal, or a function whose body never runs on the server. Anything
+/// else (calls, member reads that may hit getters, operators that may
+/// coerce, arrays, conditionals) is recorded as evaluated. Observational
+/// only: the lowering emits the same declaration for every shape.
+fn template_ref_decision(expression: &Expression<'_>) -> crate::semantic_trace::CallbackDecision {
+    let mut inner = expression;
+    loop {
+        inner = match inner {
+            Expression::ParenthesizedExpression(it) => &it.expression,
+            Expression::TSAsExpression(it) => &it.expression,
+            Expression::TSSatisfiesExpression(it) => &it.expression,
+            Expression::TSNonNullExpression(it) => &it.expression,
+            Expression::TSTypeAssertion(it) => &it.expression,
+            Expression::TSInstantiationExpression(it) => &it.expression,
+            _ => break,
+        };
+    }
+    let runs_no_code = match inner {
+        Expression::Identifier(_)
+        | Expression::ThisExpression(_)
+        | Expression::NullLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::FunctionExpression(_) => true,
+        Expression::TemplateLiteral(literal) => literal.expressions.is_empty(),
+        _ => false,
+    };
+    if runs_no_code {
+        crate::semantic_trace::CallbackDecision::Elided
+    } else {
+        crate::semantic_trace::CallbackDecision::RefFactoryOnly
     }
 }
 
