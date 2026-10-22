@@ -21,7 +21,7 @@ pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "5b1b777648a89b6e207e8bb78514
 /// with the first semantic implementation commit before the distribution pin
 /// is cut; the following identity-only commit does not change lowering or the
 /// meaning of any fact.
-pub const SEMANTIC_TRACE_IMPLEMENTATION_REVISION: &str = "c04c48779812d3d87166da3741c625748458c62f";
+pub const SEMANTIC_TRACE_IMPLEMENTATION_REVISION: &str = "8148b1530f97d3117fab00cf2f862b5a244c1369";
 
 use crate::shared::attr_plan::static_style_key;
 use crate::shared::bindings::BindingTable;
