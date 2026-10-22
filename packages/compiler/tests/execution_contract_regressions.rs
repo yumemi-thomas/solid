@@ -210,15 +210,31 @@ fn ssr_trace_distinguishes_render_callbacks_discarded_handlers_and_claims() {
             OwnerRelation::AmbientAtGeneratedInvocation
         );
     }
-    for text in ["p.onClick", "p.ref"] {
-        let site = plain
-            .sites
-            .iter()
-            .find(|site| source_text(source, site.span.start, site.span.end) == text)
-            .expect("discarded SSR callback");
-        assert_eq!(site.semantics.disposition, ExecutionDisposition::Discarded);
-        assert_eq!(site.semantics.cardinality, ExecutionCardinality::Never);
-    }
+    let handler = plain
+        .sites
+        .iter()
+        .find(|site| source_text(source, site.span.start, site.span.end) == "p.onClick")
+        .expect("discarded SSR callback");
+    assert_eq!(
+        handler.semantics.disposition,
+        ExecutionDisposition::Discarded
+    );
+    assert_eq!(handler.semantics.cardinality, ExecutionCardinality::Never);
+    // The template path evaluates the ref expression (`var _ref$ = p.ref;`),
+    // and a member read can run a getter: it is not discarded.
+    let reference = plain
+        .sites
+        .iter()
+        .find(|site| source_text(source, site.span.start, site.span.end) == "p.ref")
+        .expect("evaluated SSR ref");
+    assert_eq!(
+        reference.semantics.disposition,
+        ExecutionDisposition::RefFactory
+    );
+    assert_eq!(
+        reference.semantics.cardinality,
+        ExecutionCardinality::ExactlyOnce
+    );
 }
 
 #[test]

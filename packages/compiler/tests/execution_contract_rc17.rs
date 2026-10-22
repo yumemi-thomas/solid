@@ -2,13 +2,14 @@
 
 //! Semantic facts at the lowering paths published Solid RC.17 added or
 //! changed: lowercase `on*` attributes, nullable SSR class/style holes, SSR
-//! spread-element ref evaluation, anchor link claims, valueless `prop:`
-//! attributes, removed 1.x namespaces, the removed server-components option,
-//! and the unbound `sourceNames.locations` configuration.
+//! spread-element and template ref evaluation, anchor link claims, valueless
+//! `prop:` attributes, removed 1.x namespaces, the removed server-components
+//! option, and the unbound `sourceNames.locations` configuration.
 
 use solidjs_compiler::{
-    CallbackDecision, CompileOptions, ExecutionSiteKind, Generate, SemanticTrace, SourceNames,
-    TerminalDecision, ValueDecision, compile,
+    CallbackDecision, CompileOptions, ExecutionCardinality, ExecutionDisposition,
+    ExecutionSchedule, ExecutionSemantics, ExecutionSiteKind, ExecutionTrigger, Generate,
+    OwnerRelation, SemanticTrace, SourceNames, TerminalDecision, ValueDecision, compile,
 };
 
 fn compare(source: &str, options: CompileOptions) -> SemanticTrace {
@@ -146,6 +147,202 @@ fn ssr_template_ref_factory_is_unchanged() {
         site(&trace, source, "tip()").decision,
         TerminalDecision::Callback(CallbackDecision::RefFactoryOnly)
     );
+}
+
+fn ref_semantics(
+    trace: &SemanticTrace,
+    source: &str,
+    text: &str,
+) -> (TerminalDecision, ExecutionSemantics) {
+    let site = site(trace, source, text);
+    assert_eq!(site.kind, ExecutionSiteKind::Ref, "{source}: {text}");
+    (site.decision, site.semantics.clone())
+}
+
+/// The template path hoists every non-literal ref as `_ref$N = <expr>`, so
+/// a ref whose evaluation can run code is a ref-factory evaluation, once,
+/// inline. A binding read, `this`, or a function never runs code there.
+#[test]
+fn ssr_template_refs_that_evaluate_are_recorded_as_evaluated() {
+    let evaluated = TerminalDecision::Callback(CallbackDecision::RefFactoryOnly);
+    let elided = TerminalDecision::Callback(CallbackDecision::Elided);
+    for (source, text, expected, emitted) in [
+        (
+            "const view = <div ref={[tip(), el]} />;",
+            "[tip(), el]",
+            evaluated,
+            "var _ref$ = [tip(), el];",
+        ),
+        (
+            "const view = <div ref={cond ? f() : g} />;",
+            "cond ? f() : g",
+            evaluated,
+            "var _ref$ = cond ? f() : g;",
+        ),
+        (
+            "function C(props) { return <div ref={props.ref} />; }",
+            "props.ref",
+            evaluated,
+            "var _ref$ = props.ref;",
+        ),
+        (
+            "const view = <div ref={a?.b} title={t()} />;",
+            "a?.b",
+            evaluated,
+            "var _ref$ = a?.b",
+        ),
+        (
+            "const view = <For each={xs}>{(x) => <div ref={x.ref} />}</For>;",
+            "x.ref",
+            evaluated,
+            "_ref$ = x.ref",
+        ),
+        (
+            "const view = <div ref={`a${b}`} />;",
+            "`a${b}`",
+            evaluated,
+            "var _ref$ = `a${b}`;",
+        ),
+        (
+            "const view = <div ref={tip()} />;",
+            "tip()",
+            evaluated,
+            "var _ref$ = tip();",
+        ),
+        (
+            "let el; const view = <div ref={el} />;",
+            "el",
+            elided,
+            "var _ref$ = el;",
+        ),
+        (
+            "let el; const view = <div ref={el!} />;",
+            "el!",
+            elided,
+            "var _ref$ = el!;",
+        ),
+        (
+            "let x; const view = <div ref={(el) => (x = el)} />;",
+            "(el) => (x = el)",
+            elided,
+            "var _ref$ = (el) => x = el;",
+        ),
+    ] {
+        let settings = CompileOptions {
+            built_ins: vec!["For".into()],
+            ..options(Generate::Ssr)
+        };
+        let output = compile(source, &settings).expect("ordinary RC.17 compilation");
+        assert!(output.code.contains(emitted), "{source}\n{}", output.code);
+        let trace = compare(source, settings);
+        let (decision, semantics) = ref_semantics(&trace, source, text);
+        assert_eq!(decision, expected, "{source}");
+        if expected == evaluated {
+            assert_eq!(semantics.disposition, ExecutionDisposition::RefFactory);
+            assert_eq!(semantics.trigger, ExecutionTrigger::Render);
+            assert_eq!(semantics.schedule, ExecutionSchedule::Inline);
+            assert_eq!(semantics.cardinality, ExecutionCardinality::ExactlyOnce);
+            assert_eq!(semantics.owner, OwnerRelation::AmbientAtTransformSite);
+        } else {
+            assert_eq!(semantics.disposition, ExecutionDisposition::Discarded);
+            assert_eq!(semantics.cardinality, ExecutionCardinality::Never);
+        }
+    }
+}
+
+/// A hole-free element in an already-escaped child position is emitted as
+/// its bare template string; the hoisted `_ref$N` declarations are dropped
+/// with it, so none of its refs run. A template with a hole keeps them.
+#[test]
+fn ssr_dropped_template_refs_are_elided() {
+    let evaluated = TerminalDecision::Callback(CallbackDecision::RefFactoryOnly);
+    let elided = TerminalDecision::Callback(CallbackDecision::Elided);
+    for (source, expected) in [
+        (
+            "const view = <section>{cond() && <div ref={tip()} />}</section>;",
+            vec![("tip()", elided)],
+        ),
+        (
+            "const view = <section>{<div ref={tip()}><span ref={props.ref} /></div>}</section>;",
+            vec![("tip()", elided), ("props.ref", elided)],
+        ),
+        (
+            "const view = <section>{<div ref={tip()} />}<div ref={g()} /></section>;",
+            vec![("tip()", elided), ("g()", evaluated)],
+        ),
+        (
+            "const view = <section>{<div ref={tip()}>{x()}</div>}</section>;",
+            vec![("tip()", evaluated)],
+        ),
+        (
+            "const view = <section>{[<div ref={tip()} />]}</section>;",
+            vec![("tip()", evaluated)],
+        ),
+    ] {
+        let output = compile(source, &options(Generate::Ssr)).expect("ordinary compilation");
+        let calls = expected
+            .iter()
+            .filter(|(_, decision)| *decision == evaluated)
+            .count();
+        assert_eq!(
+            output.code.matches("_ref$").count() > 0,
+            calls > 0,
+            "{source}\n{}",
+            output.code
+        );
+        let trace = compare(source, options(Generate::Ssr));
+        for (text, decision) in expected {
+            assert_eq!(
+                ref_semantics(&trace, source, text).0,
+                decision,
+                "{source}: {text}"
+            );
+        }
+        // The child hole that returns the static markup still runs.
+        assert!(
+            trace
+                .sites
+                .iter()
+                .filter(|site| site.kind == ExecutionSiteKind::JsxChild)
+                .all(|site| site.decision != TerminalDecision::Value(ValueDecision::Elided)),
+            "{source}"
+        );
+    }
+}
+
+/// The spread-element path evaluates only refs that call something; its
+/// decisions do not move with the template path.
+#[test]
+fn ssr_spread_element_ref_decisions_are_unchanged() {
+    for (source, text, expected) in [
+        (
+            "const view = <div {...attrs} ref={props.ref} />;",
+            "props.ref",
+            CallbackDecision::Elided,
+        ),
+        (
+            "const view = <div {...attrs} ref={cond ? f : g} />;",
+            "cond ? f : g",
+            CallbackDecision::Elided,
+        ),
+        (
+            "const view = <div {...attrs} ref={[tip(), el]} />;",
+            "[tip(), el]",
+            CallbackDecision::RefFactoryOnly,
+        ),
+        (
+            "const view = <div {...attrs} ref={cond ? f() : g} />;",
+            "cond ? f() : g",
+            CallbackDecision::RefFactoryOnly,
+        ),
+    ] {
+        let trace = compare(source, options(Generate::Ssr));
+        assert_eq!(
+            ref_semantics(&trace, source, text).0,
+            TerminalDecision::Callback(expected),
+            "{source}"
+        );
+    }
 }
 
 #[test]

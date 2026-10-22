@@ -1088,6 +1088,9 @@ pub(crate) struct TraceRecorder {
     /// Spans a lowering path *synthesizes* rather than reads from the source
     /// tree. See [`Self::ignore_synthesized_child`].
     synthesized_spans: BTreeSet<SourceSpan>,
+    /// Source ranges whose lowered template the emitter replaced by its
+    /// static markup alone. See [`Self::template_dropped`].
+    dropped_template_spans: Vec<SourceSpan>,
     default_effect_wrapper: bool,
     // Compatibility output for the currently pinned checker. This is filled
     // when lowering resolves a reactive value, rather than reconstructed from
@@ -1313,6 +1316,61 @@ impl TraceRecorder {
         }
     }
 
+    /// Record that the lowered template spanning `span` was emitted as its
+    /// static markup alone, discarding its hoisted `_ref$N` declarations.
+    ///
+    /// Upstream returns the bare template string for a hole-free element
+    /// that sits in an already-escaped position (Babel's `wontEscape`), so
+    /// a ref expression the template path hoisted never runs. A ref decided
+    /// as a ref-factory evaluation inside the range becomes elided. Any
+    /// other decision that claims execution there, now or later, fails the
+    /// trace: no other evaluated site is expected in a hole-free template,
+    /// and nothing inside it is emitted.
+    pub(crate) fn template_dropped(&mut self, span: Span) {
+        if self.census.is_none() {
+            return;
+        }
+        let span = SourceSpan::from(span);
+        self.dropped_template_spans.push(span);
+        let inside = self
+            .decisions
+            .keys()
+            .copied()
+            .filter(|site| inside_dropped_template(span, site.span))
+            .collect::<Vec<_>>();
+        for site in inside {
+            let decision = self.decisions[&site];
+            if let Some(dropped) = self.dropped_decision(site, decision) {
+                self.decisions.insert(site, dropped);
+            }
+        }
+    }
+
+    /// The decision a site inside a dropped template keeps, or `None` after
+    /// failing the trace when the site claims execution.
+    fn dropped_decision(
+        &mut self,
+        site: SiteKey,
+        decision: TerminalDecision,
+    ) -> Option<TerminalDecision> {
+        match decision {
+            TerminalDecision::Callback(CallbackDecision::RefFactoryOnly)
+                if site.kind == ExecutionSiteKind::Ref =>
+            {
+                Some(TerminalDecision::Callback(CallbackDecision::Elided))
+            }
+            TerminalDecision::Callback(CallbackDecision::Elided)
+            | TerminalDecision::Value(ValueDecision::Elided) => Some(decision),
+            _ => {
+                self.fail(format!(
+                    "semantic site {:?} at {}..{} claims execution inside a template the emitter dropped",
+                    site.kind, site.span.start, site.span.end
+                ));
+                None
+            }
+        }
+    }
+
     pub(crate) fn value(&mut self, span: Span, kind: ExecutionSiteKind, decision: ValueDecision) {
         self.resolve(span, kind, TerminalDecision::Value(decision));
     }
@@ -1355,6 +1413,18 @@ impl TraceRecorder {
             ));
             return;
         }
+        let decision = if self
+            .dropped_template_spans
+            .iter()
+            .any(|dropped| inside_dropped_template(*dropped, key.span))
+        {
+            match self.dropped_decision(key, decision) {
+                Some(decision) => decision,
+                None => return,
+            }
+        } else {
+            decision
+        };
         if let Some(previous) = self.decisions.insert(key, decision)
             && previous != decision
         {
@@ -1548,6 +1618,13 @@ impl TraceRecorder {
             generated_operations: generated,
         }))
     }
+}
+
+/// Is `site` part of the element whose template spans `dropped`? The
+/// element's own span is excluded: a JSX child site sharing it is the hole
+/// in the parent template that returns the static markup, and it runs.
+fn inside_dropped_template(dropped: SourceSpan, site: SourceSpan) -> bool {
+    site != dropped && dropped.start <= site.start && site.end <= dropped.end
 }
 
 fn source_operation_id(site: SiteKey) -> String {

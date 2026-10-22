@@ -146,3 +146,17 @@ outcomes) match upstream byte for byte in code, maps, CSS fields and
 diagnostics, and tracing preserves every outcome. Strict no-default-feature
 all-target Clippy passes. No inherited upstream lint needs an exclusion,
 because RC.17 removed the `collapsible_if` in shared/validate.rs.
+
+### SSR template refs
+
+The template path hoists every non-literal `ref` as `_ref$N = <expr>`,
+evaluated once inline where the template is finalized. A ref expression whose
+evaluation can run code (a call, a member or optional-chain read that can hit
+a getter, an array, a conditional, a template literal with substitutions, any
+other compound expression) is recorded as `ref-factory-only`. A binding read,
+`this`, a literal, or a function or arrow expression (its body never runs on
+the server), including under parentheses and TypeScript wrappers, stays
+elided. A hole-free element in an already-escaped child position is emitted as
+its bare template string and its `_ref$N` declarations are dropped, so its
+refs are recorded as elided; any other execution claim inside such a template
+refuses the trace. The spread-element path is unchanged.
