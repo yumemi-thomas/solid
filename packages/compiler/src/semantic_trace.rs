@@ -1830,11 +1830,17 @@ fn execution_semantics(
             ExecutionCardinality::ZeroOrMore,
             OwnerRelation::AmbientAtGeneratedInvocation,
         ),
+        // SSR only. The ref expression runs inline in generated code (a
+        // hoisted `_ref$N` declaration or assignment, or `ssrElement`'s
+        // markup thunk) that can sit in a component `children` getter, a
+        // control-flow or render callback, or a component body the output
+        // calls without `untrack`. Nothing in the output establishes an
+        // untracked scope, so the evaluation inherits its caller's tracking.
         TerminalDecision::Callback(CallbackDecision::RefFactoryOnly) => (
             ExecutionDisposition::RefFactory,
             ExecutionTrigger::Render,
             ExecutionSchedule::Inline,
-            TrackingRelation::Untracked,
+            TrackingRelation::Inherited,
             ExecutionCardinality::ExactlyOnce,
             OwnerRelation::AmbientAtTransformSite,
         ),

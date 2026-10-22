@@ -160,3 +160,8 @@ elided. A hole-free element in an already-escaped child position is emitted as
 its bare template string and its `_ref$N` declarations are dropped, so its
 refs are recorded as elided; any other execution claim inside such a template
 refuses the trace. The spread-element path is unchanged.
+A `ref-factory-only` evaluation records inherited tracking on both paths: the
+output places it in a module or component body, a component `children`
+getter, a control-flow or render callback, or `ssrElement`'s markup thunk,
+and establishes no untracked scope for any of them (SSR components are plain
+calls).
