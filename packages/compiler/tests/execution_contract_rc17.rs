@@ -9,7 +9,8 @@
 use solidjs_compiler::{
     CallbackDecision, CompileOptions, ExecutionCardinality, ExecutionDisposition,
     ExecutionSchedule, ExecutionSemantics, ExecutionSiteKind, ExecutionTrigger, Generate,
-    OwnerRelation, SemanticTrace, SourceNames, TerminalDecision, ValueDecision, compile,
+    OwnerRelation, SemanticTrace, SourceNames, TerminalDecision, TrackingRelation, ValueDecision,
+    compile,
 };
 
 fn compare(source: &str, options: CompileOptions) -> SemanticTrace {
@@ -243,6 +244,7 @@ fn ssr_template_refs_that_evaluate_are_recorded_as_evaluated() {
             assert_eq!(semantics.schedule, ExecutionSchedule::Inline);
             assert_eq!(semantics.cardinality, ExecutionCardinality::ExactlyOnce);
             assert_eq!(semantics.owner, OwnerRelation::AmbientAtTransformSite);
+            assert_eq!(semantics.tracking, TrackingRelation::Inherited);
         } else {
             assert_eq!(semantics.disposition, ExecutionDisposition::Discarded);
             assert_eq!(semantics.cardinality, ExecutionCardinality::Never);
@@ -342,6 +344,79 @@ fn ssr_spread_element_ref_decisions_are_unchanged() {
             TerminalDecision::Callback(expected),
             "{source}"
         );
+    }
+}
+
+/// A ref-factory evaluation runs inline wherever the transform places it:
+/// a top-level statement, a component body, a component `children` getter,
+/// a control-flow or render callback, or `ssrElement`'s markup thunk. None of
+/// these is an untracked scope the output establishes (SSR components are
+/// plain calls), so tracking is inherited from the caller, never untracked.
+#[test]
+fn ssr_ref_factory_evaluation_inherits_tracking() {
+    for (source, text, emitted) in [
+        // Module top level and component body: hoisted before the statement.
+        (
+            "const view = <div ref={tip()} />;",
+            "tip()",
+            "var _ref$ = tip();\nconst view",
+        ),
+        (
+            "function C(props) { return <div ref={props.ref} />; }",
+            "props.ref",
+            "var _ref$ = props.ref;\n\treturn",
+        ),
+        // Component `children` getter, as statement and as assignment.
+        (
+            "const view = <Comp>{<div ref={tip()} />}</Comp>;",
+            "tip()",
+            "get children() {\n\tvar _ref$ = tip();",
+        ),
+        (
+            "const view = <Show when={x}><div ref={tip()} /></Show>;",
+            "tip()",
+            "return _ref$ = tip(), _$ssr(_tmpl$);",
+        ),
+        // Control-flow callback.
+        (
+            "const view = <For each={xs}>{(x) => <div ref={x.ref} />}</For>;",
+            "x.ref",
+            "return _ref$ = x.ref, _$ssr(_tmpl$);",
+        ),
+        // Render callback of a dynamic child hole.
+        (
+            "const view = <section>{<div ref={tip()}>{x()}</div>}</section>;",
+            "tip()",
+            "var _v$ = () => {\n\tvar _ref$ = tip()",
+        ),
+        // Spread element: `ssrElement`'s markup thunk.
+        (
+            "const view = <div {...attrs} ref={tip()} />;",
+            "tip()",
+            "tip()",
+        ),
+        (
+            "const view = <Show when={x}><div {...attrs} ref={[tip(), el]} /></Show>;",
+            "[tip(), el]",
+            "[tip(), el]",
+        ),
+    ] {
+        let settings = CompileOptions {
+            built_ins: vec!["For".into(), "Show".into()],
+            ..options(Generate::Ssr)
+        };
+        let output = compile(source, &settings).expect("ordinary RC.17 compilation");
+        assert!(output.code.contains(emitted), "{source}\n{}", output.code);
+        let trace = compare(source, settings);
+        let (decision, semantics) = ref_semantics(&trace, source, text);
+        assert_eq!(
+            decision,
+            TerminalDecision::Callback(CallbackDecision::RefFactoryOnly),
+            "{source}"
+        );
+        assert_eq!(semantics.disposition, ExecutionDisposition::RefFactory);
+        assert_eq!(semantics.tracking, TrackingRelation::Inherited, "{source}");
+        assert_eq!(semantics.cardinality, ExecutionCardinality::ExactlyOnce);
     }
 }
 
