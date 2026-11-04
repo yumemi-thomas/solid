@@ -1819,16 +1819,23 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     );
                 }
             }
-            self.semantic_trace.value(
-                spread.argument.span(),
-                crate::semantic_trace::ExecutionSiteKind::NativeSpread,
-                crate::semantic_trace::ValueDecision::SsrEvaluation,
-            );
             // A lone dynamic spread defers behind a thunk too (#4240): see
             // the source loop below. `ssrElement` calls a function props
             // argument after allocating the key.
             let argument = spread.argument.clone_in(self.allocator);
-            if self.classify().is_dynamic(None, &argument, false) {
+            let dynamic = self.classify().is_dynamic(None, &argument, false);
+            self.semantic_trace.value(
+                spread.argument.span(),
+                crate::semantic_trace::ExecutionSiteKind::NativeSpread,
+                if dynamic {
+                    crate::semantic_trace::ValueDecision::SsrRenderCallback
+                } else {
+                    crate::semantic_trace::ValueDecision::SsrEvaluation
+                },
+            );
+            if dynamic {
+                self.semantic_trace
+                    .deferred_callback_site(spread.argument.span(), spread.span);
                 return Ok((self.inline_call_expression(argument), None));
             }
             return Ok((argument, None));

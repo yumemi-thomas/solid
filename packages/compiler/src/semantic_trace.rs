@@ -15,7 +15,7 @@ pub const SEMANTIC_TRACE_VERSION: u32 = 3;
 
 /// Exact upstream revision whose compiler behavior this semantic-only branch
 /// observes. The fork may add facts, but it may not change that behavior.
-pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "5b1b777648a89b6e207e8bb78514d5c03420e08b";
+pub const SEMANTIC_TRACE_UPSTREAM_REVISION: &str = "2105ffb8ca2fced55f5fac0763177fc93f97c2c2";
 
 /// Revision containing the trace-v3 semantic implementation. This is filled
 /// with the first semantic implementation commit before the distribution pin

@@ -301,7 +301,7 @@ fn every_parity_probe_reconciles_census_against_lowering() {
     let sources = probe_sources();
     assert_eq!(
         sources.len(),
-        272,
+        274,
         "expected the complete probe corpus, extracted {}",
         sources.len()
     );

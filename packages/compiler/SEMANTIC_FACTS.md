@@ -118,6 +118,25 @@ local compiler candidate alone does not certify package behavior or feedback
 accuracy. Evidence and the reproducible patch are recorded in solid-checker's
 `benchmarks/compiler-facts/rc13/` and the dated RC.13 rebase report.
 
+## 2026-11-04 published RC.21 port
+
+The upstream base is the published `2.0.0-rc.21` Git head and `next` tip
+`2105ffb8ca2fced55f5fac0763177fc93f97c2c2`. The facts delta is re-applied as
+linear commits on that base. The trace stays version 3 with no schema change.
+
+Upstream's only execution change is a lone dynamic SSR spread (#4251), which
+now defers behind the same thunk as the multi-source path, so `ssrElement`
+calls it after allocating the hydration key. Its trace matches the source
+loop: dynamic records `ssr-render-callback` with its deferred callback site,
+static stays `ssr-evaluation`. `compile_program` hands a caller's program to
+the shared back half; it refuses tracing, because the trace reconciles the
+parse `compile` owns and the configuration checks live on that path. SSR
+`validate` (#4238, #4243), ASCII template parts (#4331), number printing
+(#4324), and the `broadcast` return checks change no execution site.
+
+The corpus contains 101 fixture sources and 274 probes. The 375-entry output
+baseline was generated from an untouched `2105ffb8` tree.
+
 ## 2026-10-22 published RC.17 port
 
 The upstream base is the published `2.0.0-rc.17` Git head and `next` tip
@@ -140,8 +159,8 @@ reject the same way whether tracing is on or off. A valueless `prop:` has no
 source site. `sourceNames.locations` (and the `root` it reads) is not bound
 by the trace identity, so tracing refuses that configuration.
 
-The corpus contains 101 fixture sources and 272 probes. The 373-entry output
-baseline was generated from untouched RC.17. Eleven DOM/SSR profiles (4,103
+At RC.17 the corpus held 101 fixture sources and 272 probes, and its 373-entry
+output baseline was generated from untouched RC.17. Eleven DOM/SSR profiles (4,103
 outcomes) match upstream byte for byte in code, maps, CSS fields and
 diagnostics, and tracing preserves every outcome. Strict no-default-feature
 all-target Clippy passes. No inherited upstream lint needs an exclusion,
