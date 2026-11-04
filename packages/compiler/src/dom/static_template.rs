@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use oxc_ast::ast::{JSXChild, JSXElement, JSXExpression};
+use oxc_span::GetSpan;
 
 use crate::dom::attrs::CloseTagContext;
 use crate::dom::element::{AstDomTransform, children_attribute_child};
@@ -9,7 +10,23 @@ use crate::shared::utils::{
 };
 
 pub(crate) fn lower_static_native_template<'a>(
-    ctx: &AstDomTransform<'a, '_>,
+    ctx: &mut AstDomTransform<'a, '_>,
+    element: &JSXElement<'a>,
+    close_context: CloseTagContext,
+) -> Result<Option<crate::dom::template::TemplateHtml>> {
+    // Static lowering is speculative. Keep its semantic observations only
+    // when the entire subtree commits to the static path; dynamic fallback
+    // will record the authoritative decisions for the same source spans.
+    let checkpoint = ctx.semantic_trace.checkpoint();
+    let result = lower_static_native_template_inner(ctx, element, close_context);
+    if !matches!(result, Ok(Some(_))) {
+        ctx.semantic_trace.restore(checkpoint);
+    }
+    result
+}
+
+fn lower_static_native_template_inner<'a>(
+    ctx: &mut AstDomTransform<'a, '_>,
     element: &JSXElement<'a>,
     close_context: CloseTagContext,
 ) -> Result<Option<crate::dom::template::TemplateHtml>> {
@@ -48,6 +65,7 @@ pub(crate) fn lower_static_native_template<'a>(
     template.push_both(">");
 
     if tag_name == "noscript" {
+        ctx.retract_children_sites(&element.children);
         if ctx.should_close_tag(&tag_name, close_context.clone()) {
             template.html.push_str(&format!("</{tag_name}>"));
         }
@@ -69,7 +87,11 @@ pub(crate) fn lower_static_native_template<'a>(
         None
     };
     let children: &[JSXChild<'a>] = match (&children_replacement, &attribute_child) {
-        (Some(child), _) | (_, Some(child)) => std::slice::from_ref(child),
+        (Some(child), _) => {
+            ctx.discard_folded_children(&element.children, child);
+            std::slice::from_ref(child)
+        }
+        (_, Some(child)) => std::slice::from_ref(child),
         (None, None) => &element.children,
     };
     let last_element = ctx.find_last_element(children);
@@ -91,6 +113,11 @@ pub(crate) fn lower_static_native_template<'a>(
                 let Some(value) = value else {
                     return Ok(None);
                 };
+                ctx.semantic_trace.value(
+                    container.expression.span(),
+                    crate::semantic_trace::ExecutionSiteKind::JsxChild,
+                    crate::semantic_trace::ValueDecision::Elided,
+                );
                 template.push_both(&escape_html_text_expression(&value));
             }
             JSXChild::Element(child) => {

@@ -99,6 +99,7 @@ pub(crate) struct AstDomTransform<'a, 'source> {
     /// Babel keeps a raw `this` in the tag callee of the root element of each
     /// `transformJSX` call; only descendants use the `_self$` capture.
     pub(crate) jsx_root_span: Option<oxc_span::Span>,
+    pub(crate) semantic_trace: crate::semantic_trace::TraceRecorder,
 }
 
 pub(crate) struct DomTransformConfig {
@@ -202,6 +203,7 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
             condition_index: 0,
             owner_index: 0,
             jsx_root_span: None,
+            semantic_trace: crate::semantic_trace::TraceRecorder::disabled(),
         }
     }
 
@@ -299,18 +301,18 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
             .attributes
             .iter()
             .any(|attr| matches!(attr, oxc_ast::ast::JSXAttributeItem::SpreadAttribute(_)));
-        let element: &JSXElement<'a> =
-            if !is_void_element(&tag_name) && !has_spread && element.children.is_empty() {
-                if let Some(child) = children_attribute_child(self, element) {
-                    let mut clone = element.clone_in(self.allocator);
-                    clone.children.push(child);
-                    self.allocator.alloc(clone)
-                } else {
-                    element
-                }
-            } else {
-                element
-            };
+        let attribute_child =
+            (!is_void_element(&tag_name) && !has_spread && element.children.is_empty())
+                .then(|| children_attribute_child(self, element))
+                .flatten();
+        let children_from_attribute = attribute_child.is_some();
+        let element: &JSXElement<'a> = if let Some(child) = attribute_child {
+            let mut clone = element.clone_in(self.allocator);
+            clone.children.push(child);
+            self.allocator.alloc(clone)
+        } else {
+            element
+        };
 
         // XML partial handling (Babel parity): template-root SVG/MathML
         // elements other than <svg>/<math> themselves get wrapped in their
@@ -334,6 +336,7 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
             &tag_name,
             &element_id,
             !element.children.is_empty(),
+            children_from_attribute,
             &mut template.html,
             &mut declarations,
             &mut operations,
@@ -343,10 +346,11 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
         let attrs_lowering = attribute_result?;
         let needs_text_placeholder = attrs_lowering.needs_text_placeholder;
 
-        // Babel's textarea `value` fold replaces the element's children
-        // (`path.node.children = [child]`).
+        // The textarea `value` fold replaces the element's children. Record
+        // the discarded source without changing the lowering decision.
         let element: &JSXElement<'a> = match attrs_lowering.children_replacement {
             Some(child) => {
+                self.discard_folded_children(&element.children, &child);
                 let mut clone = element.clone_in(self.allocator);
                 clone.children.clear();
                 clone.children.push(child);
@@ -385,6 +389,8 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
                     &mut dynamics,
                 )?;
             }
+        } else {
+            self.discard_void_children_sites(&element.children);
         }
         // All dynamic attribute bindings collected across this template root
         // batch into one effect, appended after the other expressions. Claim

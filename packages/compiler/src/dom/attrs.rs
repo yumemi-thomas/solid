@@ -4,7 +4,7 @@ use oxc_ast::ast::{
     Expression, FormalParameterKind, JSXAttributeItem, JSXAttributeName, JSXAttributeValue,
     JSXExpression, Statement,
 };
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::dom::dynamics::{DynamicSlot, DynamicsBatch};
 use crate::dom::element::AstDomTransform;
@@ -139,6 +139,7 @@ impl<'a> AstDomTransform<'a, '_> {
         tag_name: &str,
         element_id: &str,
         has_children: bool,
+        children_from_attribute: bool,
         template: &mut String,
         declarations: &mut std::vec::Vec<Statement<'a>>,
         operations: &mut std::vec::Vec<Statement<'a>>,
@@ -177,6 +178,13 @@ impl<'a> AstDomTransform<'a, '_> {
                     &attr.value
                     && let Some(expression) = container.expression.as_expression()
                 {
+                    self.semantic_trace.callback(
+                        expression.span(),
+                        crate::semantic_trace::ExecutionSiteKind::Ref,
+                        crate::semantic_trace::CallbackDecision::RefApply,
+                    );
+                    self.semantic_trace
+                        .owner_establishment(expression.span(), "ref-apply", None);
                     let value = expression.clone_in(self.allocator);
                     ref_groups.push(self.dom_ref_statements(attr.span, element_id, value));
                 }
@@ -186,6 +194,7 @@ impl<'a> AstDomTransform<'a, '_> {
                 tag_name,
                 element_id,
                 has_children,
+                children_from_attribute,
             )?);
             for group in ref_groups {
                 operations.extend(group);
@@ -198,6 +207,7 @@ impl<'a> AstDomTransform<'a, '_> {
 
         let AttrPlanOutcome {
             plans,
+            elided_value_spans,
             children_replacement,
         } = self.plan_attributes(attributes, tag_name)?;
         let mut exprs: std::vec::Vec<Statement<'a>> = std::vec::Vec::new();
@@ -207,14 +217,47 @@ impl<'a> AstDomTransform<'a, '_> {
         let slots_before = dynamics.slots.len();
         let checkable_input = tag_name == "input" && input_may_be_checkable(attributes);
 
+        for span in elided_value_spans {
+            self.semantic_trace.value(
+                span,
+                crate::semantic_trace::ExecutionSiteKind::NativeAttribute,
+                crate::semantic_trace::ValueDecision::Elided,
+            );
+        }
+
         for plan in plans {
             // Explicit JSX children are the final content source. Suppress a
             // conflicting textContent attribute instead of capturing a
             // placeholder node before those children are inserted.
             if has_children && plan.key == "textContent" {
+                if let Some(span) = plan.semantic_span {
+                    self.semantic_trace.resolve_lowered_attribute(
+                        span,
+                        crate::semantic_trace::ValueDecision::Elided,
+                    );
+                }
                 continue;
             }
-            match self.classify_plan(&plan, tag_name) {
+            let disposition = self.classify_plan(&plan, tag_name);
+            if matches!(
+                disposition,
+                PlanDisposition::Skip | PlanDisposition::Inline(_)
+            ) && !(plan.key == "children" && children_from_attribute)
+                && let Some(span) = plan.semantic_span
+            {
+                self.semantic_trace
+                    .resolve_lowered_attribute(span, crate::semantic_trace::ValueDecision::Elided);
+                if plan.key == "children"
+                    && !children_from_attribute
+                    && matches!(
+                        &plan.value,
+                        PlanValue::Expr(Expression::JSXElement(_) | Expression::JSXFragment(_))
+                    )
+                {
+                    self.semantic_trace.retract_within(span);
+                }
+            }
+            match disposition {
                 PlanDisposition::Skip => {}
                 PlanDisposition::Inline(value) => match value {
                     None => append_bare_attribute(template, &plan.key, self.omit_attribute_spacing),
@@ -344,6 +387,7 @@ impl<'a> AstDomTransform<'a, '_> {
     ) -> Result<()> {
         let span = plan.span;
         let source_offset = plan.source_offset;
+        let semantic_span = plan.semantic_span;
         let raw = match plan.value {
             PlanValue::Expr(expression) => expression,
             PlanValue::Literal(value) => {
@@ -360,11 +404,27 @@ impl<'a> AstDomTransform<'a, '_> {
         }
 
         if plan.key == "ref" {
+            if let Some(span) = semantic_span {
+                self.semantic_trace.callback(
+                    span,
+                    crate::semantic_trace::ExecutionSiteKind::Ref,
+                    crate::semantic_trace::CallbackDecision::RefApply,
+                );
+                self.semantic_trace
+                    .owner_establishment(span, "ref-apply", None);
+            }
             ref_groups.push(self.dom_ref_statements(span, element_id, raw));
             return Ok(());
         }
 
         if is_event_name(&plan.key) {
+            if let Some(span) = semantic_span {
+                self.semantic_trace.callback(
+                    span,
+                    crate::semantic_trace::ExecutionSiteKind::EventHandler,
+                    crate::semantic_trace::CallbackDecision::LaterEvent,
+                );
+            }
             front_groups.push(self.dom_event_statements(span, element_id, &plan.key, raw));
             return Ok(());
         }
@@ -374,6 +434,17 @@ impl<'a> AstDomTransform<'a, '_> {
             && (self.classify().is_dynamic(None, &raw, false)
                 || ((plan.key == "class" || plan.key == "style")
                     && self.evaluate_confident(&raw).is_none()));
+
+        if let Some(span) = semantic_span {
+            self.semantic_trace.resolve_lowered_attribute(
+                span,
+                if dynamic {
+                    crate::semantic_trace::ValueDecision::ReactiveRerun
+                } else {
+                    crate::semantic_trace::ValueDecision::EagerOnce
+                },
+            );
+        }
 
         // Babel stores the raw expression — JSX inside an attribute value
         // (static or dynamic) is only transformed by the outer traversal
@@ -397,6 +468,7 @@ impl<'a> AstDomTransform<'a, '_> {
             dynamics.slots.push(DynamicSlot {
                 span,
                 source_offset,
+                trace_span: semantic_span,
                 elem,
                 key: plan.key,
                 value,
@@ -639,7 +711,7 @@ impl<'a> AstDomTransform<'a, '_> {
     /// the classification used by the full emission. Returns the planning
     /// outcome's children replacement (textarea `value` fold) on success.
     pub(crate) fn try_append_planned_static_attributes(
-        &self,
+        &mut self,
         attributes: &[JSXAttributeItem<'a>],
         tag_name: &str,
         template: &mut String,
@@ -652,15 +724,24 @@ impl<'a> AstDomTransform<'a, '_> {
         }
         let AttrPlanOutcome {
             plans,
+            elided_value_spans,
             children_replacement,
         } = self.plan_attributes(attributes, tag_name)?;
         let mut pending: std::vec::Vec<(String, Option<String>)> = std::vec::Vec::new();
+        let mut semantic_spans = elided_value_spans;
         for plan in &plans {
             match self.classify_plan(plan, tag_name) {
                 PlanDisposition::Skip => {}
                 PlanDisposition::Inline(value) => pending.push((plan.key.clone(), value)),
                 PlanDisposition::Runtime => return Ok(None),
             }
+            if let Some(span) = plan.semantic_span {
+                semantic_spans.push(span);
+            }
+        }
+        for span in semantic_spans {
+            self.semantic_trace
+                .resolve_lowered_attribute(span, crate::semantic_trace::ValueDecision::Elided);
         }
         for (key, value) in pending {
             match value {
