@@ -245,6 +245,15 @@
       "types": "./types/server-functions/client.d.ts",
       "default": "./server-functions/dist/client.js"
     },
+    "./server-functions/transport": {
+      "development": {
+        "default": "./server-functions/dist/transport.dev.js"
+      },
+      "observe": {
+        "default": "./server-functions/dist/transport.observe.js"
+      },
+      "default": "./server-functions/dist/transport.js"
+    },
     "./server-functions/rich-args": {
       "types": "./types/server-functions/rich-args.d.ts",
       "default": "./server-functions/dist/rich-args.js"
@@ -348,6 +357,15 @@
     "./frames/wire": {
       "types": "./types/frames/wire-tier.d.ts",
       "default": "./frames/dist/wire.js"
+    },
+    "./frames/transport": {
+      "development": {
+        "default": "./frames/dist/transport.dev.js"
+      },
+      "observe": {
+        "default": "./frames/dist/transport.observe.js"
+      },
+      "default": "./frames/dist/transport.js"
     },
     "./types/*": "./types/*"
   },

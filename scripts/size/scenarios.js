@@ -89,11 +89,14 @@ const floorMinified = Object.fromEntries(
 // `@solidjs/web/frames` and `solid-js/internal`, which would otherwise
 // swallow them.
 const pageAlias = {
+  "@solidjs/web/frames/transport": "../../packages/web/frames/dist/transport.js",
   "@solidjs/web/frames/trace": "../../packages/web/frames/dist/trace.js",
   "@solidjs/web/frames/regions": "../../packages/web/frames/dist/regions.js",
   "@solidjs/web/frames/assets": "../../packages/web/frames/dist/assets.js",
   "@solidjs/web/frames/wire": "../../packages/web/frames/dist/wire.js",
   "solid-js/internal/container-trace": "../../packages/solid/dist/container-trace.js",
+  "@solidjs/web/server-functions/transport":
+    "../../packages/web/server-functions/dist/transport.js",
   "@solidjs/web/server-functions/client": "../../packages/web/server-functions/dist/client.js",
   "@solidjs/web/server-functions": "../../packages/web/server-functions/dist/client.js",
   "@solidjs/web/frames": "../../packages/web/frames/dist/client.js",
@@ -155,10 +158,12 @@ const framesExternal = [
   // regions tier (C4), the assets tier (C5) and the live wire tier (C2)
   // likewise.
   "solid-js/internal/container-trace",
+  "@solidjs/web/frames/transport",
   "@solidjs/web/frames/trace",
   "@solidjs/web/frames/regions",
   "@solidjs/web/frames/assets",
   "@solidjs/web/frames/wire",
+  "@solidjs/web/server-functions/transport",
   "@solidjs/web",
   "@solidjs/web/serialization",
   "@solidjs/web/serialization/decode"

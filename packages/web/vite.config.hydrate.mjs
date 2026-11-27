@@ -48,6 +48,10 @@ export default defineConfig({
       // "@solidjs/web" entry below would otherwise swallow them. Specs that
       // pull in frames/src/client.ts (which imports the shared server-function
       // client) need these to resolve to source, like the entry itself.
+      "@solidjs/web/server-functions/transport": resolve(
+        rootDir,
+        "server-functions/src/transport.ts"
+      ),
       "@solidjs/web/server-functions/client": resolve(rootDir, "server-functions/src/client.ts"),
       // The frames client lazy-imports the codec through the packaged
       // specifiers (external in its dist build); route them to the runtime
@@ -59,6 +63,7 @@ export default defineConfig({
       "@solidjs/web/serialization": resolve(rootDir, "serialization/src/serializer.ts"),
       // The frames client's tiers (lazy, through the packaged specifiers) —
       // to the source, for the same single-instance reason.
+      "@solidjs/web/frames/transport": resolve(rootDir, "frames/src/transport-tier.ts"),
       "@solidjs/web/frames/trace": resolve(rootDir, "frames/src/trace-tier.ts"),
       "@solidjs/web/frames/regions": resolve(rootDir, "frames/src/regions-tier.ts"),
       "@solidjs/web/frames/assets": resolve(rootDir, "frames/src/assets-tier.ts"),

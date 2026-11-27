@@ -1382,12 +1382,16 @@ describe("tiers, in the built artifacts", () => {
     for (const entry of ["server-functions/dist", "frames/dist"]) {
       expect(read(`${entry}/client.js`), `${entry}/client.js`).not.toContain(marker);
       expect(read(`${entry}/client.js`), `${entry}/client.js`).not.toContain(engine);
-      expect(read(`${entry}/client.observe.js`), `${entry}/client.observe.js`).toContain(marker);
-      expect(read(`${entry}/client.dev.js`), `${entry}/client.dev.js`).toContain(marker);
+      expect(read(`${entry}/transport.js`), `${entry}/transport.js`).not.toContain(marker);
+      expect(read(`${entry}/transport.js`), `${entry}/transport.js`).not.toContain(engine);
+      expect(read(`${entry}/transport.observe.js`), `${entry}/transport.observe.js`).toContain(
+        marker
+      );
+      expect(read(`${entry}/transport.dev.js`), `${entry}/transport.dev.js`).toContain(marker);
     }
     // The call record's provenance reach rides with the call emitter.
-    expect(read("server-functions/dist/client.observe.js")).toContain(engine);
-    expect(read("server-functions/dist/client.dev.js")).toContain(engine);
+    expect(read("server-functions/dist/transport.observe.js")).toContain(engine);
+    expect(read("server-functions/dist/transport.dev.js")).toContain(engine);
     // The main client entry emits no record of its own.
     for (const tier of ["web.js", "web.observe.js", "web.dev.js"]) {
       expect(read(`dist/${tier}`), tier).not.toContain(marker);
@@ -1399,9 +1403,15 @@ describe("tiers, in the built artifacts", () => {
       "server-functions/dist/client.js",
       "server-functions/dist/client.observe.js",
       "server-functions/dist/client.dev.js",
+      "server-functions/dist/transport.js",
+      "server-functions/dist/transport.observe.js",
+      "server-functions/dist/transport.dev.js",
       "frames/dist/client.js",
       "frames/dist/client.observe.js",
-      "frames/dist/client.dev.js"
+      "frames/dist/client.dev.js",
+      "frames/dist/transport.js",
+      "frames/dist/transport.observe.js",
+      "frames/dist/transport.dev.js"
     ]) {
       const code = read(file);
       expect(code, file).not.toContain('"_SOLID_OBSERVE_"');

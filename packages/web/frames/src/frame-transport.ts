@@ -11,29 +11,10 @@
  * frame-sink.js; this module stays importable from client bundles.
  */
 import {
-  ChunkReader,
-  ERROR_HEADER,
   LIVE_WIRE,
-  SINGLE_FLIGHT_HEADER,
-  createChunk,
-  deliverFlightData,
-  deserializeStream,
-  frameAddress,
-  getServerFunctionsCodec,
-  hasFlightMetadata
+  frameAddress
 } from "../../server-functions/src/shared.js";
-import { observeFrameApply } from "../../src/observe.js";
-
-// Replaced per build (see src/observe.ts): the observe emitters fold out of
-// the prod artifact behind it, call sites included.
-const IS_OBSERVE = "_SOLID_OBSERVE_" as unknown as boolean;
-
-// EXPERIMENTAL — the frames/server-components surface ships as an
-// experimental preview, excluded from the 2.0 stability guarantee: API
-// shapes and the wire format may change between prereleases (RFC 11).
-// Every export in this module is @experimental.
-import { FrameHost, prepareMorph, prepareTier, tierLoads } from "./frame-client.js";
-
+import { FrameHost, prepareMorph, prepareTier, tierLoaders, tierLoads } from "./frame-client.js";
 import { JSONCodecOptions } from "../../serialization/src/serializer-decode.js";
 
 /**
@@ -193,172 +174,25 @@ export function isFrameStreamResponse(response) {
  * ```
  * @experimental
  */
+function loadTransportTier() {
+  if (!tierLoaders.transport) {
+    tierLoaders.transport = () => import("@solidjs/web/frames/transport");
+  }
+  return prepareTier("transport");
+}
+
 export const applyFrameResponse: (
   response: Response,
   host: FrameHost,
   options?: ApplyFrameResponseOptions
-) => Promise<string> = IS_OBSERVE ? observedApplyFrameResponse : applyFrames;
-
-// Observe tier: the client half of the `"frame"` record (`OBSERVE.records`,
-// see `FrameAppliedEvent`) — one per stream in the response, start →
-// complete as applied here, with the chunk census; an apply that threw (a
-// read that failed, a chunk that would not parse, a host that rejected one)
-// closes the open stream as `error` with the failure beside it. Nothing is
-// read, not even the clock, without a listener. This wrapper exists in the
-// observe and dev artifacts only: `applyFrameResponse` above IS `applyFrames`
-// where the literal folds, so prod pays neither the extra frame nor the
-// promise hop.
-async function observedApplyFrameResponse(response, host, options = {}) {
-  const observation = observeFrameApply(response);
-  if (!observation) return applyFrames(response, host, options);
-  let applied;
-  try {
-    applied = await applyFrames(response, host, options, observation);
-  } catch (error) {
-    observation.end(error);
-    throw error;
-  }
-  observation.end();
-  return applied;
-}
-
-/**
- * Reads a frame-stream Response to completion, applying every chunk to
- * `host`. The client owns boundary identity: pass `options.as` to remap the
- * producer's root frame id onto a local one (the id your insertable/frame
- * registered under), so navigations to the same boundary reuse the same
- * frame regardless of what the server called it. Resolves with the id the
- * chunks were applied under once the stream ends.
- *
- * The client owns versions too: the producer can't know how many streams a
- * boundary has consumed, so `options.version` restamps the response's
- * chunks, making policy A's stale-guard real across navigations. A number
- * versions the whole response — one response IS one version — which holds
- * while a response addresses one boundary. A single-flight response
- * addresses several (each invalidated region is its own boundary, with its
- * own history), so `version` may instead be a function called once per
- * frame in the response.
- *
- * `options.onOutcome` receives the payload text of each `outcome` chunk —
- * the response-scoped single-flight envelope, which is the caller's result
- * rather than anything the host renders.
- */
-/**
- * Whether a message ends its frame's response: a batch writing `:complete`
- * (the server declared the frame done) or `:error` (the failing kind of it).
- * @internal (the live wire tier's too)
- */
-export const ends = msg => !!msg.r && (":complete" in msg.r || ":error" in msg.r);
-
-/** Whether a batch writes a slot record with a `{$ref}` arg — one that
- * reads the response's data table. */
-const readsData = msg => {
-  for (const key in msg.r)
-    if (key.startsWith("slot:"))
-      for (const v of Object.values(msg.r[key].args)) if (v && v.$ref) return true;
-  return false;
+) => Promise<string> = (response, host, options) => {
+  response.headers.get(FRAME_TIERS_HEADER)?.split(",").forEach(prepareTier);
+  const load = loadTransportTier();
+  if (load.r) return load.r.applyFrameResponse(response, host, options);
+  return load.then(() => tierLoads.transport.r.applyFrameResponse(response, host, options));
 };
 
-function applyFrames(response, host, options = {}, observation) {
-  const rootId = response.headers.get(FRAME_STREAM_HEADER) ?? "";
-  // The announced tiers (see FRAME_TIERS_HEADER): their loads start here,
-  // before the body is read, so a tier downloads in parallel with the
-  // stream and is resident by the time a frame's sync needs it. Idempotent
-  // and a no-op for a tier with no loader (eager).
-  response.headers.get(FRAME_TIERS_HEADER)?.split(",").forEach(prepareTier);
-  const as = options.as;
-  const version = options.version;
-  const perFrame = typeof version === "function" ? new Map() : null;
-  // A `live` loop's call runs through the live wire tier (wire-tier.ts,
-  // `connect`), which hands its own reader in under the loop's slot
-  // (LIVE_WIRE): the loop's event-stream reader when the body is framed as
-  // one, and the connection's end is judged THERE — by what the body left
-  // open, told to the loop — never here.
-  const reader = options[LIVE_WIRE] || new ChunkReader(response.body);
-  // The frames this response has begun (`start`) and not yet ended —
-  // `complete` is the bounded signal (a frame the server declared done), an
-  // unkeyed `error` the failing kind of it. A body that ends with any still
-  // open is a DEATH, never a completion (RFC 11 §9.5, Wire): what the
-  // server never declared done was cut off. A nested region's chunks ride
-  // inside its parent's start/complete and are not counted apart. Frame
-  // ids as applied (remapped, per-frame versioned), so an error record
-  // written for one lands in its store.
-  const open = new Map();
-  const errorRecord = (id, error) => ({
-    id,
-    version: open.get(id),
-    r: { ":error": { message: String(error && error.message) } }
-  });
-  const drain = async () => {
-    let result = await reader.next();
-    while (!result.done) {
-      const chunk = JSON.parse(result.value);
-      if (chunk.type === "outcome") {
-        if (options.onOutcome) options.onOutcome(chunk.payload);
-      } else {
-        const wireId = chunk.id;
-        if (as !== undefined && chunk.id === rootId) chunk.id = as;
-        if (perFrame) {
-          let v = perFrame.get(chunk.id);
-          if (v === undefined) perFrame.set(chunk.id, (v = version(chunk.id)));
-          chunk.version = v;
-        } else if (version !== undefined) chunk.version = version;
-        if (chunk.type === "start") open.set(chunk.id, chunk.version);
-        else if (ends(chunk)) open.delete(chunk.id);
-        // The observe tier's chunk census (see `observedApplyFrameResponse`);
-        // folds with the literal.
-        if (IS_OBSERVE && observation) observation.chunk(chunk, wireId);
-        // In-band tier announcement (`chunk.tiers`, see FRAME_TIERS_HEADER):
-        // a tier the render first needed after the head left names itself
-        // on the next chunk out; its load starts here. A `data` chunk that
-        // carries the name is one whose node tree NEEDS the tier to decode
-        // (the serializer minted the feature on this very record — a
-        // container trace's plugin node materializes into a live container
-        // only with the tier resident), so it awaits the load, as it awaits
-        // the codec below.
-        const needs = chunk.tiers?.map(prepareTier) || [];
-        // Codec-free until a chunk that READS data actually arrives: a host
-        // whose deserializer loads lazily (`prepareData`) gets awaited here,
-        // and because the loop is sequential every later chunk — the
-        // records referencing this data included — queues behind the load.
-        // A `slot` chunk whose args carry a `{$ref}` reads data too (its
-        // refs settle at the write, through its response's table — a key
-        // not delivered yet is the TABLE's pending read, so the table must
-        // exist); the producer emits the data ahead of the record that
-        // names it, so on its wire this await is already answered. Chunk
-        // ORDER is the only contract downstream (network jitter already
-        // stretches time between chunks), so nothing else observes the wait.
-        if (chunk.type === "data" || readsData(chunk))
-          await Promise.all([host.prepareData?.(), ...needs]);
-        host.apply(chunk);
-      }
-      result = await reader.next();
-    }
-  };
-  // How the body ended, judged by what it left open: an open frame's death
-  // is an ERROR on the frame — a bounded server component the server never
-  // declared complete was cut off mid-render, and nothing resumes it
-  // (undeclared death, D1): the record surfaces through `frame.error`, and
-  // the content already applied stays. (A live loop's verdict is the wire
-  // tier's: its host swallows this sweep once the body has drained and
-  // tells the loop instead — death or completion, with the sweep the loop
-  // may run if the iteration ends for good by error.)
-  const end = error => {
-    if (error === undefined)
-      for (const id of open.keys())
-        host.apply(errorRecord(id, new Error("Frame stream ended before the frame completed.")));
-  };
-  return drain().then(
-    () => {
-      end(undefined);
-      return as !== undefined ? as : rootId;
-    },
-    error => {
-      end(error);
-      throw error;
-    }
-  );
-}
+export const ends = msg => !!msg.r && (":complete" in msg.r || ":error" in msg.r);
 
 /** Brands an inline-rendered server component with its function id. */
 export const SERVER_COMPONENT = /*#__PURE__*/ Symbol.for("solid.server-component");
@@ -392,7 +226,7 @@ export const COMPONENT_BINDING = /*#__PURE__*/ Symbol.for("solid.component-bindi
 // address differs, so a refetch resolving to the bare address would be a
 // write nothing observes, and its content could not be held by the
 // transaction that asked for it (C15). NUL never occurs in a function id.
-const CONTENT_TOKEN = "\u0000";
+export const CONTENT_TOKEN = "\u0000";
 
 /**
  * The address a content token belongs to; a plain address passes through.
@@ -739,318 +573,66 @@ export function createServerComponentHandler({ host, component, intercept }) {
   // only one worth committing (versions are bumped as responses arrive, so
   // a later stage always supersedes).
   const staged = new Map();
-  // The binding a reference to an address resolves: its newest token once
-  // content was staged for it, so a flight reference in a mutation's
-  // envelope names the version the same response carried.
   const latest = new Map();
-  const stage = (address, base, version) => {
-    // Content is staged under a token of the address's binding; an address
-    // no binding was minted for has no reader a token could reach.
-    if (!base) return undefined;
-    // Committed while its body is still arriving (a superseded reader
-    // settles on the newest token), the rest of the response writes
-    // through: it is now what the mount shows.
-    let committed = false;
-    const chunks = [];
-    const token = address + CONTENT_TOKEN + version;
-    const entry = {
-      token,
-      prepareData: host.prepareData,
-      apply(chunk) {
-        if (committed || chunk.type === "data") host.apply(chunk);
-        else chunks.push(chunk);
-      },
-      preview() {
-        if (host.preview) for (const chunk of chunks) host.preview(chunk);
-      },
-      commit() {
-        committed = true;
-        staged.delete(address);
-        for (const chunk of chunks) host.apply(chunk);
-      }
-    };
-    staged.set(address, entry);
-    const comp = base[COMPONENT_BINDING].component;
-    const binding = props => comp(props, () => token);
-    binding[COMPONENT_BINDING] = { component: comp, address: token };
-    latest.set(address, binding);
-    return entry;
-  };
-  /** The binding a settled call resolves to: its staged version's token. */
-  const settled = (address, binding) => latest.get(address) || binding;
-  /** Whether a mount SHOWS the address — content a refetch stages against.
-   *  A mount showing the address's error shows no landing (3.3). */
-  const showing = address => {
-    const frame = host.get(address);
-    return frame !== undefined && frame.error === undefined;
-  };
-  /** Run a half of the staged entry a token names, while it is still the
-   *  address's (committing removes it). */
-  /** Run a half of the staged entry a token names, while it is still the
-   *  address's (committing removes it). */
-  const named = (token, half) => {
-    const entry = staged.get(contentAddress(token));
-    if (entry && entry.token === token) entry[half]();
-  };
-  stagedContent.preview = token => named(token, "preview");
-  stagedContent.commit = token => named(token, "commit");
-  /** Resolve a flight reference (see `ServerComponentPlugin`) to the call's
-   *  binding. Registered so repeat references stay identity-stable. */
-  resolveServerComponent = (id, address) => settled(address, bindingFor(address, id));
-  // Version history per address, client-stamped: the client is the only
-  // party that observes ordering across transports (a getter refetch, a
-  // mutation's regions, a preload), so stale-guarding is per-address here.
   const versions = new Map();
   const bump = address => {
     const version = (versions.get(address) || 0) + 1;
     versions.set(address, version);
-    // A newer response for the address outdates any staged one: committed
-    // late, the host's version guard would drop its writes anyway.
     staged.delete(address);
-    // Supersession is a death (§9.5, Client face 4): a newer version from
-    // another response — a getter refetch, a preload, a mutation's region —
-    // makes an open live connection's later chunks inert under the
-    // stale-guard, so it is cancelled and the loop reconnects from the
-    // death. The connections are the live wire tier's (wire-tier.ts): a
-    // page with the tier absent has none to cancel.
     tierLoads.wire?.r?.cancel(host, address);
     return version;
   };
-  /**
-   * An unstaged response has begun for an address — at its header, before
-   * its body is read. The address's store moves to the response's version
-   * NOW: the address is a source (`host.landing`), and from here until the
-   * body's first flush it reads "in flight" — a mount opened in between
-   * pends on that landing instead of materializing the superseded one. The
-   * body's own `start` chunk then writes the same version and nothing. The
-   * version is the response's identity for its data too (the integration's
-   * table rotates on it — frames-rulings 1.2), so nothing else announces
-   * the response.
-   */
   const begin = (address, version) => host.apply({ type: "start", id: address, version });
+  const state = {
+    host,
+    byAddress,
+    bindingFor,
+    staged,
+    latest,
+    calls,
+    stagedContent,
+    bump,
+    begin
+  };
   return {
+    capture() {
+      loadTransportTier();
+    },
     intercept:
       intercept &&
       (info => {
         const hit = intercept(info);
-        // A locally-answered call (t=0 document adoption) resolves the
-        // call's binding like a network answer would — the reader mounts
-        // the same per-function component, and the record under the address
-        // is how later calls for the same (function, args) find the content.
-        // A DEFERRED answer (the boundary is still arriving) resolves the
-        // binding when it lands, or `undefined` — a miss after all — when
-        // the page has nothing left to deliver it; the caller fetches then.
-        // A miss goes to the wire: start the morph's tier with the request
-        // (see `prepareMorph`).
-        if (hit === undefined) return void prepareMorph();
+        if (hit === undefined) return void (prepareMorph(), loadTransportTier());
         const address = frameAddress(info.id, info.args);
-        // The document's answer is a call too (see `calls`): a later
-        // `reset` of the adopted frame re-asks it over the wire.
         if (!info.meta?.live) calls.set(address, info);
         const binding = () => bindingFor(address, info.id);
         if (typeof hit.then === "function")
           return hit.then(landed => (landed ? binding() : undefined));
         return binding();
       }),
-    // Preload-at-call (plan §1, the wire row): `live()` fires this at the
-    // call, before its first fetch, so the tier's import races only the
-    // request; `handle`'s live arm awaits the same load.
     onLive() {
       prepareTier("wire");
     },
-    // The resume request is the tier's (`resume`: the ordinal, the mount's
-    // have-list). Before the tier is resident nothing here has shown a live
-    // call — the ledger is kept there — so the loop's own cursor stands.
     resume(info) {
       return tierLoads.wire?.r?.resume(host, info, versions);
     },
     handle(response, ctx) {
       if (!isFrameStreamResponse(response)) return undefined;
-      // The call's address names its store: a repeat call — refetch,
-      // preload, cache read — writes into the same store, morphing whatever
-      // mounts are bound to it; other args write elsewhere and mounted
-      // content is untouched (preload isolation is the default, not a rule).
-      const address = frameAddress(ctx.id, ctx.args);
-      const binding = bindingFor(address, ctx.id);
-      // A single-flight response is a MUTATION's: it carries regions for the
-      // calls it invalidated, and the caller wants the mutation's value
-      // rather than a component.
-      if (response.headers.has(SINGLE_FLIGHT_HEADER)) {
-        return applyFlightResponse(response, address, binding);
-      }
-      // A `live` loop's call (its wire slot rides on the ctx, see
-      // LIVE_WIRE) is the live wire tier's (wire-tier.ts, `connect`): the
-      // binding resolves it, and the response's lifetime reaches the loop
-      // through the slot (§9.5, Client face 2). The arm AWAITS the tier —
-      // `live()` started the load at the call (`onLive`), so the import
-      // raced only the request and is usually here; the body is not read
-      // before it is, so a live connection without the tier cannot happen.
-      // `connection.ended` is set inside `connect`, before the promise this
-      // returns resolves — the loop reads it after awaiting the call.
+      response.headers.get(FRAME_TIERS_HEADER)?.split(",").forEach(prepareTier);
       const wire = ctx[LIVE_WIRE];
-      if (wire)
+      if (wire) {
+        const address = frameAddress(ctx.id, ctx.args);
+        const binding = bindingFor(address, ctx.id);
         return prepareTier("wire").then(() =>
           tierLoads.wire.r.connect(response, wire, address, binding, host, bump, begin)
         );
-      // The call behind the address, for a re-ask (see `calls`): a plain
-      // response's — a `live` loop owns its own reconnects.
-      calls.set(address, ctx);
-      const version = bump(address);
-      // A refetch of a call a boundary is SHOWING is staged (see `stage`)
-      // and settles when its whole body is buffered, not at the header. The
-      // header is not an answer (#2977 said it for address switches; this
-      // is the same address): until the reader settles, the transition that
-      // drove the refetch — `isPending(source)`, a `refresh` inside an
-      // action's transaction holding an optimistic write over the old slot
-      // args (§9.2.2) — must keep reading pending, and the content must not
-      // land before it commits or the boundary tears against what that
-      // transition still holds. A cold mount or a switch to an address
-      // nothing shows writes through with header-time resolution: the mount
-      // needs the binding to place the boundary and the shell gate is its
-      // hold — settling those late would block progressive streaming
-      // behind a completed body. So does a response for an address whose
-      // mounts show an ERROR (frames-rulings 3.3): an errored landing is
-      // not content a transaction could hold, and the re-ask that asked
-      // for this response awaits its landing through the host, not a token.
-      const entry = showing(address) ? stage(address, binding, version) : undefined;
-      // Observe tier: the `start` carries when the request went out (the
-      // server-function client's `ctx.startedAt`), the origin the address's
-      // landing promise is stamped with (see `FrameHost.landing`, #4140).
-      if (!entry)
-        IS_OBSERVE
-          ? host.apply({ type: "start", id: address, version, startedAt: ctx.startedAt })
-          : begin(address, version);
-      const target = entry || host;
-      // The root shares this call's version (`begin` already opened its
-      // store on it). A nested region is its own frame: the element
-      // persists across parent address changes — identity is (occurrence,
-      // arg), and a direct response's wire id is the function id — so it
-      // has its own version history. Stamping it with the parent address's
-      // counter drops a later argument's region as stale once a
-      // same-argument refetch has bumped that counter (#3894). Same rule
-      // as a single-flight region: one bump per frame, once per response.
-      const applied = applyFrameResponse(response, target, {
-        as: address,
-        version: frameId => (frameId === address ? version : bump(frameId))
-      }).catch(err =>
-        target.apply({
-          id: address,
-          version,
-          r: { ":error": { message: String(err && err.message) } }
-        })
-      );
-      return entry ? applied.then(() => settled(address, binding)) : binding;
+      }
+      const load = loadTransportTier();
+      if (load.r) return load.r.handleResponse(state, response, ctx);
+      return load.then(() => tierLoads.transport.r.handleResponse(state, response, ctx));
     },
-
-    /**
-     * Declares that the document is showing a call. Hydration-data values
-     * never travel through the transport (the integration seeds its cache
-     * straight from the serialized state), so the call's address arrives
-     * through this seam instead — the t=0 reference carries it (see
-     * ServerComponentPlugin.serialize). Minting the binding here keeps a
-     * post-load refetch of the same call resolving a value whose component
-     * matches what the document mounted. (The reference the reader holds
-     * at t=0 is the bootstrap's BINDING for the address — branded there —
-     * never the bare per-function placeholder, so nothing brands it here.)
-     */
     showing(address, functionId) {
       bindingFor(address, functionId);
     }
   };
-
-  /**
-   * A mutation whose payload includes markup. The regions stream to the
-   * boundaries showing the calls they refresh — untouched by this call
-   * site's identity, since they belong to whatever is reading those calls —
-   * while the `outcome` chunks carry the `{ value, data }` envelope a plain
-   * single-flight body would have held, component-valued entries included
-   * (as flight references resolving to the very components those boundaries
-   * hold). The decoded envelope then takes the SAME delivery path a plain
-   * body takes (`deliverFlightData`: each registered consumer receives its
-   * source's slice, in registration order), and the caller gets the same
-   * value, so a mutation reads identically whether or not any of what it
-   * invalidated was markup.
-   */
-  async function applyFlightResponse(response, address, binding) {
-    // The mutation's own markup (when it returned a component) belongs to
-    // this call's address; every other frame in the response already
-    // arrives under the address of the call it refreshes — mounts are bound
-    // to addresses, so region roots need no routing: a bound address morphs,
-    // an unbound one warms its store until something binds it (the
-    // envelope's reference to the same call resolves this handler's
-    // binding, so the content mounts wherever the seeded value is read).
-    const rootId = response.headers.get(FRAME_STREAM_HEADER) ?? "";
-    const as = rootId ? address : undefined;
-
-    // The envelope decodes progressively, exactly as a plain single-flight
-    // body does: outcome chunks are the codec's own nodes, so replaying them
-    // framed lets async values inside flight data settle as they arrive.
-    let feed;
-    const source = new ReadableStream({
-      start(controller) {
-        feed = controller;
-      }
-    });
-    const payload = deserializeStream(new Response(source), flightCodec(getServerFunctionsCodec()));
-    let carried = false;
-
-    // A region for a call a boundary is SHOWING is staged like a refetch
-    // (see `stage`): its chunks — nested regions' included, which ride under
-    // the root's wire name — buffer until a mount commits the token its
-    // envelope reference resolves, which happens when the integration's
-    // cache takes the slice this response delivers. A region nothing shows
-    // warms its store directly.
-    const regions = new Map();
-    const regionOf = id => {
-      for (const [root, entry] of regions)
-        if (id === root || id.startsWith(root + ".")) return entry;
-    };
-    const target = {
-      apply: chunk => {
-        const entry = regionOf(chunk.id);
-        if (entry) entry.apply(chunk);
-        else host.apply(chunk);
-      },
-      prepareData: host.prepareData
-    };
-
-    await applyFrameResponse(response, target, {
-      as,
-      // Every frame in the response gets its own bump, and the integration
-      // rotates that frame's response-scoped state (data tables) — a region
-      // is as much a new stream into a boundary as a navigation is.
-      version: frameId => {
-        const version = bump(frameId);
-        let entry = regionOf(frameId);
-        if (!entry && showing(frameId)) {
-          entry = stage(frameId, frameId === as ? binding : byAddress.get(frameId), version);
-          if (entry) regions.set(frameId, entry);
-        }
-        return version;
-      },
-      onOutcome: text => {
-        carried = true;
-        feed.enqueue(createChunk(text));
-      }
-    });
-    feed.close();
-
-    // A frame stream tagged single-flight always carries its envelope; an
-    // absent one is a truncated response, not an empty payload.
-    if (!carried) throw new Error("Single-flight frame response carried no outcome");
-
-    const envelope = await payload;
-    // The one delivery path (see server-functions/shared.js): the response
-    // header names the folded sources, each consumer gets its slice.
-    await deliverFlightData(response, envelope.data);
-    // Mirrors the data-only path: responses carrying integration metadata
-    // (the redirect carrier, `X-Revalidate`) are control flow for the
-    // consumers to interpret; a bare error-tagged one throws.
-    if (response.headers.has(ERROR_HEADER) && !hasFlightMetadata(response)) {
-      throw envelope.value;
-    }
-    // A mutation that answered with markup for its own boundary resolves to
-    // the call's binding, like a getter would.
-    return rootId ? settled(address, binding) : envelope.value;
-  }
 }
