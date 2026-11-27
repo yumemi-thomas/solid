@@ -15,6 +15,7 @@ import {
   createMemo,
   flush,
   enableHydration,
+  loadStreamHydration,
   enforceLoadingBoundary,
   resetErrorHalt,
   ROOT_ERROR_HOOK,
@@ -2561,6 +2562,23 @@ function loadModuleAssets(mapping) {
  * around the app. Otherwise the app's hydration ids are allocated under the
  * document component's owner tree and this walk can never claim them.
  */
+function needsStreamHydration(hy) {
+  if (!hy) return false;
+  if (hy.ai) return true;
+  const hyr = hy.r;
+  if (!hyr) return false;
+  for (const k in hyr) {
+    const v = hyr[k];
+    if (
+      v != null &&
+      (typeof v[Symbol.asyncIterator] === "function" ||
+        (v.s === 1 && v.v != null && typeof v.v[Symbol.asyncIterator] === "function"))
+    )
+      return true;
+  }
+  return false;
+}
+
 export function hydrate(
   fn: () => JSX.Element,
   node: MountableElement,
@@ -2684,63 +2702,70 @@ export function hydrate(code, element, options = {}) {
   // each hydrate() root preloads it (loadModuleAssets dedupes the fetches).
   const hyr = globalThis._$HY.r;
   const rootMapping = hyr && (hyr[options.renderId + "_assets"] || hyr["_assets"]);
-  if (rootMapping && typeof rootMapping === "object") {
-    const p = loadModuleAssets(rootMapping);
-    if (p) {
-      gatherHydratable(element, options.renderId);
-      // This root's render is deferred behind the preload, but sharedConfig
-      // is shared and LIVE: another hydrate() root can run its synchronous
-      // prologue before this .then fires — islands entry-clients start
-      // several roots in one tick — replacing registry/gather, and the first
-      // deferred root to finish clears `hydrating` for everyone after it.
-      // Re-install this root's scope around its deferred render so it claims
-      // exactly what it gathered (the same per-root pairing a late boundary
-      // resume gets from captureBoundaryScope).
-      const registry = sharedConfig.registry;
-      const gather = sharedConfig.gather;
-      let disposer;
-      p.then(
-        () => {
-          sharedConfig.registry = registry;
-          sharedConfig.gather = gather;
-          sharedConfig.hydrating = true;
-          try {
-            disposer = render(code, element, [...element.childNodes], options);
-          } finally {
-            sharedConfig.hydrating = false;
-          }
-        },
-        err => {
-          // A chunk failed to preload; hydration can't claim the server DOM
-          // (lazy components have no module). Fall back to a fresh client
-          // render replacing the server markup — lazy's own import() gets to
-          // retry through normal channels — instead of a silently dead page.
-          // A document root has no such fallback: the shell (<html>/<head>/
-          // <body>) cannot be client-created, and rendering the document tree
-          // fresh dies deep in the walk with an unrelated "Hydration Mismatch"
-          // (#3338). Abandon hydration explicitly instead — the server markup
-          // stays — and hand the failure to the platform's uncaught-error
-          // channel (window.onerror / error monitoring) with its real cause,
-          // the same way an uncaught reactive error is reported.
-          sharedConfig.hydrating = false;
-          sharedConfig.registry = undefined;
-          if (element.nodeType === 9) {
-            // The preload failure itself is what monitoring needs (which chunk,
-            // why); the framing is dev-only so prod ships no wrapper Error.
-            if ("_SOLID_DEV_")
-              console.error(
-                "Hydration module preload failed for a document root; a document shell cannot " +
-                  "be client-rendered, so hydration was abandoned and the page is not interactive."
-              );
-            (globalThis.reportError || console.error)(err);
-            return;
-          }
-          console.error("Hydration module preload failed, falling back to client render:", err);
+  const assetPreload =
+    rootMapping && typeof rootMapping === "object" ? loadModuleAssets(rootMapping) : undefined;
+  const streamPreload =
+    !(sharedConfig as any).hasStreamHydration && needsStreamHydration(hy)
+      ? loadStreamHydration()
+      : undefined;
+  const p =
+    assetPreload && streamPreload
+      ? Promise.all([assetPreload, streamPreload])
+      : assetPreload || streamPreload;
+  if (p) {
+    gatherHydratable(element, options.renderId);
+    // This root's render is deferred behind the preload, but sharedConfig
+    // is shared and LIVE: another hydrate() root can run its synchronous
+    // prologue before this .then fires — islands entry-clients start
+    // several roots in one tick — replacing registry/gather, and the first
+    // deferred root to finish clears `hydrating` for everyone after it.
+    // Re-install this root's scope around its deferred render so it claims
+    // exactly what it gathered (the same per-root pairing a late boundary
+    // resume gets from captureBoundaryScope).
+    const registry = sharedConfig.registry;
+    const gather = sharedConfig.gather;
+    let disposer;
+    p.then(
+      () => {
+        sharedConfig.registry = registry;
+        sharedConfig.gather = gather;
+        sharedConfig.hydrating = true;
+        try {
           disposer = render(code, element, [...element.childNodes], options);
+        } finally {
+          sharedConfig.hydrating = false;
         }
-      );
-      return () => disposer && disposer();
-    }
+      },
+      err => {
+        // A chunk failed to preload; hydration can't claim the server DOM
+        // (lazy components have no module). Fall back to a fresh client
+        // render replacing the server markup — lazy's own import() gets to
+        // retry through normal channels — instead of a silently dead page.
+        // A document root has no such fallback: the shell (<html>/<head>/
+        // <body>) cannot be client-created, and rendering the document tree
+        // fresh dies deep in the walk with an unrelated "Hydration Mismatch"
+        // (#3338). Abandon hydration explicitly instead — the server markup
+        // stays — and hand the failure to the platform's uncaught-error
+        // channel (window.onerror / error monitoring) with its real cause,
+        // the same way an uncaught reactive error is reported.
+        sharedConfig.hydrating = false;
+        sharedConfig.registry = undefined;
+        if (element.nodeType === 9) {
+          // The preload failure itself is what monitoring needs (which chunk,
+          // why); the framing is dev-only so prod ships no wrapper Error.
+          if ("_SOLID_DEV_")
+            console.error(
+              "Hydration module preload failed for a document root; a document shell cannot " +
+                "be client-rendered, so hydration was abandoned and the page is not interactive."
+            );
+          (globalThis.reportError || console.error)(err);
+          return;
+        }
+        console.error("Hydration module preload failed, falling back to client render:", err);
+        disposer = render(code, element, [...element.childNodes], options);
+      }
+    );
+    return () => disposer && disposer();
   }
   try {
     gatherHydratable(element, options.renderId);

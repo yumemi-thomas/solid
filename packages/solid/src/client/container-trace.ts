@@ -43,7 +43,7 @@ import * as core from "solid-js";
 // read of that slot from here is an import of the flat main module's binding,
 // and the app bundler keeps the adapter eager for it — on a page that never
 // creates a client store, 2.5 KB minified it has no use for.
-import { hydrateStoreLike } from "./store-hydration.js";
+import { applyPatches, forwardIteratorReturn, hydrateStoreLike } from "./store-hydration.js";
 
 // The seams, typed here because the main entry marks them `@internal`
 // and strips them from its declarations — `sharedConfig` is public, listed
@@ -54,14 +54,8 @@ import { hydrateStoreLike } from "./store-hydration.js";
 // variable retains every export of the flat main module (measured: +32 KB
 // minified on the page, the store wrappers' engine edge included).
 interface Seams {
-  applyPatches(target: any, patches: any[]): void;
-  forwardIteratorReturn(it: any, value?: any): any;
   sharedConfig: { hydrating: boolean; onHydrationEnd?: (callback: () => void) => void };
 }
-const applyPatches = (target: any, patches: any[]) =>
-  (core as unknown as Seams).applyPatches(target, patches);
-const forwardIteratorReturn = (it: any, value?: any) =>
-  (core as unknown as Seams).forwardIteratorReturn(it, value);
 
 /**
  * The projection constructor with solid's hydration dispatch — what

@@ -156,11 +156,14 @@ export { enableServerComponentHydration } from "./client/hydration.js";
 export {
   applyPatches,
   forwardIteratorReturn,
+  wrapFirstYield,
+  adoptedAnswerStream
+} from "./client/store-hydration.js";
+export {
+  loadStreamHydration,
   readSerializedOrCompute,
   subFetch,
   readHydratedValue,
-  wrapFirstYield,
-  adoptedAnswerStream,
   withHydrationGate,
   noHydrationId,
   markTopLevelSnapshotScope,

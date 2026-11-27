@@ -2065,6 +2065,7 @@ function processResult<T>(
         ssrSource === "hybrid" ||
         inLiveServerComponentScope(scopeOwner) ||
         (!!(source as any)[LIVE_SOURCE] && !(!serializes && pumpsInScope(ctx, scopeOwner)));
+      if (serializes && ctx) (ctx as any)._ai = 1;
       // In-flight stream stamp: a re-created node handed the SAME promise
       // must JOIN this consumption (`s === 3` above), never re-consume.
       (result as any).s = 3;
@@ -2235,6 +2236,7 @@ function processResult<T>(
       ssrSource === "hybrid" ||
       inLiveServerComponentScope(scopeOwner) ||
       (!!(result as any)[LIVE_SOURCE] && !(!serializes && pumpsInScope(ctx, scopeOwner)));
+    if (serializes && ctx) (ctx as any)._ai = 1;
     if (hybrid) {
       let currentResult = result;
       let iter: AsyncIterator<T>;

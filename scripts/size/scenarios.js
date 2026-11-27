@@ -39,6 +39,7 @@
 // `solid-js` entry would otherwise remap `solid-js/internal` (the seams the
 // runtimes consume — packages/solid/src/internal.ts) to `solid.js/internal`.
 const alias = {
+  "solid-js/internal/hydration-stream": "../../packages/solid/dist/hydration-stream.js",
   "solid-js/internal": "../../packages/solid/dist/internal.js",
   "solid-js": "../../packages/solid/dist/solid.js",
   "@solidjs/web": "../../packages/web/dist/web.js",
@@ -127,6 +128,7 @@ const solidConditions = ["solid", "import", "browser", "default"];
 // swallow `solid-js/attribution` (see the matching note above).
 const observeAlias = {
   "solid-js/attribution": "../../packages/solid/dist/attribution.js",
+  "solid-js/internal/hydration-stream": "../../packages/solid/dist/hydration-stream.js",
   "solid-js/internal": "../../packages/solid/dist/internal.js",
   "@solidjs/signals/attribution": "../../packages/signals/dist/observe/attribution.js",
   "solid-js": "../../packages/solid/dist/solid.observe.js",

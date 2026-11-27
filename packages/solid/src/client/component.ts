@@ -6,7 +6,7 @@ import {
   markFlight,
   observedComponent
 } from "../client/core.js";
-import { _lazyHydrationLookup, sharedConfig, tracing } from "./hydration.js";
+import { _hydrationEnabled, lazyHydrationLookup, sharedConfig, tracing } from "./hydration.js";
 import type { Element as SolidElement } from "../types.js";
 
 /**
@@ -195,8 +195,8 @@ export function lazy<T extends Component<any>>(
   };
   const wrap: T & { preload?: () => void; moduleUrl?: string } = ((props: any) => {
     // `hydrating` can only be true once enableHydration() installed the slot.
-    if (sharedConfig.hydrating)
-      comp = _lazyHydrationLookup!(comp, moduleUrl, exportName) as () => T;
+    if (_hydrationEnabled && sharedConfig.hydrating)
+      comp = lazyHydrationLookup(comp, moduleUrl, exportName) as () => T;
     // The import (`p`) is shared across instances, but the memo tracking it
     // must be owned per instance: a shared memo dies with whichever instance
     // rendered first, stranding survivors mid-flight (#2915). load() runs

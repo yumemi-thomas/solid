@@ -6009,7 +6009,8 @@ function allSettled(promises) {
 function withShellEnd(html, context, renderId, nonce, noScripts) {
   if (noScripts || !context || !context.bootstrap) return html;
   const id = JSON.stringify(renderId).replace(/</g, "\\u003C");
-  const marker = `<script${nonceAttr(nonce, "script")}>_$HY.s[${id}]=1,_$HY.sw&&_$HY.sw(${id})</script>`;
+  const ai = context._ai ? "_$HY.ai=1," : "";
+  const marker = `<script${nonceAttr(nonce, "script")}>${ai}_$HY.s[${id}]=1,_$HY.sw&&_$HY.sw(${id})</script>`;
   const at = html.indexOf("</body>", html.length - 512);
   return at < 0 ? html + marker : html.slice(0, at) + marker + html.slice(at);
 }
