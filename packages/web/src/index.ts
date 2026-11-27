@@ -1,41 +1,115 @@
-import {
-  getNextElement,
-  insert,
-  installHostTagging,
-  runHydrationEvents,
-  spread,
+export {
+  DOMWithState,
+  ChildProperties,
+  DOMElements,
   SVGElements,
   MathMLElements,
+  VoidElements,
+  RawTextElements,
   Namespaces,
+  DelegatedEvents,
+  generateHydrationScript,
+  HydrationScript,
+  effect,
+  memo,
+  untrack,
+  getOwner,
+  createComponent,
+  heldRead,
+  mergeProps,
+  getRequestEvent,
+  getHydrationWriter,
+  takeHydrationValue,
+  setLinkClaim,
+  hasServerLinkState,
+  getTraceContext,
+  parseCookieHeader,
+  serializeCookie,
+  clearFlashCookie,
+  hasFlashCookie,
+  getServerFunctionMetadata,
+  getServerFunctionRPC,
+  isServerFunction,
+  render,
+  setTrustedTypesPolicy,
+  trustedHTML,
+  template,
+  delegateEvents,
+  registerDelegatedRoot,
+  unregisterDelegatedRoot,
   registerDelegatedContainer,
   unregisterDelegatedContainer,
-  getDelegatedRoot
+  dispatchAsInteraction,
+  getDelegatedRoot,
+  setProperty,
+  setStatefulProperty,
+  strictHandler,
+  registerElementClaim,
+  claimElementTree,
+  claimElement,
+  setAttribute,
+  setAttributeNS,
+  className,
+  addEvent,
+  style,
+  readShallow,
+  setStyleProperty,
+  dynamicProperty,
+  applyRef,
+  ref,
+  scope,
+  installHostTagging,
+  installHydrationRuntime,
+  insert,
+  hydrate,
+  getNextElement,
+  getNextMatch,
+  getNextMarker,
+  getFirstChild,
+  getNextSibling,
+  runHydrationEvents,
+  installServerComponentHydration,
+  getHydrationKey,
+  RequestContext
 } from "./client.js";
-import {
-  createComponent,
-  createMemo,
-  // @ts-expect-error `createOwner` is `@internal` in solid-js's declarations (typed in
-  // solid-js/internal); importing it from solid-js keeps it one binding in the bundle.
-  createOwner,
-  createRoot,
-  createSignal,
-  getOwner,
-  onCleanup,
-  runWithOwner,
-  untrack,
-  omit,
-  Component,
-  createEffect,
-  createRenderEffect,
-  type Owner,
-  type Setter,
-  type DynamicOptions
-} from "solid-js";
-import { dynamicCore, sharedConfig } from "solid-js/internal";
-import type { JSX } from "../jsx/jsx.js";
-
-export * from "./client.js";
-// Pay-for-use: retained only when compiled patch-mode output imports
+export type {
+  HeadTag,
+  AssetDescriptor,
+  ExclusiveAssetDescriptor,
+  AssetEntry,
+  ResponseStub,
+  RequestEventLocals,
+  HydrationWriter,
+  HydrationValue,
+  LinkClaimHandler,
+  RequestEvent,
+  CookieOptions,
+  CallEvent,
+  CallListener,
+  CallLive,
+  CallRequestEvent,
+  CallRequestListener,
+  FrameAppliedEvent,
+  FrameEvent,
+  FrameListener,
+  FrameLive,
+  FrameProducedEvent,
+  InvocationEvent,
+  InvocationListener,
+  InvocationLive,
+  RenderEvent,
+  RenderListener,
+  RenderLive,
+  RenderRoute,
+  TraceContext,
+  TraceProvider,
+  ServerFunction,
+  ServerFunctionMetadata,
+  ServerFunctionRPC,
+  ElementClaimOptions
+} from "./client.js";
+export { waitAsset, warmAsset, acquireAsset, useHead } from "./head-client.js";
+export { spread, assign } from "./spread.js";
 export * from "./server-mock.js";
 export * from "./response.js";
 export type { JSX } from "../jsx/jsx.js";
@@ -52,520 +126,21 @@ export {
   Hydration
 } from "solid-js";
 
-/**
- * Build-time constant indicating whether code is running on the server. This
- * client entry sets it to `false`; the matching server entry (`@solidjs/web`
- * resolved through the `solid` server export condition) sets it to `true`.
- *
- * Bundlers can dead-code-eliminate branches gated on `isServer`, so guarding
- * browser-only code with `if (!isServer) {…}` keeps it out of the SSR bundle
- * entirely.
- *
- * @example
- * ```ts
- * import { isServer } from "@solidjs/web";
- *
- * if (!isServer) {
- *   // Browser-only: tree-shaken out of the SSR bundle.
- *   window.addEventListener("resize", onResize);
- * }
- * ```
- */
 export const isServer: boolean = false;
-
-/**
- * Build-time constant indicating whether code is running in a dev build.
- * Replaced statically (`_SOLID_DEV_`) by the bundler integration, so guards
- * like `if (isDev) {…}` are stripped from production builds.
- *
- * Use this to gate dev-only diagnostics, warnings, or expensive invariants
- * that should never ship to production.
- *
- * @example
- * ```ts
- * import { isDev } from "@solidjs/web";
- *
- * if (isDev) {
- *   console.warn("debug-only path");
- * }
- * ```
- */
 export const isDev: boolean = "_SOLID_DEV_" as unknown as boolean;
 
-export type IntrinsicElement = Extract<keyof JSX.IntrinsicElements, string>;
-export type ValidComponent = IntrinsicElement | Component<any> | (string & {});
-export type ComponentProps<T extends ValidComponent> =
-  T extends Component<infer P>
-    ? P
-    : T extends keyof JSX.IntrinsicElements
-      ? JSX.IntrinsicElements[T]
-      : Record<string, unknown>;
-
-/** @deprecated Props of the deprecated `<Dynamic>`; see `dynamic()`. */
-export type DynamicProps<T extends ValidComponent, P = ComponentProps<T>> = {
-  [K in keyof P]: P[K];
-} & {
-  component: T | null | undefined | false;
-};
-
-/**
- * Renders its children into a different part of the DOM (modal roots,
- * tooltips, layers that need to escape an `overflow: hidden` ancestor).
- *
- * If `mount` is omitted, the portal attaches to `document.body`. The portal
- * still participates in the parent's reactive scope and disposes when the
- * parent does.
- *
- * Portals are client-only islands: the server renders nothing for them, and
- * under hydration the children render fresh once hydration settles. Async
- * read inside a portal therefore starts on the client — data that should be
- * fetched on the server belongs above the portal (hoist the read, not the
- * render), and async UI inside one wants its own `<Loading>` boundary.
- *
- * @example
- * ```tsx
- * <Portal mount={document.getElementById("modal-root")!}>
- *   <Dialog />
- * </Portal>
- * ```
- *
- * @description https://docs.solidjs.com/reference/solid-web/components/portal
- */
-export function Portal(props: {
-  mount?: Element | ShadowRoot;
-  children: JSX.Element;
-}): JSX.Element {
-  // Everything the portal allocates (content memo, effects, anchor memo)
-  // lives under one dedicated id scope: the server Portal renders nothing,
-  // so without this the client primitives would advance the parent's
-  // child-id counter and shift every hydration id after the portal. Both
-  // sides consume exactly one slot from the parent instead — the owner
-  // here, `getNextChildId` in the server Portal.
-  return runWithOwner(createOwner(), () => portalImpl(props)) as unknown as JSX.Element;
-}
-
-// Nested portals (#4963): an inner portal's insert effect runs before its
-// parent's (it is queued while the parent's content computes), so appending
-// to the mount would put the inner content first. While a portal's content
-// computes, `claimPortal` collects the start markers of the portals created
-// under it; the parent then places its region before the first of them
-// already in its mount.
-let claimPortal: ((start: Node) => void) | undefined;
-
-function portalImpl(props: { mount?: Element | ShadowRoot; children: JSX.Element }): JSX.Element {
-  let kids: Node[] = [];
-  const treeMarker = document.createTextNode(""),
-    startMarker = document.createTextNode(""),
-    endMarker = document.createTextNode(""),
-    mount = () => props.mount || document.body,
-    // `ssrSource: "client"`: the server renders nothing for portals, so under
-    // hydration the children must not evaluate during the hydration walk —
-    // the gate defers the compute to the settle flush, where it runs as a
-    // plain fresh render. Ancestor boundaries are `_initialized` by then, so
-    // async discovered inside the portal forwards as ordinary pending status
-    // instead of regressing anything to a fallback (#2876).
-    // `loadingValue: undefined` is the declared commit #0: the server renders
-    // nothing for portals, so "nothing" is exactly what the pre-compute
-    // window shows (#2981).
-    content = createMemo<JSX.Element>(
-      () => {
-        const prev = claimPortal;
-        kids = [];
-        claimPortal = n => kids.push(n);
-        try {
-          return [startMarker, props.children] as unknown as JSX.Element;
-        } finally {
-          claimPortal = prev;
-        }
-      },
-      {
-        ssrSource: "client",
-        loadingValue: undefined
-      }
-    );
-
-  claimPortal && claimPortal(startMarker);
-  createRenderEffect<[Element | ShadowRoot, JSX.Element, Owner | null]>(
-    // `getOwner()` is captured in the compute-half: the effect-half runs from
-    // the queue with no ambient owner, so the insert effect must be parented
-    // explicitly or it leaks (NO_OWNER_EFFECT, #2758).
-    () => [mount(), content(), getOwner()],
-    ([, c, owner]) => {
-      const m = untrack(mount);
-      m.insertBefore(endMarker, kids.find(k => k.parentNode === m) || null);
-      // The insert effect lives in its own root scoped to this run: it is
-      // disposed when the mount changes or the Portal is disposed — not
-      // left attached to the component where previous mounts' effects
-      // would accumulate. The owner parenting preserves context.
-      const dispose = runWithOwner(owner, () =>
-        createRoot(d => {
-          installHostTagging();
-          insert(m, c, endMarker, undefined, { host: () => treeMarker.parentNode });
-          return d;
-        })
-      );
-      return () => {
-        dispose!();
-        // remove [startMarker, endMarker] inclusive — endMarker was appended
-        // by this same effect run and must not survive the cleanup
-        let c: Node | null = startMarker;
-        while (c) {
-          const n: Node | null = c.nextSibling;
-          m.removeChild(c);
-          if (c === endMarker) break;
-          c = n;
-        }
-      };
-    },
-    // Also `ssrSource: "client"` (like `content` above) so the effect never
-    // fires with empty content during the hydration window — the first run
-    // happens post-settle with the real children, exactly like a fresh mount.
-    { schedule: true, ssrSource: "client" }
-  );
-
-  createEffect(
-    mount,
-    () => {
-      const m = untrack(mount);
-      const ownerRoot = getDelegatedRoot(treeMarker);
-      if (!ownerRoot || (ownerRoot as Node).contains(m)) return;
-      registerDelegatedContainer(m, ownerRoot);
-      return () => unregisterDelegatedContainer(m, ownerRoot);
-    },
-    { ssrSource: "client" }
-  );
-
-  // The anchor is client-only content too: during the hydration walk the
-  // parent's insert only claims server nodes, so a bare `treeMarker` would be
-  // silently dropped and break everything resolving through
-  // `treeMarker.parentNode` (`_$host` retargeting, delegated containers).
-  // Gate it like the rest. The memo isn't caching the (constant) marker —
-  // it's the reactive carrier of the hydration gate: `ssrSource: "client"`
-  // wraps the compute in a hidden gate signal, so the memo reads undefined
-  // during the walk and flips to the marker in the settle flush, re-running
-  // the parent's insert when fresh nodes may be placed again. A memo (not a
-  // naked accessor) so the flip is equals-gated and resolved under this
-  // owner, like any control-flow return.
-  // `loadingValue: undefined` = declared commit #0 ("server rendered
-  // nothing"), same as `content` above (#2981).
-  if (sharedConfig.hydrating)
-    return createMemo<Text | undefined>(() => treeMarker, {
-      ssrSource: "client",
-      loadingValue: undefined
-    }) as unknown as JSX.Element;
-  return treeMarker as unknown as JSX.Element;
-}
-
-// `dynamicComponent` lives in `solid-js` (renderer-agnostic). Re-exported so
-// existing `@solidjs/web` imports keep working. The tag arm stays here.
+export { Portal } from "./portal.js";
 export type { DynamicOptions } from "solid-js";
 export { dynamicComponent } from "solid-js";
+export {
+  dynamic,
+  Dynamic,
+  type DynamicProps,
+  type ValidComponent,
+  type IntrinsicElement,
+  type ComponentProps
+} from "./dynamic.js";
+export { clientOnly } from "./client-only.js";
 
-/**
- * Returns a stable `Component` whose identity is driven by a reactive (and
- * optionally async) `source`. The returned component can be used anywhere a
- * normal component is used; children and props flow through JSX as usual.
- *
- * `source` may return a component, a native tag name (`'input'`, `'textarea'`,
- * etc.), `undefined`, or a `Promise` of any of the above. A pending promise
- * propagates as `NotReadyError` through the surrounding reactive scope, so
- * async swaps compose with `<Loading>` boundaries the same way as `lazy`.
- *
- * During SSR a pending source streams in behind its boundary by default. Pass
- * `{ deferStream: true }` to hold the document's first flush until it settles
- * (the same option `createMemo` takes); the client ignores it.
- *
- * For a tag-name source the element's namespace is inferred from the tag. A
- * tag that exists in both HTML and SVG (`a`, `script`, `style`, `title`) is
- * created as HTML unless the instance passes `xmlns` — the same attribute
- * compiled JSX uses for the same purpose. `is` (customized built-ins) and
- * `xmlns` are read once at creation and then applied as ordinary attributes.
- *
- * `{ static: true }` says the source cannot change: it is called once,
- * untracked, when `dynamic()` is called, and each instance renders the result
- * with no computation of its own — a tag name goes straight to the compiled
- * element path (create or claim, spread), a component is called directly. No
- * owner is created on either side, so hydration keys stay aligned with the
- * compiled output. Use it for a constant (`dynamic(() => "li", { static: true })`
- * in a runtime `styled()`), or per instance from the shape of a prop:
- * `isStatic(props, "as")` is true when the caller wrote `as="button"`
- * (a data property) and false when they wrote `as={cond() ? …}` (a getter),
- * so a polymorphic component keeps a reactive public `as` and still pays
- * nothing for the literal case. A static source may not return a promise.
- *
- * @example
- * ```tsx
- * // `source` can return either a custom Component or a native tag
- * // name — they're interchangeable, and the returned reference is a
- * // stable Component you can use anywhere a normal one would go.
- * const Field = dynamic(() => multiline() ? RichTextEditor : "input");
- * return <Field value={value()} onInput={onInput} />;
- *
- * // An ambiguous tag inside an SVG tree: say which namespace you mean.
- * const Link = dynamic(() => "a");
- * <svg><Link xmlns="http://www.w3.org/2000/svg" href="/x">…</Link></svg>
- *
- * // A polymorphic component: no memo when `as` arrived as a literal.
- * function Polymorphic(props) {
- *   const Tag = dynamic(() => props.as, { static: isStatic(props, "as") });
- *   return <Tag {...omit(props, "as")} />;
- * }
- * ```
- *
- * @description https://docs.solidjs.com/reference/solid-web/components/dynamic
- */
-/**
- * A component from a reactive source. The source may answer with the
- * component itself, a promise of it, or an async iterable of it — a `live`
- * server component reference's answer is the last: the memo underneath pumps
- * the iterable as it pumps any async source, and its value is the component
- * the server answered with (a reconnect re-yields the same binding and is
- * equality-quiet; nothing here re-mounts).
- *
- * Under SSR an async answer is an ordinary async memo's: its landing is
- * serialized per instance and adopted here at hydration, so the source may
- * stay async only when what it resolves to can cross — a server component
- * (as a reference) or a serializable value (a tag name). A promise of a
- * client component function is a dev error on the server
- * (`DYNAMIC_ASYNC_COMPONENT`): resolve the async upstream, or use `lazy()`.
- *
- * Cost: because a source may answer with a tag name, one `dynamic` on a page
- * retains the element runtime (create/claim, `spread`, the namespace tables)
- * for everyone. A source that only ever answers with a component — a server
- * component mount — should use `dynamicComponent`, which never does.
- */
-export function dynamic<T extends ValidComponent>(
-  source: () => T | Promise<T> | AsyncIterable<T> | null | undefined | false,
-  options?: DynamicOptions
-): Component<ComponentProps<T>> {
-  return dynamicCore(source, options, staticElement);
-}
-
-// One element for a tag: what the compiler emits for `<tag {...props}>` —
-// claim or create, spread, replay hydration events — and nothing else. Both
-// dynamic() paths end here; the memo path just reaches it from inside a
-// computation.
-function staticElement(tag: string, props: any): JSX.Element {
-  const hydrating = sharedConfig.hydrating;
-  // `is` and `xmlns` are attributes of the element that also decide how it is
-  // CREATED (customized built-in / namespace), so they are read once here,
-  // untracked — the DOM can't change either after creation — and then flow
-  // through spread() like any attribute. Hydration claims the
-  // parser-namespaced node, so neither applies — when it claims: a fresh
-  // render under hydration (a rejected fragment's, adopting by id) spends
-  // the key and creates, like a compiled template.
-  const create = () =>
-    createElement(
-      tag,
-      untrack(() => props.is),
-      untrack(() => props.xmlns)
-    );
-  const el = hydrating ? getNextElement(create) : create();
-  spread(el, props);
-  // Compiled JSX emits runHydrationEvents() after an element that carries
-  // event handlers. Handlers bound through spread() here need the same call,
-  // or events the hydration script queued for this element are only replayed
-  // if some other compiled element happens to hydrate after it.
-  if (hydrating) runHydrationEvents();
-  return el as unknown as JSX.Element;
-}
-
-/**
- * @deprecated Use `dynamic()`. `<Dynamic>` is the same primitive, but its
- * shape puts the tag in the same bag as the element's props: every instance
- * merges `component` in at the call site, `omit()`s it back out here, and
- * builds a fresh `dynamic()` factory (with its memo) because there is nowhere
- * to hoist one. `dynamic()` has none of that and is one line longer:
- *
- * ```tsx
- * // before
- * <Dynamic component={multiline() ? RichTextEditor : "input"} value={value()} />
- *
- * // after — hoist per component instance (or per module for a constant)
- * const Field = dynamic(() => multiline() ? RichTextEditor : "input");
- * <Field value={value()} />
- * ```
- *
- * Remains available in 2.0 (deprecated, no runtime warning); prefer `dynamic()`
- * in new code.
- */
-export function Dynamic<T extends ValidComponent>(props: DynamicProps<T>): JSX.Element {
-  const Comp = dynamic<T>(() => props.component as T | null | undefined | false);
-  return createComponent(Comp, omit(props, "component") as ComponentProps<T>);
-}
-
-// Namespace comes from an explicit `xmlns` first, then from the tag name. The
-// compiler resolves a tag's namespace from its PARENT at build time; this
-// runtime path has no parent yet, so a tag that exists in both HTML and SVG
-// (`a`, `script`, `style`, `title`) is HTML unless `xmlns` says otherwise —
-// the same attribute compiled JSX uses for the same purpose (`<a xmlns=…>`).
-function createElement(
-  tagName: string,
-  is: string | undefined = undefined,
-  xmlns: string | undefined = undefined
-): HTMLElement | SVGElement | MathMLElement {
-  return (
-    xmlns
-      ? document.createElementNS(xmlns, tagName, { is })
-      : SVGElements.has(tagName)
-        ? document.createElementNS(Namespaces.svg, tagName)
-        : MathMLElements.has(tagName)
-          ? document.createElementNS(Namespaces.mathml, tagName)
-          : document.createElement(tagName, { is })
-  ) as HTMLElement | SVGElement | MathMLElement;
-}
-
-function loadClientOnly<T>(
-  fn: () => Promise<any>,
-  setComp: Setter<T | undefined>,
-  exportName?: string
-) {
-  fn().then((m: any) => setComp(() => (exportName ? m[exportName] : m.default)));
-}
-
-/**
- * Wraps a dynamically imported component so it renders only in the browser.
- * The server renders `props.fallback` (and nothing else); the client shows
- * the fallback until the import resolves and the tree has mounted, then
- * swaps the real component in.
- *
- * Unlike `lazy()`, this avoids Suspense entirely and never server-renders
- * the wrapped component — only the fallback — so the component participates
- * in no hydration asset manifest and its code is guaranteed to never run on
- * the server (safe for browser-only libraries touching `window`, DOM
- * measurement, etc.). The mount gate keeps hydration safe: during hydration
- * the fallback is rendered exactly as the server did, and the swap happens
- * only after settle, so there is no mismatch.
- *
- * By default the import starts as soon as `clientOnly` is called (module
- * load); pass `{ lazy: true }` to defer the import to the component's first
- * render. Pass `{ export: "Name" }` to use a named export of the resolved
- * module instead of its default (mirrors `lazy()`'s option).
- *
- * @example
- * ```tsx
- * const Chart = clientOnly(() => import("./Chart.jsx"));
- * // <Chart fallback={<div>Loading chart…</div>} data={data()} />
- * ```
- */
-export function clientOnly<M extends Record<string, any>, K extends keyof M & string>(
-  fn: () => Promise<M>,
-  options: { lazy?: boolean; export: K },
-  moduleUrl?: string
-): Component<ComponentProps<M[K]> & { fallback?: JSX.Element }>;
-export function clientOnly<T extends Component<any>>(
-  fn: () => Promise<{ default: T }>,
-  options?: { lazy?: boolean; export?: string },
-  moduleUrl?: string
-): Component<ComponentProps<T> & { fallback?: JSX.Element }>;
-export function clientOnly<T extends Component<any>>(
-  fn: () => Promise<any>,
-  options: { lazy?: boolean; export?: string } = {},
-  // Injected by the bundler's module-URL pass; consumed only by the server
-  // half (early modulepreload hints). The client ignores it — the import
-  // thunk itself is the loader here.
-  _moduleUrl?: string
-): Component<ComponentProps<T> & { fallback?: JSX.Element }> {
-  const [comp, setComp] = createSignal<T>();
-  let started = !options.lazy;
-  started && loadClientOnly(fn, setComp, options.export);
-  return props => {
-    let Comp: T | undefined;
-    let m: boolean;
-    const rest = omit(props, "fallback") as ComponentProps<T>;
-    // The deferred import starts on the FIRST instance only — all instances
-    // share the module signal, so a second invocation of the importer could
-    // at best duplicate a request the browser dedupes anyway, and at worst
-    // re-run a side-effectful importer.
-    if (!started) {
-      started = true;
-      loadClientOnly(fn, setComp, options.export);
-    }
-    // Deliberately untracked fast path: an already-loaded module (fresh
-    // render after the import settled) skips the gate machinery entirely.
-    if ((Comp = untrack(comp)) && !sharedConfig.hydrating) return Comp(rest);
-    // This hand-rolled gate is NOT replaceable with `ssrSource: "client"`
-    // (the Portal pattern): that defers the compute past hydration, so the
-    // fallback would first evaluate with hydration over and its compiled
-    // templates would CREATE fresh DOM instead of claiming the
-    // server-rendered fallback — observed as an orphaned server fallback
-    // duplicated next to a fresh client copy. Portal can defer because its
-    // server half renders nothing; clientOnly's renders the fallback, so the
-    // fallback must render DURING the walk (mounted=false branch) to adopt
-    // that DOM, and only the post-settle swap is deferred.
-    const [mounted, setMounted] = createSignal(!sharedConfig.hydrating);
-    // The gate memo must be the component's ONLY id-consuming child so the
-    // fallback's elements derive the same hydration ids as under the server
-    // half's mirror memo and get claimed instead of duplicated.
-    const gate = createMemo(
-      () => (
-        (Comp = comp()),
-        (m = mounted()),
-        untrack(() => (Comp && m ? Comp(rest) : props.fallback))
-      )
-    ) as unknown as JSX.Element;
-    // The swap trigger must NOT hold an owner: onSettled registers a tracked
-    // effect, and every non-transparent owner consumes one of the component's
-    // child ids — an id the server half (whose only owner is the mirror memo)
-    // never mints. That shifted the hydration ids of every sibling AFTER a
-    // hydrated clientOnly by one slot, so their template claims missed the
-    // registry and insert tracked never-inserted phantom nodes: the sibling's
-    // first post-hydration re-render then reconciled against the phantom and
-    // inserted beside the orphaned server node instead of replacing it.
-    // onHydrationEnd is the ownerless "all hydration complete" channel
-    // (waits for pending streamed boundaries; microtask-fires if already
-    // done) — exactly the gate's semantics, and it consumes nothing. It is
-    // installed by enableHydration() only, so CSR bundles shake it; absent
-    // means hydration is definitionally complete — fire on a bare microtask,
-    // which is exactly what onHydrationEnd itself does in that state.
-    const onHydrationEnd = sharedConfig.onHydrationEnd;
-    const release = () => setMounted(true);
-    onHydrationEnd ? onHydrationEnd(release) : queueMicrotask(release);
-    return gate;
-  };
-}
-
-/**
- * Declares the HTTP response status (and optional status text) for the
- * lifetime of the current reactive scope during SSR — call it bare in a
- * component or reactive-scope body where the status is decided (a 404
- * route, an error fallback). Client build: a no-op — the response head was
- * sent long ago.
- *
- * Naming note — this is a scope-tied *declaration*, not a mutation: "while
- * this reactive scope is live, the response has this status." Solid
- * reserves `set*` verbs for event-time mutation; like
- * `createSignal`/`onCleanup` this is called in scope bodies and un-declares
- * on scope disposal.
- *
- * Retraction semantics (server): the write snapshots the previous
- * `event.response` status at write time and restores it when the owning
- * scope is disposed — so a boundary that errored, declared a status, and
- * then recovered retracts its write instead of stomping a status a
- * surviving part of the tree legitimately set. Once the response head is
- * `committed` (head derived/sent — the shell flush of a piped
- * `renderToStream`, the completion of an awaited one or of
- * `renderToString`), writes and retractions are no-ops.
- */
 export function httpStatus(_code: number, _text?: string): void {}
-
-/**
- * Declares an HTTP response header (or with `append`, appends to one) for
- * the lifetime of the current reactive scope during SSR — call it bare in a
- * component or reactive-scope body. Client build: a no-op — the response
- * head was sent long ago.
- *
- * Naming note — this is a scope-tied *declaration*, not a mutation: "while
- * this reactive scope is live, the response has this header." Solid
- * reserves `set*` verbs for event-time mutation; like
- * `createSignal`/`onCleanup` this is called in scope bodies and un-declares
- * on scope disposal.
- *
- * Retraction semantics (server): the header's prior value is snapshotted at
- * write time and restored when the owning scope is disposed (deleted if
- * there was none) — a boundary that errors or recovers retracts its writes.
- * Once the response head is `committed` (head derived/sent — the shell
- * flush of a piped `renderToStream`, the completion of an awaited one or
- * of `renderToString`), writes and retractions are no-ops.
- */
 export function httpHeader(_name: string, _value: string, _options?: { append?: boolean }): void {}

@@ -116,12 +116,7 @@ export {
   enableHydration,
   createRoot,
   createMemo,
-  createDeferred,
   createSignal,
-  createStore,
-  createProjection,
-  createOptimistic,
-  createOptimisticStore,
   createRenderEffect,
   createEffect,
   NoHydration,
@@ -130,6 +125,11 @@ export {
   isHydratable,
   onHydrationEnd
 } from "./client/hydration.js";
+export { createOptimistic } from "./client/optimistic.js";
+export { createDeferred } from "./client/deferred.js";
+export { createProjection } from "./client/projection.js";
+export { createStore } from "./client/store.js";
+export { createOptimisticStore } from "./client/optimistic-store.js";
 // Seams for the runtimes in this repo, reached through `solid-js/internal`
 // (src/internal.ts): exported here at runtime so that entry shares this
 // module's state, `@internal` so they are stripped from the declarations.

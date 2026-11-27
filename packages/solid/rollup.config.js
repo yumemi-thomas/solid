@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import nodeResolve from "@rollup/plugin-node-resolve";
 import babel from "@rollup/plugin-babel";
 import cleanup from "rollup-plugin-cleanup";
@@ -45,6 +46,28 @@ const build = (input, name, external, isDev, isObserve, extraPlugins = []) => ({
   plugins: [replaceFlags(isDev, isObserve), ...extraPlugins].concat(plugins)
 });
 
+const buildTree = (input, dir, entryName, external, isDev, isObserve, extraPlugins = []) => ({
+  input,
+  output: {
+    dir: `dist/${dir}`,
+    format: "es",
+    preserveModules: true,
+    preserveModulesRoot: "src"
+  },
+  external,
+  plugins: [
+    replaceFlags(isDev, isObserve),
+    ...extraPlugins,
+    ...plugins,
+    {
+      name: "emit-barrel",
+      writeBundle() {
+        writeFileSync(`dist/${entryName}.js`, `export * from "./${dir}/index.js";\n`);
+      }
+    }
+  ]
+});
+
 // The container-trace entry bundles its OWN copy of the store hydration
 // adapter (src/client/store-hydration.ts) — see that module's comment: read
 // through the main entry's slot, the adapter is pinned into every
@@ -74,12 +97,12 @@ const server = ["@solidjs/signals", "stream"];
 const refresh = ["solid-js", "solid-js/internal", "@solidjs/signals"];
 
 export default [
-  build("src/index.ts", "solid", client, false, false),
+  buildTree("src/index.ts", "prod", "solid", client, false, false),
   // Observe client build: component roots carry their `_name` label and flow
   // controls name their memos, so `ownerPath` and attribution see the
   // component tree; every dev-only check folds out. Selected by the `observe`
   // condition nested under `browser`.
-  build("src/index.ts", "solid.observe", client, false, true),
+  buildTree("src/index.ts", "observe", "solid.observe", client, false, true),
   build("src/index.ts", "solid.dev", client, true, true),
   // Server builds. `src/server/` has no wiring sites yet, so server.observe.*
   // differs from server.* only in exporting a live OBSERVE — it exists so

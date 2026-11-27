@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import nodeResolve from "@rollup/plugin-node-resolve";
 import babel from "@rollup/plugin-babel";
 import cleanup from "rollup-plugin-cleanup";
@@ -194,9 +195,23 @@ const assertFramesClientTransport = {
 export default [
   {
     input: "src/index.ts",
-    output: { file: "dist/web.js", format: "es" },
+    output: {
+      dir: "dist/prod",
+      format: "es",
+      preserveModules: true,
+      preserveModulesRoot: "src"
+    },
     external: ["solid-js", "solid-js/internal"],
-    plugins: [replaceDev(false)].concat(plugins)
+    plugins: [
+      replaceDev(false),
+      ...plugins,
+      {
+        name: "emit-web-barrel",
+        writeBundle() {
+          writeFileSync("dist/web.js", 'export * from "./prod/index.js";\n');
+        }
+      }
+    ]
   },
   {
     // Observe client build (`observe` condition under `browser`): the three
@@ -206,9 +221,23 @@ export default [
     // of their own (their `"frame"`/`"call"` records); storage has no wiring
     // and falls through to prod under `observe`.
     input: "src/index.ts",
-    output: { file: "dist/web.observe.js", format: "es" },
+    output: {
+      dir: "dist/observe",
+      format: "es",
+      preserveModules: true,
+      preserveModulesRoot: "src"
+    },
     external: ["solid-js", "solid-js/internal"],
-    plugins: [replaceFlags(false, true)].concat(plugins)
+    plugins: [
+      replaceFlags(false, true),
+      ...plugins,
+      {
+        name: "emit-web-observe-barrel",
+        writeBundle() {
+          writeFileSync("dist/web.observe.js", 'export * from "./observe/index.js";\n');
+        }
+      }
+    ]
   },
   {
     // Prod server build — the default node/worker/deno artifact for the main
