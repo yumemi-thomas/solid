@@ -12,11 +12,6 @@ import {
   createRevealOrder as coreRevealOrder,
   createMemo as coreMemo,
   createSignal as coreSignal,
-  createOptimistic as coreOptimistic,
-  createDeferred as coreDeferred,
-  createProjection as coreProjection,
-  createStore as coreStore,
-  createOptimisticStore as coreOptimisticStore,
   createRenderEffect as coreRenderEffect,
   createEffect as coreEffect,
   setSnapshotCapture,
@@ -49,12 +44,6 @@ import {
 } from "@solidjs/signals";
 import type { Element as SolidElement } from "../types.js";
 import { IS_DEV, IS_OBSERVE } from "./core.js";
-// The store-family adapter, its own module because the container-trace entry
-// bundles a second copy of it (see store-hydration.ts). A cycle — it reads
-// its helpers back from this module — that is inert: both sides are function
-// declarations, and the only top-level reference is the slot install inside
-// enableHydration().
-import { hydrateStoreLike } from "./store-hydration.js";
 
 type HydrationSsrFields = {
   /**
@@ -492,10 +481,8 @@ let _createLoadingBoundary: Function | undefined;
 // copy of the adapter module rather than reading this slot, so that lazy
 // chunk never pins the adapter into the entry (hydration-split-measured.md
 // §3.1; the reason the slot is not read from any other dist entry).
-let _hydrateSignalLike: ((coreFn: Function, fn: any, options?: any) => any) | undefined;
-let _hydrateStoreLike:
-  | ((coreFn: Function, fn: any, initialValue: any, options?: any) => any)
-  | undefined;
+export let _hydrateSignalLike: ((coreFn: Function, fn: any, options?: any) => any) | undefined;
+export let _hydrationEnabled = false;
 // lazy()'s server-module lookup: only meaningful under hydration, so the
 // implementation (and peekNextChildId/_$HY access behind it) installs here
 // rather than shipping in CSR bundles that use lazy() (#2883 phase 3).
@@ -1579,7 +1566,7 @@ export function enableHydration() {
   // the wrappers pass those in, so a hydrating app that never imports a
   // store primitive shakes the engine entirely.
   _hydrateSignalLike = hydrateSignalLike;
-  _hydrateStoreLike = hydrateStoreLike;
+  _hydrationEnabled = true;
   createRenderEffect = hydratedCreateRenderEffect as any;
   _createEffect = hydratedCreateEffect;
   _createLoadingBoundary = hydratedCreateLoadingBoundary;
@@ -1902,28 +1889,7 @@ export function createRevealOrder<T>(
  *
  * @description https://docs.solidjs.com/reference/solid-js/reactivity/create-optimistic
  */
-export const createOptimistic: {
-  <T>(): Signal<T | undefined>;
-  <T>(value: Exclude<T, Function>, options?: SignalOptions<T>): Signal<T>;
-  // Commit #0 (loadingValue): never undefined, `prev` is always T — see
-  // createMemo (bare "client" is the structural form there too).
-  <T>(
-    fn: ComputeFunction<NoInfer<T>, T>,
-    options: HydrationSignalOptions<T> & { loadingValue: T }
-  ): Signal<T>;
-  <T>(
-    fn: ComputeFunction<undefined | NoInfer<T>, T>,
-    options?: HydrationSignalOptions<T>
-  ): Signal<T>;
-} = ((...args: any[]) => {
-  // `hydrating` can only be true once enableHydration() installed the
-  // adapter slot; passing coreOptimistic in here (instead of a dedicated
-  // hydrated impl installed by enableHydration) is what lets the optimistic
-  // engine shake out of hydrating bundles that never import this primitive.
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateSignalLike!(coreOptimistic, args[0], args[1])
-    : (coreOptimistic as Function)(...args);
-}) as any;
+export { createOptimistic } from "./optimistic.js";
 
 /**
  * Creates an async memo that may lag, but never leads: after its first
@@ -1932,21 +1898,7 @@ export const createOptimistic: {
  * `createDeferred` in `@solidjs/signals`. Hydrates like `createMemo`: the
  * server's answer is its first.
  */
-export const createDeferred: {
-  <T>(
-    compute: ComputeFunction<NoInfer<T>, T>,
-    options: HydrationMemoOptions<T> & { loadingValue: T }
-  ): SourceAccessor<T>;
-  <T>(
-    compute: ComputeFunction<undefined | NoInfer<T>, T>,
-    options?: HydrationMemoOptions<T>
-  ): SourceAccessor<T>;
-} = ((fn: any, options?: any) =>
-  // As createOptimistic: the adapter slot keeps the deferred module out of
-  // hydrating bundles that never import this primitive.
-  sharedConfig.hydrating
-    ? _hydrateSignalLike!(coreDeferred, fn, options)
-    : coreDeferred(fn, options)) as any;
+export { createDeferred } from "./deferred.js";
 
 /**
  * Creates a derived (projected) store — `createMemo` for stores. The
@@ -1985,26 +1937,7 @@ export const createDeferred: {
  * (`"server"` | `"hybrid"` | `"client"`) for the same client-vs-server
  * tradeoffs as the other primitives. See {@link HydrationSsrFields}.
  */
-export const createProjection: {
-  <T extends object = {}>(
-    fn: (() => T | Promise<T> | AsyncIterable<T>) & NoArray<T>,
-    seed?: null,
-    options?: Omit<HydrationProjectionOptions, "seedLoadingValue">
-  ): Refreshable<Store<T>>;
-  <T extends object = {}>(
-    fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-    seed: NoFn<T> | Store<NoFn<T>>,
-    options?: HydrationProjectionOptions
-  ): Refreshable<Store<T>>;
-} = ((...args: any[]) => {
-  // `hydrating` can only be true once enableHydration() installed the
-  // adapter slot (see createOptimistic above for the retention story).
-  return sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreProjection, args[0], args[1] ?? {}, args[2])
-    : (coreProjection as Function)(...args);
-}) as any;
-
-type NoArray<T> = Extract<T, readonly unknown[]> extends never ? unknown : never;
+export { createProjection } from "./projection.js";
 
 /**
  * Creates a deeply-reactive store backed by a Proxy. Reads track each
@@ -2066,28 +1999,7 @@ type NoArray<T> = Extract<T, readonly unknown[]> extends never ? unknown : never
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
-export const createStore: {
-  <T extends object = {}>(
-    initialValue: NoFn<T> | Store<NoFn<T>>,
-    options?: StoreOptions
-  ): [get: Store<T>, set: StoreSetter<T>];
-  <T extends object = {}>(
-    fn: (() => T | Promise<T> | AsyncIterable<T>) & NoArray<T>,
-    seed?: null,
-    options?: Omit<HydrationProjectionOptions, "seedLoadingValue">
-  ): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
-  <T extends object = {}>(
-    fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-    seed: NoFn<T> | Store<NoFn<T>>,
-    options?: HydrationProjectionOptions
-  ): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
-} = ((...args: any[]) => {
-  // `hydrating` can only be true once enableHydration() installed the
-  // adapter slot (see createOptimistic above for the retention story).
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreStore, args[0], args[1] ?? {}, args[2])
-    : (coreStore as Function)(...args);
-}) as any;
+export { createStore } from "./store.js";
 
 /**
  * The store equivalent of `createOptimistic`. Writes inside an
@@ -2136,28 +2048,7 @@ export const createStore: {
  *
  * @returns `[store: Store<T>, setStore: StoreSetter<T>]`
  */
-export const createOptimisticStore: {
-  <T extends object = {}>(
-    initialValue: NoFn<T> | Store<NoFn<T>>,
-    options?: StoreOptions
-  ): [get: Store<T>, set: StoreSetter<T>];
-  <T extends object = {}>(
-    fn: (() => T | Promise<T> | AsyncIterable<T>) & NoArray<T>,
-    seed?: null,
-    options?: Omit<HydrationProjectionOptions, "seedLoadingValue">
-  ): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
-  <T extends object = {}>(
-    fn: (draft: T) => void | T | Promise<void | T> | AsyncIterable<void | T>,
-    seed: NoFn<T> | Store<NoFn<T>>,
-    options?: HydrationProjectionOptions
-  ): [get: Refreshable<Store<T>>, set: StoreSetter<T>];
-} = ((...args: any[]) => {
-  // `hydrating` can only be true once enableHydration() installed the
-  // adapter slot (see createOptimistic above for the retention story).
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreOptimisticStore, args[0], args[1] ?? {}, args[2])
-    : (coreOptimisticStore as Function)(...args);
-}) as any;
+export { createOptimisticStore } from "./optimistic-store.js";
 
 /**
  * Creates a reactive root — an owner scope with its own `dispose()`. A root

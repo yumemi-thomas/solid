@@ -16,7 +16,7 @@
  * so `OBSERVE.diagnostics` is one channel regardless of which artifact
  * emitted.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 import { getOwner, OBSERVE as signalsOBSERVE, DEV as signalsDEV } from "@solidjs/signals";
@@ -72,13 +72,23 @@ describe("solid-js client artifacts", () => {
   test("the observe artifact carries no dev-only check", () => {
     // The non-function component check is dev-tier; a string scan is valid
     // here because the message text only exists inside the `IS_DEV` branch.
-    const read = (f: string) => readFileSync(resolve(__dirname, "../dist", f), "utf8");
+    const readTree = (dir: string): string =>
+      readdirSync(dir, { withFileTypes: true })
+        .map(d => {
+          const p = resolve(dir, d.name);
+          return d.isDirectory() ? readTree(p) : readFileSync(p, "utf8");
+        })
+        .join("\n");
+    const read = (f: string) => {
+      const p = resolve(__dirname, "../dist", f);
+      return statSync(p).isDirectory() ? readTree(p) : readFileSync(p, "utf8");
+    };
     expect(read("solid.dev.js")).toContain("expected a component function");
-    expect(read("solid.observe.js")).not.toContain("expected a component function");
-    expect(read("solid.js")).not.toContain("expected a component function");
+    expect(read("observe")).not.toContain("expected a component function");
+    expect(read("prod")).not.toContain("expected a component function");
     // …while the label write is observe-tier: present in observe and dev, absent in prod.
-    expect(read("solid.observe.js")).toContain("._name = ");
-    expect(read("solid.js")).not.toContain("._name = ");
+    expect(read("observe")).toContain("._name = ");
+    expect(read("prod")).not.toContain("._name = ");
   });
 
   // The prod artifact is left out of the first case on purpose: this file
