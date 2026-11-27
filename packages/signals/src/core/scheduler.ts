@@ -43,7 +43,8 @@ import {
   isSame,
   markUnflushedStaged,
   recompute,
-  resyncUnflushedCompanions
+  resyncUnflushedCompanions,
+  snapshotSources
 } from "./core.js";
 import {
   DEV,
@@ -214,6 +215,73 @@ export function installMarkHooks(
 ): void {
   releaseMarksHook = release;
   releaseAmbientMarksHook = releaseAmbient;
+}
+
+export let slotFlightHook: ((n: Signal<any>) => boolean) | null = null;
+export function installSlotFlightHook(fn: NonNullable<typeof slotFlightHook>): void {
+  slotFlightHook = fn;
+}
+export let echoesHook: ((guess: unknown, truth: unknown) => boolean) | null = null;
+export let slotMergeHook: ((n: Signal<any>) => void) | null = null;
+export let laneRebaseHook:
+  | ((el: Signal<any>, truth: unknown, older: boolean) => boolean | void)
+  | null = null;
+export function installStoreOptimisticHooks(
+  echoes: NonNullable<typeof echoesHook>,
+  slotMerge: NonNullable<typeof slotMergeHook>,
+  laneRebase: NonNullable<typeof laneRebaseHook>
+): void {
+  echoesHook = echoes;
+  slotMergeHook = slotMerge;
+  laneRebaseHook = laneRebase;
+}
+export let truthHook: ((el: any) => unknown) | null = null;
+export let confirmedHook: ((l: Transaction) => void) | null = null;
+export function installTruthHooks(
+  truth: NonNullable<typeof truthHook>,
+  confirmed: NonNullable<typeof confirmedHook>
+): void {
+  truthHook = truth;
+  confirmedHook = confirmed;
+}
+export let storeEngineHook:
+  | {
+      node(t: any, key: PropertyKey): Signal<any>;
+      target(v: any, fam: any): any;
+      keys(t: any): PropertyKey[];
+      value(t: any, k: PropertyKey): any;
+      sub(t: any): Iterable<any>;
+      view(on: boolean): void;
+    }
+  | null = null;
+export function installStoreEngine(engine: NonNullable<typeof storeEngineHook>): void {
+  storeEngineHook = engine;
+}
+export let markHook: ((node: Signal<any> | Computed<any>) => void) | null = null;
+export let markedHook: ((el: Signal<any> | Computed<any>) => boolean) | null = null;
+export function installAffectsMarkHooks(
+  marked: NonNullable<typeof markedHook>,
+  mark: NonNullable<typeof markHook>
+): void {
+  markedHook = marked;
+  markHook = mark;
+}
+export let witnessMarkHook: (() => void) | null = null;
+export function installWitnessMarkHook(fn: NonNullable<typeof witnessMarkHook>): void {
+  witnessMarkHook = fn;
+}
+export let verdictLaneHook: ((t: Transaction) => Transaction) | null = null;
+export let laneGuessesHook: ((t: Transaction) => Signal<any>[]) | null = null;
+export function installVerdictLaneHook(
+  verdictLane: NonNullable<typeof verdictLaneHook>,
+  laneGuesses?: NonNullable<typeof laneGuessesHook>
+): void {
+  verdictLaneHook = verdictLane;
+  if (laneGuesses) laneGuessesHook = laneGuesses;
+}
+export let laggingHook: ((c: Computed<any>) => Computed<any> | undefined) | null = null;
+export function installLaggingHook(fn: NonNullable<typeof laggingHook>): void {
+  laggingHook = fn;
 }
 /** Verdicts (verdict.ts). */
 export let observeFlightHook: ((c: Computed<any>, el: Computed<any>) => boolean) | null = null;
@@ -1007,50 +1075,6 @@ export class GlobalQueue implements IQueue {
   declare static _update: (el: Computed<unknown>) => void;
   declare static _dispose: (el: Computed<unknown>, self: boolean, zombie?: boolean) => void;
   declare static _runEffect: (el: Computed<unknown>) => void;
-  /** A slot node's truth is in flight (its family's derive — store/store.ts). */
-  declare static _slotFlight: ((n: Signal<any>) => boolean) | undefined;
-  /** A store guess written by a derive re-asking in another hold's lane:
-   * the two holds merge (D-33; store/optimistic.ts). */
-  declare static _slotMerge: ((n: Signal<any>) => void) | undefined;
-  /** The store's row judgment for a guessed slot (optimistic.ts): the truth
-   * is the guess's echo when reconcile would write nothing into it. */
-  declare static _echoes: ((guess: unknown, truth: unknown) => boolean) | undefined;
-  /** Truth readers (lanes.ts `truthRead`/`truthConfirmed`), installed by the
-   * first `until`/`refresh` (signals.ts `watch`). */
-  declare static _truth: ((el: any) => unknown) | undefined;
-  declare static _confirmed: ((l: Transaction) => void) | undefined;
-  /** `affects()` on a store (store/affects.ts): a store's node for a key
-   * (store/thin.ts `_storeEngine`); a bare registration (birth inheritance); a
-   * witnessed mark on an untracked probe (verdict.ts). */
-  declare static _storeEngine:
-    | {
-        node(t: any, key: PropertyKey): Signal<any>;
-        target(v: any, fam: any): any;
-        keys(t: any): PropertyKey[];
-        value(t: any, k: PropertyKey): any;
-        sub(t: any): Iterable<any>;
-        view(on: boolean): void;
-      }
-    | undefined;
-  declare static _mark: ((node: Signal<any> | Computed<any>) => void) | undefined;
-  declare static _witnessMark: (() => void) | undefined;
-  /** A truth landing on a guess (lanes.ts `laneWrite`), `older` when it
-   * answers an older question: the store re-bases an arrangement guess over
-   * it; a current one differing from a shown keyed arrangement guess folds
-   * beneath it instead of voiding it (D-34) — true: the lane stages it
-   * beneath (store/optimistic.ts). */
-  declare static _laneRebase:
-    | ((el: Signal<any>, truth: unknown, older: boolean) => boolean | void)
-    | undefined;
-  // Lanes (lanes.ts).
-  declare static _verdictLane: ((t: Transaction) => Transaction) | undefined;
-  // Observe tier (attribution.ts): the guesses of `t`'s lanes (lanes.ts).
-  declare static _laneGuesses: ((t: Transaction) => Signal<any>[]) | undefined;
-  /** `createDeferred` (deferred.ts): a deferred node with a flight up that
-   * `c` derives from, if any — a truth reader waits on it. */
-  declare static _lagging: ((c: Computed<any>) => Computed<any> | undefined) | undefined;
-  // `affects()` marks (affects.ts): the probe's coverage test.
-  declare static _marked: ((el: Signal<any> | Computed<any>) => boolean) | undefined;
 
   flush() {
     if (this._running) return;
@@ -1521,7 +1545,9 @@ export function insertSubs(node: Signal<any> | Computed<any>): void {
   // lookups in the hottest notify loop.
   const cfg = (node as any)._config as number;
   const hasSnapshot =
-    (cfg & CONFIG_HAS_SNAPSHOT) !== 0 && (node as any)._x?._snapshotValue !== undefined;
+    snapshotSources !== null &&
+    (cfg & CONFIG_HAS_SNAPSHOT) !== 0 &&
+    (node as any)._x?._snapshotValue !== undefined;
 
   // Observe-tier fan-out: this walk visits every subscriber edge anyway, so
   // the graph-size count is one local increment here and no field anywhere.

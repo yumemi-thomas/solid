@@ -24,9 +24,9 @@ import { STATUS_PENDING, CONFIG_SLOT_NODE, $REFRESH } from "./core/constants.js"
 import { emitDiagnostic } from "./core/dev.js";
 import {
   flushTransaction,
-  GlobalQueue,
   resolveTx,
   schedule,
+  slotFlightHook,
   installMarkHooks
 } from "./core/scheduler.js";
 import type { Computed } from "./core/types.js";
@@ -169,6 +169,6 @@ installMarkHooks(
 function inFlight(n: Marked): boolean {
   return (
     ((n as Computed<any>)._statusFlags & STATUS_PENDING) !== 0 ||
-    ((n._config & CONFIG_SLOT_NODE) !== 0 && GlobalQueue._slotFlight?.(n) === true)
+    ((n._config & CONFIG_SLOT_NODE) !== 0 && slotFlightHook?.(n) === true)
   );
 }

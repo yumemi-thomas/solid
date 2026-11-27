@@ -34,8 +34,9 @@ import {
   flush,
   flushTransaction,
   globalQueue,
-  GlobalQueue,
+  installTruthHooks,
   joinFuture,
+  laggingHook,
   passTx,
   resolveTx,
   schedule,
@@ -807,8 +808,7 @@ function watch<T>(
   own: Transaction | null = flushTransaction
 ): void {
   if (config & CONFIG_AUTHORITATIVE) {
-    GlobalQueue._truth = truthRead;
-    GlobalQueue._confirmed = truthConfirmed;
+    installTruthHooks(truthRead, truthConfirmed);
   }
   // `config` is on the node for its first pass too (the pass runs inside
   // `computed()`): `until`'s predicate is authoritative from its first read,
@@ -831,7 +831,7 @@ function watch<T>(
       const c = getOwner() as Computed<any>;
       // A truth reader waits out a `createDeferred` flight its value derives
       // from, which serves everyone else the stale answer (D-40).
-      const lag = config & CONFIG_AUTHORITATIVE && GlobalQueue._lagging?.(c);
+      const lag = config & CONFIG_AUTHORITATIVE && laggingHook?.(c);
       if (lag) throw new NotReadyError(lag);
       // (Outside a flush a mainline pass joins through `passTx`.)
       const joined = flushTransaction ?? passTx;

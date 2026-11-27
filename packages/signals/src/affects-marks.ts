@@ -21,7 +21,7 @@ import {
 } from "./core/constants.js";
 import { ext } from "./core/core.js";
 import { enqueueSub } from "./core/heap.js";
-import { GlobalQueue } from "./core/scheduler.js";
+import { installAffectsMarkHooks } from "./core/scheduler.js";
 import type { Computed, Signal } from "./core/types.js";
 
 export type Marked = Signal<any> | Computed<any>;
@@ -96,5 +96,4 @@ export function unmark(node: Marked): boolean {
   return true;
 }
 
-GlobalQueue._marked = el => active !== 0 && marked(el, new Set());
-GlobalQueue._mark = mark;
+installAffectsMarkHooks(el => active !== 0 && marked(el, new Set()), mark);

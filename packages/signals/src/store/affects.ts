@@ -22,7 +22,12 @@
  * nodes and records come through `GlobalQueue._storeEngine`, and node birth and the
  * untracked traps reach back through `affectsHooks` (hooks.ts).
  */
-import { GlobalQueue, releaseMarksHook } from "../core/scheduler.js";
+import {
+  markHook,
+  releaseMarksHook,
+  storeEngineHook,
+  witnessMarkHook
+} from "../core/scheduler.js";
 import type { Computed, Signal } from "../core/types.js";
 import { installAffectsHooks, type AffectsHooks } from "./hooks.js";
 import type { StoreTarget } from "./target.js";
@@ -54,7 +59,7 @@ function scopeOf(carrier: Marked, key: PropertyKey | undefined): Scope {
 /** The nodes an `affects(store[, key])` declaration marks (affects.ts
  * registers each). */
 export function storeMarks(t: StoreTarget, key: PropertyKey | undefined): Marked[] {
-  const e = GlobalQueue._storeEngine!;
+  const e = storeEngineHook!;
   const node = e.node(t, key === undefined ? $AFFECTS : key);
   const entry = scopeOf(node, key);
   if (key !== undefined) return (entry._scope.add(t.v), [node]);
@@ -129,14 +134,14 @@ const hooks: AffectsHooks = {
     if (scopes.size === 0 || key === $AFFECTS) return;
     const carrier = covering(t, key, node);
     if (!carrier) return;
-    GlobalQueue._mark!(node);
+    markHook!(node);
     scopes.get(carrier)!._inherited.push(node);
   },
   // An untracked probe (`isPending(() => s.x)` with no observer) reading a
   // record a live mark covers: no node carries the mark for it — the
   // verdict is told directly.
   _witness(t, key) {
-    if (t.n?.[$AFFECTS as any]?._x?._marks || covering(t, key)) GlobalQueue._witnessMark!();
+    if (t.n?.[$AFFECTS as any]?._x?._marks || covering(t, key)) witnessMarkHook!();
   }
 };
 
