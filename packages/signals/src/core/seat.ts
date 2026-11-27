@@ -63,13 +63,13 @@ import {
   STATUS_UNINITIALIZED,
   REACTIVE_ZOMBIE
 } from "./constants.js";
-import { keptGuess } from "./lanes.js";
+import { guessed, marked } from "./lanes.js";
 import {
   clock,
   flushTransaction,
   observeFlightHook,
   globalQueue,
-  GlobalQueue,
+  markedHook,
   passLane,
   blocked,
   liveTx,
@@ -606,7 +606,7 @@ export function slot(
       c !== null &&
       !(c._config & CONFIG_CHILDREN_FORBIDDEN) &&
       flushTransaction !== null &&
-      GlobalQueue._marked?.(el as Computed<any>)
+      markedHook?.(el as Computed<any>)
     ) {
       p.raise |= MARK_AH;
       if (p.tx === null) p.tx = flushTransaction;
@@ -687,7 +687,7 @@ export function slot(
         // `staged` throws it); `isPending`'s value is the screen's (Vp1).
         // Vl1g (D-34, #4689): a shown guess a correction re-homed into the
         // hold keeps the screen's value for `latest` until the commit.
-        if (latest && staged && keptGuess(el) && blocked(t))
+        if (latest && staged && guessed && marked.has(el) && blocked(t))
           return pred("Vl1g", SLOT_C, tr ? MARK_AH : 0, t);
         if (latest && staged) return pred("Vl1", stagedSlot, tr ? MARK_AH : 0, t);
         return pred(latest ? "Vl1" : "Vp1", SLOT_C, tr ? MARK_AH : 0, t);

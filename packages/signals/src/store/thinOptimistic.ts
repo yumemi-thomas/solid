@@ -21,9 +21,10 @@ import { context, joinPassAt, read, signal } from "../core/core.js";
 import {
   actionDepth,
   clock,
-  GlobalQueue,
+  confirmedHook,
   insertSubs,
   installStoreHooks,
+  installStoreOptimisticHooks,
   joinFuture,
   question,
   laneDirty,
@@ -77,7 +78,6 @@ const echo = (a: unknown, b: unknown): boolean => {
     return false; // a cycle is not plain data
   }
 };
-GlobalQueue._echoes = echo;
 installThinGuesses(optimisticWrite as any, guessedValueOf, underOf, echo);
 
 /** A setter that read another action's live guess and wrote nothing (the
@@ -130,7 +130,7 @@ installThinAsk(fam => {
 // The derive re-asking in a lane of another hold than the one that guessed
 // this target writes it: the two holds merge, and the lane reveals with
 // them (D-33, D-34).
-GlobalQueue._slotMerge = (n: any) => {
+const slotMerge = (n: any) => {
   const d = n._host?._fam?.node?._x?._transaction;
   const g = txOf(n);
   if (!d?._lane || sameAction(d, g)) return;
@@ -184,7 +184,7 @@ function edited(t: any, truth: any[]): any[] {
   }
   return next;
 }
-GlobalQueue._laneRebase = (el: any, truth: unknown, older: boolean) => {
+const laneRebase = (el: any, truth: unknown, older: boolean) => {
   const t = el._host;
   if (t === undefined || !t.l || el !== t.k || !t._fam.key) return undefined;
   // The answer to a question the guess was not written over is not its
@@ -203,12 +203,13 @@ GlobalQueue._laneRebase = (el: any, truth: unknown, older: boolean) => {
   }
   return older || fold(el, truth);
 };
+installStoreOptimisticHooks(echo, slotMerge, laneRebase);
 function fold(el: any, truth: unknown): boolean {
   const l = txOf(el);
   if (!l._shown) return false;
   const guess = guessedValueOf(el);
   if (!el._equals(guess, truth) && !echo(guess, truth)) l.folded = foldedRead;
-  else GlobalQueue._confirmed?.(l);
+  else confirmedHook?.(l);
   if (l.folded) insertSubs(el);
   joinFuture(resolveTx(l._parent ?? l));
   return true;

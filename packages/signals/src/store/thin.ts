@@ -64,7 +64,7 @@ import { insertIntoHeap } from "../core/heap.js";
 import {
   dirtyQueue,
   flushTransaction,
-  GlobalQueue,
+  installStoreEngine,
   holdNode,
   installStoreHooks,
   joinFuture,
@@ -564,7 +564,7 @@ function slot<V>(t: Target, v: V, eq: (a: V, b: V) => boolean, key: PropertyKey)
 /** The engine's half of `affects(store)`: store/affects.ts walks with it,
  * so a program with stores that declares no mark carries no walk. A Box
  * value is not wrappable, so `target` drops it. */
-GlobalQueue._storeEngine = {
+installStoreEngine({
   node: (t: Target, key: PropertyKey) => (t.l && L!.ix(key) !== -2 ? keyNode(t) : nodeOf(t, key)),
   target: (v: any, fam: StoreFamily | null): Target | undefined =>
     isThin(v) ? v[$THIN] : isWrappable(v) ? ((fam?.map as any) ?? targets).get(v) : undefined,
@@ -572,7 +572,7 @@ GlobalQueue._storeEngine = {
   value: valueOf,
   sub: (t: Target) => subChains.get(t)?.values() ?? [],
   view: (on: boolean) => void (writerView = on)
-};
+});
 /** The logical value of `key` in the reader's frame (ABSENT when not own). */
 function valueOf(t: Target, key: PropertyKey, mode = 0): any {
   if (t.l) {

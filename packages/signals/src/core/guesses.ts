@@ -19,11 +19,13 @@ import { covers, latestOf, underOf } from "./truth.js";
 import {
   armGuessing,
   clock,
-  GlobalQueue,
+  confirmedHook,
+  echoesHook,
   holdNode,
   insertSubs,
   installGuessHooks,
   laneDirty,
+  laneRebaseHook,
   list,
   merge,
   newTransaction,
@@ -32,6 +34,7 @@ import {
   question,
   resolveTx,
   schedule,
+  slotMergeHook,
   staleReader,
   txOf,
   type Transaction
@@ -160,7 +163,7 @@ export function supersede(n: Signal<any> | Computed<any>, value: unknown, change
   // The parent may have merged since the lane opened (D-33).
   const parent = resolveTx(l._parent ?? l);
   // A new server object that reconciles to the guessed row unchanged confirms (#3898).
-  if (changed && n._config & CONFIG_SLOT_NODE && GlobalQueue._echoes?.(latestOf(n), value))
+  if (changed && n._config & CONFIG_SLOT_NODE && echoesHook?.(latestOf(n), value))
     changed = false;
   if (changed) {
     dissolveLane(l, parent, n);
@@ -180,7 +183,7 @@ export function supersede(n: Signal<any> | Computed<any>, value: unknown, change
     if (n._subs !== null) insertSubs(n);
   } else {
     landBeneath(n, value);
-    GlobalQueue._confirmed?.(l);
+    confirmedHook?.(l);
   }
 }
 
@@ -211,10 +214,10 @@ function laneCorrections(): boolean {
 
 /** A write landing on a guess: its truth, judged or held beneath (D-34). */
 function guessWrite(el: Signal<any> | Computed<any>, v: unknown): void {
-  GlobalQueue._slotMerge?.(el);
+  slotMergeHook?.(el);
   // Provenance (D-34): an older question's answer is held beneath, not judged.
   const older = stale(el, question);
-  if (GlobalQueue._laneRebase?.(el, v, older) || older) landBeneath(el, v);
+  if (laneRebaseHook?.(el, v, older) || older) landBeneath(el, v);
   else supersede(el, v, !el._equals || !el._equals(latestOf(el), v));
   schedule();
 }

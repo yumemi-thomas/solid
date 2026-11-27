@@ -75,6 +75,7 @@ import {
   setPassLane,
   txOf,
   unhold,
+  verdictLaneHook,
   type Transaction,
   installBoundaryHooks,
   laneStageHook,
@@ -635,7 +636,7 @@ function arm(b: Boundary): void {
     (getOwner() as Computed<any>)._config & CONFIG_VERDICT
   ) {
     joinFuture(null);
-    lane = GlobalQueue._verdictLane!(flushTransaction!);
+    lane = verdictLaneHook!(flushTransaction!);
   }
   b._armLane = lane;
   if (__DEV__) b._ahead = lane !== null;

@@ -79,14 +79,17 @@ import {
   GlobalQueue,
   holdNode,
   insertSubs,
+  installVerdictLaneHook,
   joinFuture,
   laneDirty,
   list,
+  slotFlightHook,
   stagedReaders,
   staleReader,
   merge,
   newTransaction,
   ownFlights,
+  truthHook,
   passLane,
   queuePendingNode,
   releaseQueues,
@@ -165,7 +168,7 @@ export function landBeneath(n: Signal<any> | Computed<any>, truth: unknown): voi
 /** This module's copy of scheduler.ts `guessing`: its readers here stay
  * foldable when a bundler splits lanes.ts from scheduler.ts into separate
  * chunks (a cross-chunk binding is not folded; the compiled live page). */
-let guessed = false;
+export let guessed = false;
 /** A guess was written (guesses.ts `optimisticWrite`). */
 export function armGuessed(): void {
   guessed = true;
@@ -201,7 +204,7 @@ export function rerun(n: Signal<any>, t: Transaction): void {
 export function inFlight(n: Signal<any>): unknown {
   return (
     (n as Computed<any>)._statusFlags & STATUS_PENDING ||
-    (n._config & CONFIG_SLOT_NODE && GlobalQueue._slotFlight?.(n))
+    (n._config & CONFIG_SLOT_NODE && slotFlightHook?.(n))
   );
 }
 
@@ -668,7 +671,7 @@ export function laneRead(c: Computed<any> | null, el: Signal<any> | Computed<any
   }
   if (c !== null && c._config & CONFIG_AUTHORITATIVE) {
     if (__TEST__) shadowActual(SLOT_T);
-    return GlobalQueue._truth!(el);
+    return truthHook!(el);
   }
   const status = (el as Computed<any>)._statusFlags;
   // An errored member's lane value predates its error; the error is the answer (#4106).
@@ -1272,16 +1275,19 @@ export const ahead: Computed<any>[] = [];
 /** Render effects that read a verdict and entered a lane before its seam (#4284). */
 const entered: Computed<any>[] = [];
 installLaneHooks(laneRead, laneStage, laneWrite, laneSeams, landing, lanesBlocked, laneServed);
-if (__OBSERVE__)
-  GlobalQueue._laneGuesses = t => {
-    const out: Signal<any>[] = [];
-    for (let i = 0; i < lanes.length; i++) {
-      const l = lanes[i];
-      if (resolveTx(l._parent!) !== t) continue;
-      for (let j = 0; j < l._nodes.length; j++)
-        if (l._nodes[j]._config & CONFIG_GUESS && l._nodes[j]._x!._transaction === l)
-          out.push(l._nodes[j]);
-    }
-    return out;
-  };
-GlobalQueue._verdictLane = verdictLane;
+installVerdictLaneHook(
+  verdictLane,
+  __OBSERVE__
+    ? t => {
+        const out: Signal<any>[] = [];
+        for (let i = 0; i < lanes.length; i++) {
+          const l = lanes[i];
+          if (resolveTx(l._parent!) !== t) continue;
+          for (let j = 0; j < l._nodes.length; j++)
+            if (l._nodes[j]._config & CONFIG_GUESS && l._nodes[j]._x!._transaction === l)
+              out.push(l._nodes[j]);
+        }
+        return out;
+      }
+    : undefined
+);

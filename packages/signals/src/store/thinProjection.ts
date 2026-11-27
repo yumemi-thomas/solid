@@ -37,7 +37,7 @@ import {
 import { enqueueSub } from "../core/heap.js";
 import { getOwner, isDisposed } from "../core/owner.js";
 import {
-  GlobalQueue,
+  installSlotFlightHook,
   insertSubs,
   observeFlightHook,
   passLane,
@@ -531,5 +531,7 @@ export function createThinStoreDerived<T extends object = {}>(
  * lanes (A17, #2864: a guess mid-refetch stands in for the flight) and
  * marks (an ambient `affects()` over a declared reload lives to the
  * landing) read it. */
-GlobalQueue._slotFlight = (n: Signal<any>): boolean =>
-  ((n as any)._host?._fam?.node?._statusFlags & STATUS_PENDING) !== 0;
+installSlotFlightHook(
+  (n: Signal<any>): boolean =>
+    ((n as any)._host?._fam?.node?._statusFlags & STATUS_PENDING) !== 0
+);

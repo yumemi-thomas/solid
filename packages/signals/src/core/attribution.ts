@@ -33,7 +33,7 @@ import {
   ownerPath,
   reportDiagnostic
 } from "./dev.js";
-import { blockersOf, GlobalQueue } from "./scheduler.js";
+import { blockersOf, laneGuessesHook } from "./scheduler.js";
 import type { Computed, Owner, Signal } from "./types.js";
 
 /**
@@ -2865,7 +2865,7 @@ function acknowledge(
  * (lanes.ts `_laneGuesses`) and its `affects()` marks (`_marks`). */
 function censusRegistrations(t: Transition, state: HoldState): void {
   const budget = { left: HOLD_CENSUS_CAP };
-  const guesses = GlobalQueue._laneGuesses?.(t);
+  const guesses = laneGuessesHook?.(t);
   if (guesses !== undefined)
     for (const node of guesses)
       acknowledge(state, "optimistic", nodeName(node), reachesEffect(node, budget));

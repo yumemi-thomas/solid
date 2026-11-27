@@ -76,9 +76,10 @@ import { NotReadyError } from "./error.js";
 import { link } from "./graph.js";
 import {
   ahead,
+  guessed,
   heldMountUnder,
-  keptGuess,
   isVerdict,
+  marked,
   screenOf,
   verdictLane,
   waiting
@@ -94,8 +95,10 @@ import {
   globalQueue,
   GlobalQueue,
   insertSubs,
+  installWitnessMarkHook,
   joinFuture,
   list,
+  markedHook,
   passLane,
   pendingNodes,
   heldRewrites,
@@ -419,7 +422,7 @@ function verdictValue(el: Signal<any> | Computed<any>, c: Computed<any> | null):
     return snapshot;
   }
   // An `affects()` mark is a declared new question (F-9).
-  if (probing && GlobalQueue._marked?.(owner)) {
+  if (probing && markedHook?.(owner)) {
     probeFound = true;
     if (tracked && flushTransaction) verdictRead(c!, flushTransaction);
   }
@@ -518,7 +521,7 @@ function verdictValue(el: Signal<any> | Computed<any>, c: Computed<any> | null):
         }
       if (latestActive && el._pendingValue !== NOT_PENDING) {
         // A corrected shown guess stays `latest`'s value until the commit (D-34, #4689).
-        if (keptGuess(el) && blocked(t)) {
+        if (guessed && marked.has(el) && blocked(t)) {
           if (__TEST__) shadowActual(SLOT_C);
           return el._value;
         }
@@ -943,6 +946,6 @@ installVerdictHooks(
   pass
 );
 /** An `affects()` mark on a store record with no node (store/affects.ts). */
-GlobalQueue._witnessMark = () => {
+installWitnessMarkHook(() => {
   if (probing) probeFound = true;
-};
+});

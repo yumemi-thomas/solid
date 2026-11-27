@@ -1803,7 +1803,7 @@ export function read<T>(el: any): T {
 
   if (
     !el._fn &&
-    el._x?._snapshotValue === undefined &&
+    (!snapshotSources || el._x?._snapshotValue === undefined) &&
     !snapshotCaptureActive &&
     (!unflushedStaged || el._pendingValue === NOT_PENDING) && // F-10, see readNodeFast
     !(el._config & CONFIG_OVERRIDE) && // lanes: the slow path's one arm

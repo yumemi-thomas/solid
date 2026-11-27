@@ -39,7 +39,7 @@ import {
 } from "./core/constants.js";
 import { handleAsync, isThenable } from "./core/async.js";
 import { cleanup, computed, getOwner, NotReadyError } from "./core/index.js";
-import { GlobalQueue, holdNode, schedule, txOf } from "./core/scheduler.js";
+import { holdNode, installLaggingHook, schedule, txOf } from "./core/scheduler.js";
 import type { Computed } from "./core/types.js";
 import { mark, repoll, unmark } from "./affects-marks.js";
 import { accessor, type MemoOptions, type SourceAccessor } from "./signals.js";
@@ -62,7 +62,7 @@ function lagOf(c: Computed<any>, seen: Set<Computed<any>>): Computed<any> | unde
       if (d === tail) break;
     }
 }
-GlobalQueue._lagging = c => (lagging.size !== 0 ? lagOf(c, new Set()) : undefined);
+installLaggingHook(c => (lagging.size !== 0 ? lagOf(c, new Set()) : undefined));
 
 /**
  * Creates an async memo that may lag, but never leads. Before its first
