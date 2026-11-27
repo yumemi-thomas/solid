@@ -249,6 +249,8 @@ const hasOwn = Object.prototype.hasOwnProperty;
 const INNER_OWNED = {};
 const delegatedEvents = new Set();
 const delegatedContainers = new Map();
+let _attachDelegated: ((container: any, state: any) => void) | undefined;
+let _replayDelegated: ((e: any, target: any) => void) | undefined;
 
 function voidFn() {}
 
@@ -540,7 +542,47 @@ export function template(html, flag) {
 } /** Compiler-emitted primitive; not for hand-written code. @internal */
 export function delegateEvents(eventNames: string[]): void;
 
+function attachAllDelegatedEvents(container, state) {
+  delegatedEvents.forEach(name => attachDelegatedEvent(name, container, state));
+}
+
+function replayDelegatedEvent(e, target) {
+  const replay = (container, state) => (
+    Object.defineProperty(e, "target", { configurable: true, value: target }),
+    eventHandler(e, container, state)
+  );
+  let matchContainer, matchState, matchDistance, matches;
+  for (const [container, state] of delegatedContainers) {
+    if (!state.handlers.has(e.type)) continue;
+    const entry = findOwner(target, state);
+    if (!entry) continue;
+    if (matchContainer) {
+      if (!matches)
+        matches = [
+          {
+            container: matchContainer,
+            state: matchState,
+            distance: matchDistance
+          }
+        ];
+      matches.push({ container, state, distance: entry.distance });
+    } else {
+      matchContainer = container;
+      matchState = state;
+      matchDistance = entry.distance;
+    }
+  }
+  if (matches) {
+    // Replay innermost-first so queued hydration events follow the same
+    // root-boundary handoff as live native bubbling.
+    matches.sort((a, b) => a.distance - b.distance);
+    for (let i = 0; i < matches.length; i++) replay(matches[i].container, matches[i].state);
+  } else if (matchContainer) replay(matchContainer, matchState);
+}
+
 export function delegateEvents(eventNames) {
+  _attachDelegated = attachAllDelegatedEvents;
+  _replayDelegated = replayDelegatedEvent;
   for (const name of eventNames) {
     if (!delegatedEvents.has(name)) {
       delegatedEvents.add(name);
@@ -580,7 +622,7 @@ export function registerDelegatedContainer(container, owner = container) {
       })
     );
   state.owners.set(owner, (state.owners.get(owner) || 0) + 1);
-  delegatedEvents.forEach(name => attachDelegatedEvent(name, container, state));
+  _attachDelegated && _attachDelegated(container, state);
 } /** Event-delegation plumbing (Portal/custom-root wiring). Integration plumbing. @internal */
 export function unregisterDelegatedContainer(
   container: MountableElement,
@@ -2909,37 +2951,7 @@ export function runHydrationEvents() {
         // eventHandler deletes `target` when it finishes, so each replay
         // defines it again.
         const target = origin || e.target;
-        const replay = (container, state) => (
-          Object.defineProperty(e, "target", { configurable: true, value: target }),
-          eventHandler(e, container, state)
-        );
-        let matchContainer, matchState, matchDistance, matches;
-        for (const [container, state] of delegatedContainers) {
-          if (!state.handlers.has(e.type)) continue;
-          const entry = findOwner(target, state);
-          if (!entry) continue;
-          if (matchContainer) {
-            if (!matches)
-              matches = [
-                {
-                  container: matchContainer,
-                  state: matchState,
-                  distance: matchDistance
-                }
-              ];
-            matches.push({ container, state, distance: entry.distance });
-          } else {
-            matchContainer = container;
-            matchState = state;
-            matchDistance = entry.distance;
-          }
-        }
-        if (matches) {
-          // Replay innermost-first so queued hydration events follow the same
-          // root-boundary handoff as live native bubbling.
-          matches.sort((a, b) => a.distance - b.distance);
-          for (let i = 0; i < matches.length; i++) replay(matches[i].container, matches[i].state);
-        } else if (matchContainer) replay(matchContainer, matchState);
+        if (_replayDelegated) _replayDelegated(e, target);
         // A replay that stopped early leaves the defined target behind.
         delete e.target;
         // Each replayed event is its own instant, as live (#4285).
