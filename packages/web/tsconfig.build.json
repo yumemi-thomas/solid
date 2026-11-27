@@ -10,9 +10,11 @@
     "types": ["node"],
     "paths": {
       "@solidjs/web": ["./src/index.ts"],
+      "@solidjs/web/server-functions/transport": ["./server-functions/src/transport.ts"],
       "@solidjs/web/server-functions/client": ["./server-functions/src/client.ts"],
       "@solidjs/web/serialization": ["./serialization/src/serializer.ts"],
       "@solidjs/web/serialization/decode": ["./serialization/src/serializer-decode.ts"],
+      "@solidjs/web/frames/transport": ["./frames/src/transport-tier.ts"],
       "@solidjs/web/frames/trace": ["./frames/src/trace-tier.ts"],
       "@solidjs/web/frames/regions": ["./frames/src/regions-tier.ts"],
       "@solidjs/web/frames/assets": ["./frames/src/assets-tier.ts"],

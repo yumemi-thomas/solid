@@ -137,6 +137,7 @@ tierLoaders.assets = () => import("@solidjs/web/frames/assets");
 // on the first refetch or navigation too: a frame starts it at the new
 // version's header and its root waits for it.
 tierLoaders.wire = () => import("@solidjs/web/frames/wire");
+tierLoaders.transport = () => import("@solidjs/web/frames/transport");
 
 // Build-time literal (see diagnostics.ts): dev-only guidance folds out of prod.
 const IS_DEV = "_SOLID_DEV_" as unknown as boolean;
@@ -166,7 +167,8 @@ export {
   createFrame,
   createFrameHost,
   createFrameElement,
-  FRAME_APPLIED_EVENT
+  FRAME_APPLIED_EVENT,
+  prepareTier
 } from "./frame-client.js";
 // The shape a tier loader resolves (`InstallOptions.tiers`); type-only.
 export type { TierModule } from "./frame-client.js";

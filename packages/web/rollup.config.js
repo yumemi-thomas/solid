@@ -80,10 +80,7 @@ const replaceDev = isDev => replaceFlags(isDev, isDev);
 const externalizeSharedTransport = {
   name: "externalize-shared-transport",
   resolveId(source, importer) {
-    // The live wire tier (wire-tier.ts) imports the same wire layer: the
-    // loop's `LIVE_WIRE` slot is a process-local symbol, so the tier must
-    // read the one instance the loop wrote.
-    if (!importer || !/[\\/](frame-transport|wire-tier)\.(js|ts)$/.test(importer)) return null;
+    if (!importer || !/[\\/](frame-transport|wire-tier|transport-tier)\.(js|ts)$/.test(importer)) return null;
     if (source === "../../server-functions/src/shared.js" || source === "../../src/response.js") {
       return { id: "@solidjs/web/server-functions/client", external: true };
     }
@@ -91,42 +88,26 @@ const externalizeSharedTransport = {
   }
 };
 
-// The rich-args entry's imports of the server-function client (its config
-// write) and shared wire layer (codec read, serializeString) must resolve to
-// the same built instance the compiled reference proxies call through —
-// bundling a private copy would write `serializeArgs` into config module
-// state nothing reads. Same instance-identity reasoning as
-// externalizeSharedTransport above; a name the client entry stops exporting
-// fails the build loudly (missing-export), never silently.
 const externalizeSharedClient = {
   name: "externalize-shared-client",
   resolveId(source, importer) {
-    if (!importer || !/[\\/]rich-args\.(js|ts)$/.test(importer)) return null;
-    if (source === "./client.js" || source === "./shared.js") {
+    if (!importer) return null;
+    if (/[\\/]rich-args\.(js|ts)$/.test(importer)) {
+      if (source === "./client.js" || source === "./shared.js") {
+        return { id: "@solidjs/web/server-functions/client", external: true };
+      }
+    }
+    if (/[\\/]transport\.(js|ts)$/.test(importer) && source === "./client.js") {
       return { id: "@solidjs/web/server-functions/client", external: true };
     }
     return null;
   }
 };
 
-// The frames TIER entries (`frames/src/trace-tier.ts` →
-// `@solidjs/web/frames/trace`, `frames/src/regions-tier.ts` →
-// `@solidjs/web/frames/regions`; loaded by the frames client through
-// `prepareTier(name)`) wire themselves into the eager frames client: the
-// traces tier sets the shared host's `revive` (`getFrameHost()`) at install,
-// the regions tier binds frames (`createFrame`) the parent frame's host
-// routes to. That must be the SAME frames client instance the app mounted
-// its boundaries through, so a tier's import of the client entry resolves
-// to the external package specifier, never to a bundled private copy (whose
-// `getFrameHost()` would mint a host nothing reads, whose `createFrame`
-// would mint frames nothing routes to). Same instance-identity reasoning as
-// externalizeSharedClient above. A tier's imports of frame-client.js's pure
-// helpers stay bundled (its own copy — the module is importless and keeps
-// no state those helpers read).
 const externalizeFramesClient = {
   name: "externalize-frames-client",
   resolveId(source, importer) {
-    if (!importer || !/[\\/](trace|regions|wire)-tier\.(js|ts)$/.test(importer)) return null;
+    if (!importer || !/[\\/](trace|regions|wire|transport)-tier\.(js|ts)$/.test(importer)) return null;
     if (source === "./client.js") return { id: "@solidjs/web/frames", external: true };
     return null;
   }
@@ -317,20 +298,53 @@ export default [
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.js", format: "es" },
-    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
+    external: [
+      "solid-js/internal",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
     plugins: [replaceDev(false)].concat(plugins)
   },
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.observe.js", format: "es" },
-    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
+    external: [
+      "solid-js/internal",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
     plugins: [replaceFlags(false, true)].concat(plugins)
   },
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.dev.js", format: "es" },
-    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
+    external: [
+      "solid-js/internal",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
     plugins: [replaceDev(true)].concat(plugins)
+  },
+  {
+    input: "server-functions/src/transport.ts",
+    output: { file: "server-functions/dist/transport.js", format: "es" },
+    external: ["@solidjs/web/server-functions/client", "seroval", "seroval-plugins/web"],
+    plugins: [replaceDev(false), externalizeSharedClient].concat(plugins)
+  },
+  {
+    input: "server-functions/src/transport.ts",
+    output: { file: "server-functions/dist/transport.observe.js", format: "es" },
+    external: ["@solidjs/web/server-functions/client", "seroval", "seroval-plugins/web"],
+    plugins: [replaceFlags(false, true), externalizeSharedClient].concat(plugins)
+  },
+  {
+    input: "server-functions/src/transport.ts",
+    output: { file: "server-functions/dist/transport.dev.js", format: "es" },
+    external: ["@solidjs/web/server-functions/client", "seroval", "seroval-plugins/web"],
+    plugins: [replaceDev(true), externalizeSharedClient].concat(plugins)
   },
   {
     // Client opt-in for codec-encoded arguments. Tiny by construction: its
@@ -419,7 +433,8 @@ export default [
       // `live()` loop's connection (join / open / supersede, the SSE
       // reader, the lifetime told to the loop, the have-list ledger and the
       // resume request). Its own entry below.
-      "@solidjs/web/frames/wire"
+      "@solidjs/web/frames/wire",
+      "@solidjs/web/frames/transport"
     ],
     // Prod build: strip `_SOLID_DEV_` like the main `dist/web.js` entry, so the
     // frame runtime's dev checks/warnings (marker-integrity diagnostics) do
@@ -437,6 +452,7 @@ export default [
     output: { file: "frames/dist/client.observe.js", format: "es" },
     external: [
       "solid-js",
+      "solid-js/internal",
       "@solidjs/web",
       "seroval",
       "seroval-plugins/web",
@@ -445,7 +461,8 @@ export default [
       "@solidjs/web/frames/trace",
       "@solidjs/web/frames/regions",
       "@solidjs/web/frames/assets",
-      "@solidjs/web/frames/wire"
+      "@solidjs/web/frames/wire",
+      "@solidjs/web/frames/transport"
     ],
     plugins: [replaceFlags(false, true), externalizeSharedTransport]
       .concat(plugins)
@@ -467,7 +484,8 @@ export default [
       "@solidjs/web/frames/trace",
       "@solidjs/web/frames/regions",
       "@solidjs/web/frames/assets",
-      "@solidjs/web/frames/wire"
+      "@solidjs/web/frames/wire",
+      "@solidjs/web/frames/transport"
     ],
     plugins: [replaceDev(true), externalizeSharedTransport]
       .concat(plugins)
@@ -543,8 +561,61 @@ export default [
     // one build serves every condition.
     input: "frames/src/wire-tier.ts",
     output: { file: "frames/dist/wire.js", format: "es" },
-    external: ["solid-js", "solid-js/internal", "@solidjs/web"],
+    external: [
+      "solid-js",
+      "solid-js/internal",
+      "@solidjs/web",
+      "@solidjs/web/frames/transport",
+      "@solidjs/web/server-functions/transport"
+    ],
     plugins: [externalizeFramesClient, externalizeSharedTransport].concat(plugins)
+  },
+  {
+    input: "frames/src/transport-tier.ts",
+    output: { file: "frames/dist/transport.js", format: "es" },
+    external: [
+      "solid-js",
+      "solid-js/internal",
+      "@solidjs/web",
+      "@solidjs/web/frames/transport",
+      "@solidjs/web/server-functions/client",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
+    plugins: [replaceDev(false), externalizeFramesClient, externalizeSharedTransport].concat(plugins)
+  },
+  {
+    input: "frames/src/transport-tier.ts",
+    output: { file: "frames/dist/transport.observe.js", format: "es" },
+    external: [
+      "solid-js",
+      "solid-js/internal",
+      "@solidjs/web",
+      "@solidjs/web/frames/transport",
+      "@solidjs/web/server-functions/client",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
+    plugins: [replaceFlags(false, true), externalizeFramesClient, externalizeSharedTransport].concat(
+      plugins
+    )
+  },
+  {
+    input: "frames/src/transport-tier.ts",
+    output: { file: "frames/dist/transport.dev.js", format: "es" },
+    external: [
+      "solid-js",
+      "solid-js/internal",
+      "@solidjs/web",
+      "@solidjs/web/frames/transport",
+      "@solidjs/web/server-functions/client",
+      "@solidjs/web/server-functions/transport",
+      "seroval",
+      "seroval-plugins/web"
+    ],
+    plugins: [replaceDev(true), externalizeFramesClient, externalizeSharedTransport].concat(plugins)
   },
   {
     // Prod build, like the main server entry above: the sink's own
@@ -562,6 +633,7 @@ export default [
       "seroval",
       "seroval-plugins/web",
       "@solidjs/web",
+      "@solidjs/web/frames/transport",
       "@solidjs/web/server-functions/server"
     ],
     plugins: [replaceDev(false), externalizeFramesServerRuntime].concat(plugins)
@@ -580,6 +652,7 @@ export default [
       "seroval",
       "seroval-plugins/web",
       "@solidjs/web",
+      "@solidjs/web/frames/transport",
       "@solidjs/web/server-functions/server"
     ],
     plugins: [replaceDev(true), externalizeFramesServerRuntime].concat(plugins)
@@ -598,6 +671,7 @@ export default [
       "seroval",
       "seroval-plugins/web",
       "@solidjs/web",
+      "@solidjs/web/frames/transport",
       "@solidjs/web/server-functions/server"
     ],
     plugins: [replaceFlags(false, true), externalizeFramesServerRuntime].concat(plugins)

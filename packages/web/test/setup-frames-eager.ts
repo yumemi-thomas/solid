@@ -14,3 +14,5 @@ setDeferredHydration(false);
 import { prepareTier } from "../frames/src/frame-client.js";
 
 await prepareTier("wire");
+await prepareTier("transport");
+await import("@solidjs/web/server-functions/transport");

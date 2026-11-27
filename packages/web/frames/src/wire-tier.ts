@@ -66,11 +66,10 @@ import { FRAME_HAVE_BUDGET, FRAME_HAVE_HEADER, ends } from "./frame-transport.js
 // rollup.config.js's externalizeSharedTransport resolves this to
 // `@solidjs/web/server-functions/client`).
 import {
-  ChunkReader,
   LIVE_WIRE,
-  frameAddress,
-  isEventStream
+  frameAddress
 } from "../../server-functions/src/shared.js";
+import { ChunkReader, isEventStream } from "@solidjs/web/server-functions/transport";
 
 // Pure DOM helpers and marker constants, bundled into this chunk as their
 // own copy (no module state).

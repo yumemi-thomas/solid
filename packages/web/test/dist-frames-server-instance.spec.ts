@@ -126,13 +126,14 @@ describe("frames/dist/client*.js share the server-function client (#3640)", () =
       const code = readFileSync(join(PKG_ROOT, "frames", "dist", file), "utf8");
       const client = importedNames(code, "@solidjs/web/server-functions/client");
       expect(client, `${file}: no import from @solidjs/web/server-functions/client`).not.toBeNull();
-      expect(client).toEqual(
-        expect.arrayContaining([
-          "deliverFlightData",
-          "hasFlightMetadata",
-          "configureServerFunctionsClient",
-          "getServerFunctionsCodec"
-        ])
+      expect(client).toEqual(expect.arrayContaining(["configureServerFunctionsClient"]));
+      const transportFile = file.replace(/^client/, "transport");
+      const transportCode = readFileSync(join(PKG_ROOT, "frames", "dist", transportFile), "utf8");
+      const transportClient = importedNames(transportCode, "@solidjs/web/server-functions/client");
+      const transportSf = importedNames(transportCode, "@solidjs/web/server-functions/transport");
+      expect(transportClient).toEqual(expect.arrayContaining(["getServerFunctionsCodec"]));
+      expect(transportSf).toEqual(
+        expect.arrayContaining(["deliverFlightData", "hasFlightMetadata"])
       );
       for (const marker of [
         "function deliverFlightData",
@@ -142,6 +143,7 @@ describe("frames/dist/client*.js share the server-function client (#3640)", () =
         "consumers: new Map"
       ]) {
         expect(code.includes(marker), `${file} inlines "${marker}"`).toBe(false);
+        expect(transportCode.includes(marker), `${transportFile} inlines "${marker}"`).toBe(false);
       }
     });
   }
