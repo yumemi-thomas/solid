@@ -216,6 +216,9 @@ import { installServerWithOrigin } from "./shared.js";
 // not a member of the server's sharedConfig) — the helpers below are the
 // shapes they have with no hydration in progress.
 /** @internal */
+/** @internal */
+export function loadStreamHydration(): void {}
+/** @internal */
 export function applyPatches(_target: any, _patches: any[]): void {}
 /** @internal */
 export function readSerializedOrCompute(compute: (prev: any) => any, prev: any): any {

@@ -59,13 +59,13 @@ const build = (input, name, external, isDev, isObserve, extraPlugins = []) => ({
 const externalizeAdapterHelpers = {
   name: "externalize-store-hydration-helpers",
   resolveId(source, importer) {
-    if (!importer || !/[\\/]store-hydration\.ts$/.test(importer)) return null;
+    if (!importer || !/[\\/](store-hydration|hydration-stream)\.ts$/.test(importer)) return null;
     if (source === "./hydration.js") return { id: "solid-js", external: true };
     return null;
   }
 };
 
-const client = ["@solidjs/signals"];
+const client = ["@solidjs/signals", "solid-js/internal/hydration-stream"];
 const server = ["@solidjs/signals", "stream"];
 // The refresh runtime imports the main entry ("solid-js", and its seams
 // through "solid-js/internal") rather than relative sources so it shares
@@ -123,5 +123,6 @@ export default [
     false,
     false,
     [externalizeAdapterHelpers]
-  )
+  ),
+  build("src/client/hydration-stream.ts", "hydration-stream", [], false, false)
 ];

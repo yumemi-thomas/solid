@@ -13,4 +13,6 @@ setDeferredHydration(false);
 // test/consistency/tier-wire-preload.spec.tsx, which installs its own gate.
 import { prepareTier } from "../frames/src/frame-client.js";
 
+import { loadStreamHydration } from "solid-js";
 await prepareTier("wire");
+await loadStreamHydration();

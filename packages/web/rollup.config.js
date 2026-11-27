@@ -195,7 +195,7 @@ export default [
   {
     input: "src/index.ts",
     output: { file: "dist/web.js", format: "es" },
-    external: ["solid-js", "solid-js/internal"],
+    external: ["solid-js", "solid-js/internal", "solid-js/internal/hydration-stream"],
     plugins: [replaceDev(false)].concat(plugins)
   },
   {
@@ -207,7 +207,7 @@ export default [
     // and falls through to prod under `observe`.
     input: "src/index.ts",
     output: { file: "dist/web.observe.js", format: "es" },
-    external: ["solid-js", "solid-js/internal"],
+    external: ["solid-js", "solid-js/internal", "solid-js/internal/hydration-stream"],
     plugins: [replaceFlags(false, true)].concat(plugins)
   },
   {
@@ -253,7 +253,7 @@ export default [
   {
     input: "src/index.ts",
     output: { file: "dist/web.dev.js", format: "es" },
-    external: ["solid-js", "solid-js/internal"],
+    external: ["solid-js", "solid-js/internal", "solid-js/internal/hydration-stream"],
     plugins: [replaceDev(true)].concat(plugins)
   },
   {

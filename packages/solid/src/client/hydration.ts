@@ -467,45 +467,36 @@ let _doneValue = false;
 // (no hydrate() import), the hydrated* functions and their dependencies
 // (MockPromise, subFetch) are eliminated by the bundler.
 
-let _createMemo: Function | undefined;
-let _createErrorBoundary: Function | undefined;
-let _createEffect: Function | undefined;
-let _createLoadingBoundary: Function | undefined;
-// The store/optimistic families get GENERIC adapters instead of one slot per
-// primitive: the adapter is parameterized by the core implementation, and
-// each wrapper below passes its own (createStore hands in coreStore, etc.).
-// This keeps the store engine (store/reconcile/projection/optimistic in
-// @solidjs/signals, ~7 KB gz) out of enableHydration()'s reference graph —
-// it is retained by the wrapper, i.e. only when the app imports the
-// primitive. A hydrating app with no store usage shakes the whole engine; an
-// app that uses stores gets exactly the same hydration behavior as before,
-// because the adapter travels with enableHydration() and the engine with the
-// import the app already has. There is no state where a hydrating store call
-// can miss its adapter: `sharedConfig.hydrating` can only be true after
-// enableHydration() installed these.
-//
-// The store adapter lives in store-hydration.ts, and the install below is
-// its only reference from this module: a page whose root pass creates no
-// derived store has no reader of the slot, the write is dead, and the
-// adapter leaves the bundle with it. The one other consumer — the
-// container-trace materializer in the frames traces tier — bundles its own
-// copy of the adapter module rather than reading this slot, so that lazy
-// chunk never pins the adapter into the entry (hydration-split-measured.md
-// §3.1; the reason the slot is not read from any other dist entry).
-let _hydrateSignalLike: ((coreFn: Function, fn: any, options?: any) => any) | undefined;
-let _hydrateStoreLike:
-  | ((coreFn: Function, fn: any, initialValue: any, options?: any) => any)
-  | undefined;
-// lazy()'s server-module lookup: only meaningful under hydration, so the
-// implementation (and peekNextChildId/_$HY access behind it) installs here
-// rather than shipping in CSR bundles that use lazy() (#2883 phase 3).
-export let _lazyHydrationLookup:
-  | (<T>(
-      comp: (() => T | undefined) | undefined,
-      moduleUrl?: string,
-      exportName?: string
-    ) => (() => T) | undefined)
-  | undefined;
+export let _hydrationEnabled = false;
+let _hydrateAsyncIterable: ((coreFn: Function, compute: any, options: any) => any) | undefined;
+let _hydrateHybridSignal: ((coreFn: Function, fn: any, options?: any) => any) | undefined;
+let _normalizeIterator: ((it: any, deferFirst?: boolean) => any) | undefined;
+
+/** @internal — loads `solid-js/internal/hydration-stream` and wires its hooks. */
+export function loadStreamHydration(mod?: { createStreamHydration: (h: any) => any[] }) {
+  const apply = (m: { createStreamHydration: (h: any) => any[] }) => {
+    const [ai, hybrid, norm] = m.createStreamHydration({
+      getOwner,
+      peekNextChildId,
+      coreSignal,
+      sharedConfig,
+      isAsyncIterable,
+      hasLoadingWindow,
+      subFetch,
+      readSerializedOrCompute,
+      syncThenable
+    });
+    _hydrateAsyncIterable = ai;
+    _hydrateHybridSignal = hybrid;
+    _normalizeIterator = norm;
+    (sharedConfig as any).hasStreamHydration = true;
+  };
+  if (mod) {
+    apply(mod);
+    return;
+  }
+  return import("solid-js/internal/hydration-stream").then(apply);
+}
 
 // --- Hydration helpers ---
 
@@ -677,8 +668,8 @@ export function readHydratedValue(initP: any, refresh: () => void, options?: any
         throw initP.v;
       }
       if (initP.s === 1)
-        return isAsyncIterable(initP.v)
-          ? { [Symbol.asyncIterator]: () => normalizeIterator(initP.v[Symbol.asyncIterator]()) }
+        return _normalizeIterator && isAsyncIterable(initP.v)
+          ? { [Symbol.asyncIterator]: () => _normalizeIterator!(initP.v[Symbol.asyncIterator]()) }
           : initP.v;
     }
     // Still in flight (or a loading window's): the runtime lands it, in a
@@ -947,300 +938,16 @@ export function hasLoadingWindow(options: any): boolean {
   );
 }
 
-/**
- * Forward an iterator's `return()`: the source's own answer when it is a
- * promise, otherwise a synchronously-settling thenable of the done result
- * (the hydration resume path must not wait a microtask for it).
- *
- * @internal — shared with `solid-js/internal/container-trace`.
- */
-export function forwardIteratorReturn(it: any, value?: any) {
-  const returned = it.return?.(value);
-  return returned && typeof returned.then === "function"
-    ? returned
-    : syncThenable(returned ?? { done: true, value });
-}
-
-function pullStep(it: any) {
-  try {
-    return it.next();
-  } catch (e) {
-    const rejected = Promise.reject(e);
-    rejected.catch(noop);
-    return rejected;
-  }
-}
-
-function normalizeIterator(it: any, deferFirst?: boolean) {
-  let first = true;
-  let buffered: any = null;
-  return {
-    next() {
-      if (first) {
-        first = false;
-        const r = it.next();
-        if (r && typeof r.then === "function") return r;
-        // Loading window (loadingValue): commit #0 must serve through the
-        // synchronous claim walk. A fully-buffered replay (loaded mode)
-        // delivers its first yield synchronously, which would close the
-        // window mid-walk — the client would compute real-data structure
-        // against placeholder markup. Defer it one microtask; the sync
-        // delivery stays for windowless nodes, whose claim NEEDS the value.
-        return deferFirst ? Promise.resolve(r) : syncThenable(r);
-      }
-      if (buffered) {
-        const b = buffered;
-        buffered = null;
-        return b;
-      }
-      let latest = pullStep(it);
-      if (latest && typeof latest.then === "function") return latest;
-      let result = latest;
-      while (!latest.done) {
-        const peek = pullStep(it);
-        if (peek && typeof peek.then === "function") {
-          buffered = peek;
-          break;
-        }
-        latest = peek;
-        // Conflate the buffered backlog to its LATEST data yield — one visible
-        // update, the same final state the store path's batched patch
-        // application produces. The stream's done result must not clobber
-        // that value (a completed-before-hydration stream buffers its done
-        // result right behind the data): deliver the value from this pull and
-        // hand the done result to the next one.
-        if (!latest.done) result = latest;
-        else if (result !== latest) buffered = Promise.resolve(latest);
-      }
-      return Promise.resolve(result);
-    },
-    return(value?: any) {
-      buffered = null;
-      return forwardIteratorReturn(it, value);
-    }
-  };
-}
-
-/**
- * Apply a projection's recorded patch batch — `[path, value]` writes,
- * `[path]` deletes, `[path, value, 1]` splice-inserts — to a draft. The
- * continuation protocol a server projection serializes as (hydration
- * resume below; a container trace at the slot border, consumed by
- * `solid-js/internal/container-trace`).
- *
- * @internal
- */
-export function applyPatches(target: any, patches: any[]) {
-  for (const patch of patches) {
-    const path = patch[0];
-    let current = target;
-    for (let i = 0; i < path.length - 1; i++) current = current[path[i]];
-    const key = path[path.length - 1];
-    if (patch.length === 1) {
-      Array.isArray(current) ? current.splice(key as number, 1) : delete current[key];
-    } else if (patch.length === 3) {
-      (current as any[]).splice(key as number, 0, patch[1]);
-    } else {
-      current[key] = patch[1];
-    }
-  }
-}
-
 /** @internal — shared with the store adapter module (store-hydration.ts). */
 export function isAsyncIterable(v: any): boolean {
   return v != null && typeof v[Symbol.asyncIterator] === "function";
 }
 
-/**
- * Whether the current owner has no hydration id counter to consume — no
- * owner at all (`runWithOwner(null, …)`, a detached creation), or an owner
- * under an id-less tree (a detached `createRoot` without `id`). Positional
- * hydration peeks the next child id off the owner, which throws for both
- * (`childId`: `null._config`, "owner without an id"); and the server
- * serializes nothing for such a node (its `owner.id` guard), so there is
- * nothing to look up. Every facade takes the same non-hydrating path
- * `transparent` takes (#3609) — the predicate lazyHydrationLookup already
- * applied. Owned nodes under an id-carrying owner are unaffected.
- *
- * @internal — shared with the store adapter module (store-hydration.ts).
- */
 export function noHydrationId(): boolean {
   const o = getOwner();
   return !o || o.id == null;
 }
 
-/**
- * The hybrid handoff run's client source, as the engine consumes it (#3498,
- * #3574). The run continues the adopted answer's stream (rule 5), so it must
- * not open a pending window: step 0 is the adopted answer itself,
- * landed synchronously (a sync first yield is a landed first answer to
- * `handleAsync`, and a stream is not pending between yields), and the
- * source's real first yield — the duplicate — is step 1, discarded as
- * before. Without the quiet step the store read pending from the handoff
- * until that yield, and any consumer created in between — a streamed
- * `<Loading>` resuming to claim its fragment — selected its fallback against
- * resolved server content (#3574).
- *
- * `quiet` is what steps 0 and 1 yield — the adopted answer in the node's own
- * terms. A store yields `undefined`: a bare `yield` commits the draft as-is,
- * and the duplicate's writes went to the shadow draft (`activate` switches
- * the proxy to the real draft once they have). A signal-shaped node
- * (hydrateSignalLike) yields the adopted value itself — its `prev` — so the
- * duplicate lands as an equal write, a no-op at the node.
- *
- * @internal — shared with the store adapter module (store-hydration.ts).
- */
-export function wrapFirstYield(iterable: any, activate?: () => void, quiet?: any) {
-  const srcIt = iterable[Symbol.asyncIterator]();
-  let step = 0;
-  return {
-    [Symbol.asyncIterator]() {
-      return {
-        next() {
-          if (step === 0) {
-            step = 1;
-            return syncThenable({ done: false, value: quiet });
-          }
-          const p = srcIt.next();
-          if (step === 1) {
-            step = 2;
-            // The source's first yield, the duplicate.
-            return p.then((r: any) => {
-              activate?.();
-              return r.done ? r : { done: false, value: quiet };
-            });
-          }
-          return p;
-        },
-        return(value?: any) {
-          return forwardIteratorReturn(srcIt, value);
-        }
-      };
-    }
-  };
-}
-
-/**
- * A hybrid node's still-pending server answer, adopted as a ONE-yield stream
- * (#3498; store and signal-shaped alike). The hybrid contract is that the
- * server consumes exactly one yield and the client continues the iteration —
- * this is that first yield, and the engine's pull for the next one is the
- * handoff.
- *
- * Why a stream and not the thenable itself: the handoff must run only once
- * the answer has actually LANDED in the node. This relies on the engine's
- * flight contract — latest-run-wins supersession (PJ-R26 in the signals
- * RULES-INDEX; flight-identity cancellation, #3122): `handleAsync` pulls a
- * stream's next step only from the previous step's commit (`asyncWrite`'s
- * continuation, `iterateOrRelease`), and it drops a landing whose flight is
- * no longer the node's `_inFlight` or whose node a newer write dirtied
- * (`asyncWrite`'s guards; a recompute nulls `_inFlight` and fires the flight
- * teardown first). So the second `next()` pull is the landed-and-committed
- * signal: `onLanded` fires exactly when the landing applied, and never for a
- * superseded flight — a dependency change that re-ran the store before the
- * landing (rule 4) leaves this stream orphaned and silent. A rejection is
- * the adopted answer (rule 3): the engine settles the error and pulls
- * nothing more, and `onRejected` only marks authority transferred so the
- * next non-handoff run (refresh(), a dependency change) runs the client
- * source. An orphaned stream's rejection reaches `onRejected` too, but the
- * engine drops the error (same guard) and the store is already live.
- *
- * @internal — shared with the store adapter module (store-hydration.ts).
- */
-export function adoptedAnswerStream(thenable: any, onLanded: () => void, onRejected: () => void) {
-  let pulled = false;
-  return {
-    [Symbol.asyncIterator]() {
-      return {
-        next() {
-          if (pulled) {
-            onLanded();
-            return Promise.resolve({ done: true, value: undefined });
-          }
-          pulled = true;
-          return {
-            then(res: any, rej: any) {
-              thenable.then(
-                (v: any) => res({ done: false, value: v }),
-                (e: any) => {
-                  onRejected();
-                  rej(e);
-                }
-              );
-            }
-          };
-        }
-      };
-    }
-  };
-}
-
-function hydrateSignalFromAsyncIterable(coreFn: Function, compute: any, options: any): any {
-  const parent = getOwner()!;
-  const expectedId = peekNextChildId(parent);
-  if (!sharedConfig.has!(expectedId)) return null;
-  const loaded = sharedConfig.load!(expectedId);
-  if (!isAsyncIterable(loaded)) return null;
-
-  const base = normalizeIterator(loaded[Symbol.asyncIterator](), hasLoadingWindow(options));
-  // Terminal tracking for the live handover below. The wrapper thenable keeps
-  // the base iterator's delivery timing: syncThenable runs its callback
-  // synchronously, and windowless claims NEED that sync first value.
-  let terminal = false;
-  const it = {
-    next() {
-      const p = base.next();
-      return {
-        then(res: any, rej: any) {
-          return p.then(
-            (r: any) => {
-              if (r.done) terminal = true;
-              return res(r);
-            },
-            (e: any) => {
-              terminal = true;
-              if (rej) return rej(e);
-              throw e;
-            }
-          );
-        }
-      };
-    },
-    return(value?: any) {
-      return base.return(value);
-    }
-  };
-  const iterable = {
-    [Symbol.asyncIterator]() {
-      return it;
-    }
-  };
-  return coreFn((prev: any) => {
-    // A run after the serialized stream reached its terminal state (done or
-    // error) is a real invalidation — a dependency change or refresh() — and
-    // the stream answers the OLD question (and is already consumed). Hand
-    // over to the live compute (#3060). Runs BEFORE that are NotReady
-    // retries of the same flight (e.g. the compute read a sibling async
-    // source that was still pending) and must keep adopting the replay.
-    if (terminal) return compute(prev);
-    // Run the user compute up to its first await on the client so any reactive
-    // dependencies read before the first suspension are tracked. subFetch mocks
-    // fetch/Promise so the async generator cannot progress past that point —
-    // the server iterator drives the actual values from here on.
-    subFetch(compute, prev);
-    return iterable;
-  }, options);
-}
-
-// --- Hydration-aware implementations ---
-
-// The shared pre-hydration gate lifecycle for the ssrSource branches
-// (signal × client, store × client): create the node with a compute that
-// branches on the gate, then flip it — the flip's recompute is the node's
-// first real run. `ownedWrite` because the write happens inside the node's
-// own creation scope. (The hybrid branches flip their own gate at the
-// adopted answer's landing instead — see hydrateStoreLikeFn, #3498, and
-// hydrateSignalLike's hybrid branch.)
 /** @internal — shared with the store adapter module (store-hydration.ts). */
 export function withHydrationGate(create: (hydrated: () => boolean) => any) {
   const [hydrated, setHydrated] = coreSignal(false, { ownedWrite: true });
@@ -1249,15 +956,7 @@ export function withHydrationGate(create: (hydrated: () => boolean) => any) {
   return result;
 }
 
-// One signal-shaped hydration body for memo/signal/optimistic — the families
-// only ever differed in which core primitive committed the result, so the
-// core function is a parameter. createOptimistic reaches this through the
-// _hydrateSignalLike slot precisely so the wrapper does not statically couple
-// the optimistic engine to this body (which would drag it into CSR bundles).
 function hydrateSignalLike(coreFn: Function, fn: any, options?: any) {
-  // Not hydrating positionally: a transparent node (invisible to the id
-  // scheme — it must not peek, and adopt, the NEXT sibling's slot), or no id
-  // counter to peek from (#3609). Straight to the core primitive.
   if (options?.transparent || noHydrationId()) return coreFn(fn, options);
   markTopLevelSnapshotScope();
 
@@ -1266,115 +965,21 @@ function hydrateSignalLike(coreFn: Function, fn: any, options?: any) {
   if (ssrSource === "client") {
     return withHydrationGate(hydrated =>
       coreFn((prev: any) => {
-        // UNASKED (never prev) — a sync return would count as a first answer:
-        // it would close a loading window before the real compute ever runs,
-        // or commit `undefined` on a bare node (see UNASKED).
         if (!hydrated()) return UNASKED;
         return fn(prev);
       }, options)
     );
   }
 
-  // Hybrid async-iterable handoff (#2993). The server consumes exactly one
-  // yield from its iterator and serializes it as a plain promise — the
-  // contract is that the CLIENT continues the iteration. Without this branch
-  // a signal-shaped node would adopt the first yield and latch there forever
-  // (readSerializedOrCompute only re-runs the compute on invalidation). The
-  // handoff follows the store's rules 1–5 (see the rule block in
-  // hydrateStoreLikeFn): it waits for the adopted answer to LAND (rule 1 —
-  // the gate flips at the landing, never at creation: a creation flip ran
-  // the client generator as a fresh flight ahead of the pending server
-  // answer, superseding it and reading pending from creation until the
-  // client's first yield — #3574's key miss on a streamed <Loading>, with a
-  // wider window than the store's); only the handoff run's first yield is
-  // the duplicate (rule 2); a rejected answer is adopted (rule 3); a
-  // dependency change before the landing supersedes it (rule 4); and the
-  // handoff opens no pending window (rule 5). Value semantics make the run
-  // simpler than the store's — no shadow draft: the adopted answer is the
-  // node's `prev`, so wrapFirstYield yields it as the quiet steps and the
-  // duplicate lands as an equal write.
-  //
-  // The handoff only ARMS when the adoption pass saw an async-iterable
-  // compute (rule 6 in the store's block): sync and promise-shaped hybrid
-  // computes keep their documented adopt-the-serialized-value semantics
-  // (re-running those would clobber the server value / trigger a client
-  // refetch). For those nothing flips: the adoption IS the answer, and every
-  // later run re-enters the adoption path — readSerializedOrCompute, the
-  // "server" body, which re-adopts while hydration is open and runs the
-  // compute live once it is done. (The creation flip this path used to make
-  // for them was not a free re-adopt: the gate write is held by the snapshot
-  // scope and replays at its release, AFTER `done` flips in the plain
-  // hydrate() path — so the recompute ran the compute live, refetching what
-  // the server had serialized.)
-  if (ssrSource === "hybrid" && sharedConfig.has!(peekNextChildId(getOwner()!))) {
-    // undefined until the trace has completed once: a sync NotReady from the
-    // trace (the compute read a pending sibling before returning) leaves the
-    // shape unknown, and the retry decides.
-    let takeover: boolean | undefined;
-    const detect = (prev: any) => {
-      const r = fn(prev);
-      takeover = isAsyncIterable(r);
-      return r;
-    };
-    const [hydrated, setHydrated] = coreSignal(false, { ownedWrite: true });
-    let live = false;
-    const flip = () => {
-      if (!live) setHydrated(true);
-    };
-    let adopted = false;
-    let creating = true;
-    let landedOnCreate = false;
-    const result = coreFn((prev: any) => {
-      if (live) return fn(prev);
-      if (hydrated()) {
-        // The handoff run (rule 5: quiet through its duplicate). The gate
-        // only ever flips for an async-iterable compute.
-        live = true;
-        const r = fn(prev);
-        return isAsyncIterable(r) ? wrapFirstYield(r, undefined, prev) : r;
-      }
-      if (adopted) {
-        // Rule 4: the gate is down and an adoption already returned, so a
-        // dependency changed. The recompute released the adopted flight, so
-        // the server's late landing is dropped and its flip never comes.
-        live = true;
-        return fn(prev);
-      }
-      // Adoption; the trace inside detects the compute's shape. Re-entered
-      // by a NotReady retry of the trace (nothing adopted yet), and — for a
-      // non-iterable compute, which never arms — by every later run.
-      let answer: any;
-      try {
-        answer = readSerializedOrCompute(detect, prev, options);
-      } catch (e) {
-        // The trace completed (an async-iterable compute cannot throw
-        // synchronously), so this is the settled rejection — the adopted
-        // answer (rule 3): authority transfers without a handoff run.
-        if (takeover) live = true;
-        throw e;
-      }
-      // Rule 6: a non-iterable compute's adoption is the answer.
-      if (!takeover) return answer;
-      adopted = true;
-      if (answer != null && typeof answer.then === "function")
-        return adoptedAnswerStream(answer, flip, () => (live = true));
-      // Settled, landing synchronously in this run: flip after construction
-      // (creation) or on a microtask (a retry inside a flush).
-      if (creating) landedOnCreate = true;
-      else queueMicrotask(flip);
-      return answer;
-    }, options);
-    creating = false;
-    // The creation flip: the handoff for a synchronously landed answer. An
-    // untraced node (NotReady) has no shape yet, and a non-iterable compute
-    // has nothing to hand off (rule 6).
-    if (landedOnCreate) flip();
-    return result;
+  if (ssrSource === "hybrid" && _hydrateHybridSignal) {
+    const hybridResult = _hydrateHybridSignal(coreFn, fn, options);
+    if (hybridResult !== null) return hybridResult;
   }
 
-  // "server", "hybrid", or undefined — use serialized value from server
-  const aiResult = hydrateSignalFromAsyncIterable(coreFn, fn, options);
-  if (aiResult !== null) return aiResult;
+  if (_hydrateAsyncIterable) {
+    const aiResult = _hydrateAsyncIterable(coreFn, fn, options);
+    if (aiResult !== null) return aiResult;
+  }
 
   return coreFn((prev: any) => readSerializedOrCompute(fn, prev, options, true), options);
 }
@@ -1519,7 +1124,7 @@ function hydratedCreateEffect(compute: any, effectFn: any, options?: any) {
 // memo; compute the same id positionally (peek — the memo consumes the slot).
 // This keeps module identity fully server-side: glob/dynamically composed
 // lazy modules hydrate without a moduleUrl.
-function lazyHydrationLookup<T>(
+export function lazyHydrationLookup<T>(
   comp: (() => T | undefined) | undefined,
   moduleUrl?: string,
   exportName?: string
@@ -1570,20 +1175,10 @@ function lazyHydrationLookup<T>(
 }
 
 export function enableHydration() {
+  _hydrationEnabled = true;
   createRoot = hydratedCreateRoot as any;
-  _createMemo = hydratedCreateMemo;
   createSignal = hydratedCreateSignal as any;
-  _createErrorBoundary = hydratedCreateErrorBoundary;
-  // Generic adapters only: nothing installed here references the store
-  // engine (coreStore/coreOptimisticStore/coreProjection/coreOptimistic) —
-  // the wrappers pass those in, so a hydrating app that never imports a
-  // store primitive shakes the engine entirely.
-  _hydrateSignalLike = hydrateSignalLike;
-  _hydrateStoreLike = hydrateStoreLike;
   createRenderEffect = hydratedCreateRenderEffect as any;
-  _createEffect = hydratedCreateEffect;
-  _createLoadingBoundary = hydratedCreateLoadingBoundary;
-  _lazyHydrationLookup = lazyHydrationLookup;
   sharedConfig.getNextContextId = hydrationGetNextContextId;
   if (IS_DEV) sharedConfig.devPeekNextContextId = hydrationDevPeekNextContextId;
   // Installed here rather than in the sharedConfig literal so CSR bundles
@@ -1772,7 +1367,7 @@ export const createMemo: {
     options?: HydrationMemoOptions<T>
   ): SourceAccessor<T>;
 } = ((...args: any[]) => {
-  return (_createMemo || coreMemo)(...args);
+  return (_hydrationEnabled ? hydratedCreateMemo : coreMemo)(...args);
 }) as any;
 
 /**
@@ -1847,7 +1442,7 @@ export let createSignal: {
  * @internal
  */
 export const createErrorBoundary = ((...args: any[]) =>
-  (_createErrorBoundary || coreErrorBoundary)(...args)) as <T, U>(
+  (_hydrationEnabled ? hydratedCreateErrorBoundary : coreErrorBoundary)(...args)) as <T, U>(
   fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
 ) => Accessor<T | U>;
@@ -1920,8 +1515,8 @@ export const createOptimistic: {
   // adapter slot; passing coreOptimistic in here (instead of a dedicated
   // hydrated impl installed by enableHydration) is what lets the optimistic
   // engine shake out of hydrating bundles that never import this primitive.
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateSignalLike!(coreOptimistic, args[0], args[1])
+  return _hydrationEnabled && typeof args[0] === "function" && sharedConfig.hydrating
+    ? hydrateSignalLike(coreOptimistic, args[0], args[1])
     : (coreOptimistic as Function)(...args);
 }) as any;
 
@@ -1944,8 +1539,8 @@ export const createDeferred: {
 } = ((fn: any, options?: any) =>
   // As createOptimistic: the adapter slot keeps the deferred module out of
   // hydrating bundles that never import this primitive.
-  sharedConfig.hydrating
-    ? _hydrateSignalLike!(coreDeferred, fn, options)
+  _hydrationEnabled && sharedConfig.hydrating
+    ? hydrateSignalLike(coreDeferred, fn, options)
     : coreDeferred(fn, options)) as any;
 
 /**
@@ -1999,8 +1594,8 @@ export const createProjection: {
 } = ((...args: any[]) => {
   // `hydrating` can only be true once enableHydration() installed the
   // adapter slot (see createOptimistic above for the retention story).
-  return sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreProjection, args[0], args[1] ?? {}, args[2])
+  return _hydrationEnabled && sharedConfig.hydrating
+    ? hydrateStoreLike(coreProjection, args[0], args[1] ?? {}, args[2])
     : (coreProjection as Function)(...args);
 }) as any;
 
@@ -2084,8 +1679,8 @@ export const createStore: {
 } = ((...args: any[]) => {
   // `hydrating` can only be true once enableHydration() installed the
   // adapter slot (see createOptimistic above for the retention story).
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreStore, args[0], args[1] ?? {}, args[2])
+  return _hydrationEnabled && typeof args[0] === "function" && sharedConfig.hydrating
+    ? hydrateStoreLike(coreStore, args[0], args[1] ?? {}, args[2])
     : (coreStore as Function)(...args);
 }) as any;
 
@@ -2154,8 +1749,8 @@ export const createOptimisticStore: {
 } = ((...args: any[]) => {
   // `hydrating` can only be true once enableHydration() installed the
   // adapter slot (see createOptimistic above for the retention story).
-  return typeof args[0] === "function" && sharedConfig.hydrating
-    ? _hydrateStoreLike!(coreOptimisticStore, args[0], args[1] ?? {}, args[2])
+  return _hydrationEnabled && typeof args[0] === "function" && sharedConfig.hydrating
+    ? hydrateStoreLike(coreOptimisticStore, args[0], args[1] ?? {}, args[2])
     : (coreOptimisticStore as Function)(...args);
 }) as any;
 
@@ -2284,7 +1879,7 @@ export let createRenderEffect: typeof coreRenderEffect = coreRenderEffect;
  * @description https://docs.solidjs.com/reference/solid-js/reactivity/create-effect
  */
 export const createEffect: typeof coreEffect = ((...args: any[]) =>
-  (_createEffect || coreEffect)(...args)) as typeof coreEffect;
+  (_hydrationEnabled ? hydratedCreateEffect : coreEffect)(...args)) as typeof coreEffect;
 
 // === Loading component ===
 function createBoundaryTrigger(): () => void {
@@ -2910,14 +2505,12 @@ export const createLoadingBoundary = (<T, U>(
   fn: () => T,
   fallback: () => U,
   options?: { on?: () => any }
-): Accessor<T | U> => (_createLoadingBoundary || coreLoadingBoundary)(fn, fallback, options)) as <
-  T,
-  U
->(
-  fn: () => T,
-  fallback: () => U,
-  options?: { on?: () => any }
-) => Accessor<T | U>;
+): Accessor<T | U> =>
+  (_hydrationEnabled ? hydratedCreateLoadingBoundary : coreLoadingBoundary)(
+    fn,
+    fallback,
+    options
+  )) as <T, U>(fn: () => T, fallback: () => U, options?: { on?: () => any }) => Accessor<T | U>;
 
 /** Loads the modules in the boundary's map (`<id>_assets`; none when the
  * server wrote no map) that its content needs before it can claim server

@@ -39,6 +39,86 @@ import {
 } from "@solidjs/signals";
 import * as h from "./hydration.js";
 
+export function applyPatches(target: any, patches: any[]) {
+  for (const patch of patches) {
+    const path = patch[0];
+    let current = target;
+    for (let i = 0; i < path.length - 1; i++) current = current[path[i]];
+    const key = path[path.length - 1];
+    if (patch.length === 1) {
+      Array.isArray(current) ? current.splice(key as number, 1) : delete current[key];
+    } else if (patch.length === 3) {
+      (current as any[]).splice(key as number, 0, patch[1]);
+    } else {
+      current[key] = patch[1];
+    }
+  }
+}
+
+export function forwardIteratorReturn(it: any, value?: any) {
+  const returned = it.return?.(value);
+  return returned && typeof returned.then === "function"
+    ? returned
+    : h.syncThenable(returned ?? { done: true, value });
+}
+
+export function wrapFirstYield(iterable: any, activate?: () => void, quiet?: any) {
+  const srcIt = iterable[Symbol.asyncIterator]();
+  let step = 0;
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next() {
+          if (step === 0) {
+            step = 1;
+            return h.syncThenable({ done: false, value: quiet });
+          }
+          const p = srcIt.next();
+          if (step === 1) {
+            step = 2;
+            return p.then((r: any) => {
+              activate?.();
+              return r.done ? r : { done: false, value: quiet };
+            });
+          }
+          return p;
+        },
+        return(value?: any) {
+          return forwardIteratorReturn(srcIt, value);
+        }
+      };
+    }
+  };
+}
+
+export function adoptedAnswerStream(thenable: any, onLanded: () => void, onRejected: () => void) {
+  let pulled = false;
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next() {
+          if (pulled) {
+            onLanded();
+            return Promise.resolve({ done: true, value: undefined });
+          }
+          pulled = true;
+          return {
+            then(res: any, rej: any) {
+              thenable.then(
+                (v: any) => res({ done: false, value: v }),
+                (e: any) => {
+                  onRejected();
+                  rej(e);
+                }
+              );
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
 function createShadowDraft(realDraft: any, shallow?: boolean) {
   // A shallow store's leaves are raw by contract: copy the root only (#3498).
   const shadow = shallow
@@ -179,7 +259,7 @@ function hydrateStoreFromAsyncIterable(
             setSnapshotCapture(true);
           }
         } else {
-          h.applyPatches(draft, res.value);
+          applyPatches(draft, res.value);
         }
         return { done: false, value: undefined };
       };
@@ -275,7 +355,7 @@ function hydrateStoreFromAsyncIterable(
             },
             return(value?: any) {
               buffered = null;
-              return h.forwardIteratorReturn(srcIt, value);
+              return forwardIteratorReturn(srcIt, value);
             }
           };
         }
@@ -400,7 +480,7 @@ function hydrateStoreLikeFn(
           live = true;
           const { proxy, activate } = createShadowDraft(draft, options?.shallow);
           const r = fn(proxy);
-          if (h.isAsyncIterable(r)) return h.wrapFirstYield(r, activate);
+          if (h.isAsyncIterable(r)) return wrapFirstYield(r, activate);
           if (r != null && typeof r.then === "function") return quietAnswer(r);
           return r;
         }
@@ -436,7 +516,7 @@ function hydrateStoreLikeFn(
         if (!takeover) return answer;
         adopted = true;
         if (answer != null && typeof answer.then === "function")
-          return h.adoptedAnswerStream(answer, flip, () => (live = true));
+          return adoptedAnswerStream(answer, flip, () => (live = true));
         // Settled, landing synchronously in this run. The creation run flips
         // right after construction (below, outside the compute — as the gate
         // always has); a retry run is inside a flush, where the flip must

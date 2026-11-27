@@ -20,14 +20,18 @@ export default defineConfig({
     pool: "threads",
     globals: true,
     // Reader-seat shadow (S0): see packages/web/vite.config.mjs.
-    setupFiles: process.env.SEAT_SHADOW_REPORT
-      ? [resolve(rootDir, "../signals/tests/setup/seat-shadow-report.ts")]
-      : [],
+    setupFiles: [
+      resolve(rootDir, "test/setup-hydration-stream.ts"),
+      ...(process.env.SEAT_SHADOW_REPORT
+        ? [resolve(rootDir, "../signals/tests/setup/seat-shadow-report.ts")]
+        : [])
+    ],
     exclude: ["**/node_modules/**", "archived_tests/**"]
   },
   resolve: {
     conditions: ["development", "browser"],
     alias: {
+      "solid-js/internal/hydration-stream": resolve(rootDir, "src/client/hydration-stream.ts"),
       "solid-js": [resolve(rootDir, "../../packages/solid/src")]
     }
   }
